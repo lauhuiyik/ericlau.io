@@ -1,8 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "export",
-  images: { unoptimized: true },
+  // OpenNext for Cloudflare needs the standalone output
+  output: "standalone",
 };
 
 export default nextConfig;

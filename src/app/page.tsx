@@ -1,65 +1,95 @@
-import Image from "next/image";
+import Link from "next/link";
+import { sections, groupLabels, type Section } from "@/lib/sections";
 
 export default function Home() {
+  const grouped = sections.reduce<Record<Section["group"], Section[]>>(
+    (acc, s) => {
+      (acc[s.group] ??= []).push(s);
+      return acc;
+    },
+    { visual: [], editorial: [], logs: [] }
+  );
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="flex flex-1 flex-col">
+      {/* Top bar */}
+      <header className="flex items-center justify-between px-6 py-6 sm:px-12">
+        <Link
+          href="/"
+          className="font-mono text-xs uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors"
+        >
+          Eric Lau
+        </Link>
+        <a
+          href="mailto:hello@ericlau.io"
+          className="font-mono text-xs uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors"
+        >
+          Contact
+        </a>
+      </header>
+
+      {/* Hero */}
+      <section className="flex flex-1 flex-col justify-center px-6 sm:px-12 py-24 sm:py-32">
+        <h1 className="text-[20vw] sm:text-[18vw] md:text-[15vw] leading-[0.85] font-semibold tracking-[-0.04em]">
+          Creative.
+        </h1>
+        <p className="mt-8 max-w-xl text-base sm:text-lg text-muted leading-relaxed">
+          The work, experiments and notes of Eric Lau.
+        </p>
+      </section>
+
+      {/* Section index */}
+      <section className="border-t border-rule px-6 sm:px-12 py-16 sm:py-24">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-12 md:gap-16">
+          {(Object.keys(grouped) as Section["group"][]).map((group) => (
+            <div key={group} className="flex flex-col gap-6">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+                {groupLabels[group]}
+              </div>
+              <ul className="flex flex-col gap-4">
+                {grouped[group].map((s) => (
+                  <li key={s.slug}>
+                    <Link
+                      href={`/${s.slug}`}
+                      className="group block"
+                    >
+                      <div className="text-2xl sm:text-3xl tracking-tight font-medium text-foreground/90 group-hover:text-foreground transition-colors">
+                        {s.title}
+                      </div>
+                      <div className="text-sm text-muted mt-1">
+                        {s.blurb}
+                      </div>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-rule px-6 sm:px-12 py-8 flex flex-col sm:flex-row gap-4 sm:gap-8 items-start sm:items-center justify-between">
+        <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+          ericlau.io · {new Date().getFullYear()}
+        </div>
+        <div className="flex gap-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
           <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="mailto:hello@ericlau.io"
+            className="hover:text-foreground transition-colors"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
+            Email
           </a>
           <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+            href="https://github.com/lauhuiyik"
             target="_blank"
             rel="noopener noreferrer"
+            className="hover:text-foreground transition-colors"
           >
-            Documentation
+            GitHub
           </a>
         </div>
-      </main>
+      </footer>
     </div>
   );
 }

@@ -13,12 +13,12 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Eric Lau — Creative.",
+  title: "Eric Lau — Multi-format Creative.",
   description:
-    "The work, experiments and notes of Eric Lau — cinematography, photography, animation, industrial design, branding, activation, and a log of AI experiments.",
+    "The work, experiments and notes of Eric Lau.",
   metadataBase: new URL("https://ericlau.io"),
   openGraph: {
-    title: "Eric Lau — Creative.",
+    title: "Eric Lau — Multi-format Creative.",
     description: "The work, experiments and notes of Eric Lau.",
     url: "https://ericlau.io",
     siteName: "Eric Lau",

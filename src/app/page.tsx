@@ -30,10 +30,11 @@ export default function Home() {
 
       {/* Hero */}
       <section className="flex flex-1 flex-col justify-center px-6 sm:px-12 py-24 sm:py-32">
-        <h1 className="text-[20vw] sm:text-[18vw] md:text-[15vw] leading-[0.85] font-semibold tracking-[-0.04em]">
-          Creative.
+        <h1 className="text-[14vw] sm:text-[12vw] md:text-[10vw] leading-[0.88] font-semibold tracking-[-0.04em]">
+          <span className="block">Multi-format</span>
+          <span className="block">Creative.</span>
         </h1>
-        <p className="mt-8 max-w-xl text-base sm:text-lg text-muted leading-relaxed">
+        <p className="mt-10 max-w-xl text-base sm:text-lg text-muted leading-relaxed">
           The work, experiments and notes of Eric Lau.
         </p>
       </section>

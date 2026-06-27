@@ -5,6 +5,11 @@ import { sections } from "@/lib/sections";
 // To add one: drop an index.html into public/experiments/<slug>/, then add an entry here.
 const entries: { slug: string; title: string; note: string }[] = [
   {
+    slug: "japan2026",
+    title: "Japan 2026",
+    note: "A private trip itinerary — Tokyo & Osaka, Aug 2026. Login required.",
+  },
+  {
     slug: "hello",
     title: "Hello, world",
     note: "A demo of dropping a raw HTML file into the site.",

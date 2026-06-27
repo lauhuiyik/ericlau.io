@@ -24,6 +24,9 @@
 .DS_Store
 *.pem
 
+# private experiment — deploy to Cloudflare but keep out of the public repo
+/public/experiments/japan2026/
+
 # debug
 npm-debug.log*
 yarn-debug.log*

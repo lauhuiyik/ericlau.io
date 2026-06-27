@@ -2,6 +2,11 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ericlau-io",
   "main": ".open-next/worker.js",
+  // Serve only via the ericlau.io custom domain. The *.workers.dev and
+  // per-version preview URLs are NOT covered by Cloudflare Access, so they
+  // would bypass the gate on /experiments/japan2026 — disable them.
+  "workers_dev": false,
+  "preview_urls": false,
   "compatibility_date": "2025-03-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": {

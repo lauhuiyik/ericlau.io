@@ -7,6 +7,10 @@
   // would bypass the gate on /experiments/japan2026 — disable them.
   "workers_dev": false,
   "preview_urls": false,
+  // Deploy target: the custom domain. Without this, disabling workers_dev
+  // leaves wrangler with "No deploy targets" — it uploads a version but never
+  // promotes it to the live domain.
+  "routes": [{ "pattern": "ericlau.io", "custom_domain": true }],
   "compatibility_date": "2025-03-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": {

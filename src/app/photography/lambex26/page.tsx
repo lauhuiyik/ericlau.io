@@ -1,12 +1,9 @@
 import Link from "next/link";
 
-const images = [
-  { src: "/photography/lambex26/01.jpg", alt: "Rabobank lanyards at registration" },
-  { src: "/photography/lambex26/02.jpg", alt: "Attendee interaction at the LambEx kiosk" },
-  { src: "/photography/lambex26/03.jpg", alt: "Junior Jumbucks group session" },
-  { src: "/photography/lambex26/04.jpg", alt: "Student workshop" },
-  { src: "/photography/lambex26/05.jpg", alt: "Prototype presentation" },
-];
+const images = Array.from({ length: 37 }, (_, i) => ({
+  src: `/photography/lambex26/LAMBEX26-${i + 1}.JPG`,
+  alt: `LambEx 2026 — image ${i + 1}`,
+}));
 
 export default function LambEx26() {
   return (

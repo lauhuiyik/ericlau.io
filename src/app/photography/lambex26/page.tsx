@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { GalleryImage } from "./_gallery-image";
 
 const images = Array.from({ length: 37 }, (_, i) => ({
   src: `/photography/lambex26/LAMBEX26-${i + 1}.JPG`,
@@ -35,15 +36,7 @@ export default function LambEx26() {
       <section className="px-6 sm:px-12 pb-24">
         <div className="columns-1 sm:columns-2 gap-3">
           {images.map((img, i) => (
-            <div key={i} className="mb-3 break-inside-avoid">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={img.src}
-                alt={img.alt}
-                className="w-full block"
-                loading={i === 0 ? "eager" : "lazy"}
-              />
-            </div>
+            <GalleryImage key={i} src={img.src} alt={img.alt} eager={i < 2} />
           ))}
         </div>
       </section>

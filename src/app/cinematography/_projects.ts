@@ -48,4 +48,28 @@ export const projects: Project[] = [
     client: "LF Logistics",
     vimeoId: "851513368",
   },
+  {
+    slug: "realestate-showreel",
+    title: "Real Estate Showreel",
+    client: "Showreel",
+    vimeoId: "747501390",
+  },
+  {
+    slug: "property-developer-showreel",
+    title: "Property Developer Showreel",
+    client: "Showreel",
+    vimeoId: "747501345",
+  },
+  {
+    slug: "private-home-sale-showreel",
+    title: "Private Home Sale Showreel",
+    client: "Showreel",
+    vimeoId: "747501313",
+  },
+  {
+    slug: "home-builder-showreel",
+    title: "Home Builder Showreel",
+    client: "Showreel",
+    vimeoId: "747501248",
+  },
 ];

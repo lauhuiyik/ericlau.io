@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { projects } from "./_projects";
+import { GalleryCard } from "./_gallery-card";
 
 export default function Cinematography() {
   return (
@@ -28,27 +29,18 @@ export default function Cinematography() {
         </p>
       </section>
 
-      <section className="border-t border-rule px-6 sm:px-12 py-8">
-        <ul className="flex flex-col divide-y divide-rule">
+      <section className="border-t border-rule px-6 sm:px-12 py-12 pb-24">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-12">
           {projects.map((p) => (
-            <li key={p.slug}>
-              <Link
-                href={`/cinematography/${p.slug}`}
-                className="group flex items-baseline justify-between gap-8 py-8"
-              >
-                <div>
-                  <div className="text-2xl sm:text-3xl font-medium tracking-tight group-hover:text-muted transition-colors">
-                    {p.title}
-                  </div>
-                  <div className="mt-2 text-sm text-muted">{p.client}</div>
-                </div>
-                <div className="font-mono text-xs text-muted shrink-0">
-                  ↗
-                </div>
-              </Link>
-            </li>
+            <GalleryCard
+              key={p.slug}
+              slug={p.slug}
+              title={p.title}
+              client={p.client}
+              vimeoId={p.vimeoId}
+            />
           ))}
-        </ul>
+        </div>
       </section>
 
       <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">

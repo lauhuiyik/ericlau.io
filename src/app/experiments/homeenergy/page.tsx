@@ -3,7 +3,7 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import {
   type DailyTotal,
   type DateRange,
-  costToday,
+  computeCost,
   getChargeSessionsForDate,
   getDailyTotals,
   getHomeChargeKwhByDate,
@@ -85,6 +85,78 @@ function Tile({
   );
 }
 
+function CostLine({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <span className="text-muted flex items-center gap-2">
+        {color && <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: color }} />}
+        {label}
+      </span>
+      <span className="text-foreground/90 shrink-0">{value}</span>
+    </div>
+  );
+}
+
+/** One solar array, as a self-contained box with its own live output. */
+function ArrayBox({
+  name,
+  hardware,
+  rated,
+  liveKw,
+  todayKwh,
+  ratedKw,
+  extra,
+  offline = false,
+}: {
+  name: string;
+  hardware: string;
+  rated: string;
+  liveKw: number | null;
+  todayKwh: number | null;
+  ratedKw: number;
+  extra?: string;
+  offline?: boolean;
+}) {
+  const utilisation =
+    liveKw != null && ratedKw > 0 ? Math.min(100, Math.max(0, (liveKw / ratedKw) * 100)) : 0;
+  return (
+    <div className="border border-rule p-6 flex flex-col gap-4">
+      <div className="flex items-baseline justify-between gap-4">
+        <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-foreground/80">
+          {name}
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">{rated}</div>
+      </div>
+
+      <div className="flex items-baseline gap-1.5">
+        <span
+          className="text-5xl sm:text-6xl font-semibold tracking-[-0.02em]"
+          style={{ color: offline ? undefined : C.solar }}
+        >
+          {offline ? "—" : kw(liveKw)}
+        </span>
+        <span className="text-sm text-muted">kW now</span>
+      </div>
+
+      {/* share of this array's rated capacity currently being produced */}
+      <div className="h-1 w-full bg-rule overflow-hidden">
+        <div className="h-full" style={{ width: `${utilisation}%`, background: C.solar }} />
+      </div>
+
+      <div className="flex flex-col gap-1 text-sm">
+        <div className="text-muted">{hardware}</div>
+        {offline ? (
+          <div style={{ color: C.grid }}>No data — this array isn’t reporting</div>
+        ) : (
+          <div className="text-muted">
+            {kwh(todayKwh)} kWh today{extra ? ` · ${extra}` : ""}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="flex flex-col gap-1.5 py-5">
@@ -154,9 +226,7 @@ export default async function Page({
       ? sessions.reduce((s, c) => s + (c.energy_added_kwh ?? 0), 0)
       : daily.reduce((s, d) => s + d.homeChargeKwh, 0);
 
-  const costLatestForExport =
-    range === "day" ? dayLatest : costSeries.length ? costSeries[costSeries.length - 1] : null;
-  const cost = costToday(costSeries, costLatestForExport, tariff);
+  const cost = computeCost(costSeries, tariff);
   const gridShare = consumed > 0 ? Math.min(100, (imported / consumed) * 100) : null;
 
   let busiest: { kw: number; time: string; date?: string } | null = null;
@@ -175,10 +245,18 @@ export default async function Page({
   const gExp = latestGlobal?.grid_export_kw ?? 0;
   const gridValue = gImp > 0.05 ? kw(gImp) : gExp > 0.05 ? kw(gExp) : "0.0";
   const gridSub = gImp > 0.05 ? "Importing" : gExp > 0.05 ? "Exporting" : "Balanced";
-  const gridColor = gImp > 0.05 ? C.grid : gExp > 0.05 ? C.battery : undefined;
+  // Red while drawing from the grid, green while exporting to it.
+  const gridColor = gImp > 0.05 ? C.grid : gExp > 0.05 ? C.self : undefined;
 
   const rangeLabel =
     range === "day" ? (date === today ? "Today" : date) : `${win.start} → ${win.end}`;
+
+  // Which inverters reported in the most recent sample. When one is missing,
+  // solar totals AND the derived house load are understated, so say so plainly
+  // rather than presenting a partial number as if it were complete.
+  const reported = (latestGlobal?.sources ?? "").split(",").filter(Boolean);
+  const missingSources = ["anker", "growatt"].filter((s) => !reported.includes(s));
+  const showPartialWarning = isLiveToday && latestGlobal != null && missingSources.length > 0;
 
   return (
     <div className="flex flex-1 flex-col">
@@ -225,6 +303,24 @@ export default async function Page({
         </div>
       </section>
 
+      {showPartialWarning && (
+        <section className="border-t border-rule px-6 sm:px-12 py-5">
+          <div className="flex items-start gap-3 text-sm">
+            <span style={{ color: C.grid }} className="font-mono text-[10px] uppercase tracking-[0.18em] pt-1">
+              Incomplete
+            </span>
+            <p className="text-muted max-w-2xl">
+              The <span className="text-foreground">{missingSources.join(" and ")}</span> inverter
+              {missingSources.length > 1 ? "s are" : " is"} not reporting in the latest reading, so
+              solar generation and house load below are{" "}
+              <span className="text-foreground">understated</span> — house load is derived from all
+              generation sources, so a missing array pulls it down too. Grid import/export and cost
+              are unaffected.
+            </p>
+          </div>
+        </section>
+      )}
+
       {!hasData ? (
         <section className="px-6 sm:px-12 py-16 border-t border-rule">
           <p className="text-muted">
@@ -250,7 +346,8 @@ export default async function Page({
                   label="House load"
                   value={kw(latestGlobal.house_kw)}
                   unit="kW"
-                  sub="Whole-home consumption"
+                  color={C.house}
+                  sub="Drawing right now"
                 />
               </div>
               <div className="pb-8 -mt-2">
@@ -272,8 +369,63 @@ export default async function Page({
               <Stat label="Self-powered" value={pct(selfPowered)} sub="of consumption" />
               <Stat label="Imported" value={`${kwh(imported)}`} sub="kWh from grid" />
               <Stat label="Exported" value={`${kwh(exported)}`} sub="kWh to grid" />
-              <Stat label="Grid cost" value={money(cost.net)} sub="est. (ToU)" />
+              <Stat label="Tesla charged" value={`${kwh(homeChargeKwh)}`} sub="kWh at home" />
             </div>
+          </section>
+
+          {/* What it costs, and how that number is built */}
+          <section className="border-t border-rule px-6 sm:px-12 py-10">
+            <div className="flex items-baseline justify-between gap-4 mb-6 flex-wrap">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+                Cost · {rangeLabel}
+              </div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
+                {cost.days} day{cost.days === 1 ? "" : "s"} · Lumo time-of-use
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-end gap-8 sm:gap-12">
+              <div className="flex flex-col gap-1">
+                <div className="text-5xl sm:text-6xl font-semibold tracking-[-0.02em]">
+                  {money(cost.net)}
+                </div>
+                <div className="text-sm text-muted">net cost for this period</div>
+              </div>
+
+              <div className="flex-1 flex flex-col gap-2 font-mono text-[11px] sm:text-xs">
+                <CostLine
+                  label={`Peak · ${kwh(cost.peakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
+                  value={money(cost.peakKwh * tariff.peakRate)}
+                  color={C.grid}
+                />
+                <CostLine
+                  label={`Off-peak · ${kwh(cost.offPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
+                  value={money(cost.offPeakKwh * tariff.offPeakRate)}
+                  color={C.grid}
+                />
+                <CostLine
+                  label={`Supply · ${cost.days} × $${tariff.supplyPerDay.toFixed(5)}/day`}
+                  value={money(cost.supply)}
+                />
+                <CostLine
+                  label={`Export credit · ${kwh(cost.exportKwh)} kWh @ $${tariff.feedIn.toFixed(3)}`}
+                  value={`−${money(cost.exportCredit)}`}
+                  color={C.self}
+                />
+                <div className="border-t border-rule mt-1 pt-2 flex justify-between">
+                  <span className="text-muted uppercase tracking-[0.18em]">Net</span>
+                  <span className="text-foreground">{money(cost.net)}</span>
+                </div>
+              </div>
+            </div>
+
+            {cost.hasGaps && (
+              <p className="mt-6 text-xs text-muted max-w-2xl">
+                Some of this period had gaps between readings. Total kWh is still exact (it comes
+                from the meter’s own cumulative counter), but for those stretches the peak vs
+                off-peak split is apportioned by elapsed time rather than measured directly.
+              </p>
+            )}
           </section>
 
           {/* Power / generation chart */}
@@ -296,7 +448,7 @@ export default async function Page({
           <section className="border-t border-rule px-6 sm:px-12 py-10">
             <div className="flex items-center gap-6 mb-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted flex-wrap">
               <span className="flex items-center gap-2">
-                <span className="inline-block w-3 h-2" style={{ background: C.battery }} /> Self · solar+battery
+                <span className="inline-block w-3 h-2" style={{ background: C.self }} /> Self · solar+battery
               </span>
               <span className="flex items-center gap-2">
                 <span className="inline-block w-3 h-2" style={{ background: C.grid }} /> Grid
@@ -325,30 +477,31 @@ export default async function Page({
             </div>
           </section>
 
-          {/* Per-array breakdown — only meaningful for "today" live view */}
+          {/* Two solar arrays, side by side, each with its own live output */}
           {isLiveToday && latestGlobal && (
             <section className="border-t border-rule px-6 sm:px-12 py-10">
-              <div className="grid sm:grid-cols-2 gap-8">
-                <div className="flex flex-col gap-2">
-                  <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                    New array · Anker SOLIX X1 · 6.16 kW
-                  </div>
-                  <div className="text-3xl font-semibold" style={{ color: C.solar }}>
-                    {kw(latestGlobal.solar_new_kw)} <span className="text-sm text-muted">kW now</span>
-                  </div>
-                  <div className="text-sm text-muted">
-                    {kwh(latestGlobal.solar_new_kwh_today)} kWh today · battery {pct(latestGlobal.battery_soc)}
-                  </div>
-                </div>
-                <div className="flex flex-col gap-2">
-                  <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                    Original array · Growatt · 6.6 kW
-                  </div>
-                  <div className="text-3xl font-semibold" style={{ color: C.solar }}>
-                    {kw(latestGlobal.solar_old_kw)} <span className="text-sm text-muted">kW now</span>
-                  </div>
-                  <div className="text-sm text-muted">{kwh(latestGlobal.solar_old_kwh_today)} kWh today</div>
-                </div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted mb-6">
+                Solar arrays · generating right now
+              </div>
+              <div className="grid sm:grid-cols-2 gap-4 sm:gap-6">
+                <ArrayBox
+                  name="New array"
+                  hardware="Anker SOLIX X1"
+                  rated="6.16 kW"
+                  liveKw={latestGlobal.solar_new_kw}
+                  todayKwh={latestGlobal.solar_new_kwh_today}
+                  ratedKw={6.16}
+                  extra={`Battery ${pct(latestGlobal.battery_soc)}`}
+                />
+                <ArrayBox
+                  name="Original array"
+                  hardware="Growatt 5000TL3-S"
+                  rated="6.6 kW"
+                  liveKw={latestGlobal.solar_old_kw}
+                  todayKwh={latestGlobal.solar_old_kwh_today}
+                  ratedKw={6.6}
+                  offline={latestGlobal.solar_old_kw == null}
+                />
               </div>
             </section>
           )}

@@ -36,5 +36,7 @@ jobs:
           GROWATT_PASSWORD: ${{ secrets.GROWATT_PASSWORD }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           INGEST_URL: ${{ secrets.INGEST_URL }}
+          # Growatt 403s GitHub Actions IPs; route those calls via the Cloudflare Worker.
+          GROWATT_PROXY_URL: ${{ secrets.GROWATT_PROXY_URL }}
         run: python energy/collector.py --once
 # resync trigger 2026-07-29T05:00:54Z

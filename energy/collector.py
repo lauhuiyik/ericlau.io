@@ -52,7 +52,7 @@ def load_config() -> dict:
             cfg[k.strip()] = v.strip()
     for k in (
         "ANKER_EMAIL", "ANKER_PASSWORD", "GROWATT_USERNAME", "GROWATT_PASSWORD",
-        "INGEST_SECRET", "INGEST_URL", "ANKER_COUNTRY",
+        "INGEST_SECRET", "INGEST_URL", "ANKER_COUNTRY", "GROWATT_PROXY_URL",
     ):
         if os.environ.get(k):
             cfg[k] = os.environ[k]
@@ -85,8 +85,20 @@ def parse_qty(s) -> float | None:
 
 
 def collect_growatt(cfg: dict) -> dict:
-    """Original 6.6 kW array via Growatt ShinePhone API (blocking)."""
+    """Original 6.6 kW array via Growatt ShinePhone API (blocking).
+
+    Growatt returns 403 to datacenter IPs (notably GitHub Actions runners), so
+    when GROWATT_PROXY_URL is set we send the same requests through a small
+    Cloudflare Worker whose egress Growatt does accept. The protocol handling
+    is unchanged — only the transport hop differs.
+    """
     api = growattServer.GrowattApi(add_random_user_id=True)
+    proxy = cfg.get("GROWATT_PROXY_URL")
+    if proxy:
+        api.server_url = proxy if proxy.endswith("/") else proxy + "/"
+        secret = cfg.get("INGEST_SECRET", "")
+        if secret:
+            api.session.headers.update({"x-proxy-secret": secret})
     login = api.login(cfg["GROWATT_USERNAME"], cfg["GROWATT_PASSWORD"])
     if isinstance(login, dict) and not login.get("success", True):
         raise RuntimeError(f"growatt login failed: {login.get('msg')}")

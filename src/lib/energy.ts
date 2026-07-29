@@ -271,32 +271,129 @@ export async function getChargeSessionsForDate(
     });
 }
 
+export function minutesOfDay(localTime: string): number {
+  const [hh, mm] = localTime.split(":").map(Number);
+  return hh * 60 + mm;
+}
+
+/** Fraction of the window [startMin,endMin) that falls inside the peak price
+ * window. Used to apportion a block of grid import across peak/off-peak when
+ * the block spans a tariff boundary (or a gap in readings). */
+function peakFraction(startMin: number, endMin: number, t: Tariff): number {
+  const total = endMin - startMin;
+  if (total <= 0) return isPeak(minToTimeString(startMin), t) ? 1 : 0;
+  const bands: [number, number][] =
+    t.peakStartHour <= t.peakEndHour
+      ? [[t.peakStartHour * 60, t.peakEndHour * 60]]
+      : [
+          [t.peakStartHour * 60, 1440],
+          [0, t.peakEndHour * 60],
+        ];
+  let peak = 0;
+  for (const [bs, be] of bands) {
+    const lo = Math.max(startMin, bs);
+    const hi = Math.min(endMin, be);
+    if (hi > lo) peak += hi - lo;
+  }
+  return peak / total;
+}
+
+function minToTimeString(min: number): string {
+  const h = Math.floor(min / 60) % 24;
+  const m = Math.round(min % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+export type CostBreakdown = {
+  importCost: number;
+  exportCredit: number;
+  supply: number;
+  net: number;
+  peakKwh: number;
+  offPeakKwh: number;
+  importKwh: number;
+  exportKwh: number;
+  days: number;
+  /** True if any priced block spans a >20 min gap in readings — the kWh total
+   * is still correct (it comes from the meter's own cumulative counter), but
+   * the peak/off-peak split for that block is apportioned by elapsed time
+   * rather than measured directly. */
+  hasGaps: boolean;
+};
+
 /**
- * Cost accrued today from the tracked readings. Grid import is priced by
- * time-of-use using the delta between consecutive running totals; export is
- * credited at the feed-in rate; the fixed daily supply charge is added. Also
- * returns peak/off-peak grid kWh split. Accurate once the collector runs
- * continuously; before that it only covers the polled period.
+ * Price grid usage over an arbitrary set of readings (one day, or many).
+ *
+ * Each reading carries counters that are cumulative since local midnight, so
+ * a day's usage is reconstructed as: the first reading's value (everything
+ * from midnight up to that reading) plus the positive deltas between
+ * consecutive readings. Working per-day matters because those counters reset
+ * at midnight — treating a multi-day series as one sequence would discard
+ * each day's opening block and mis-handle the reset.
+ *
+ * Each block is split across peak/off-peak in proportion to the time it
+ * covers, so a block straddling 15:00 (or spanning a collector outage) is
+ * priced sensibly instead of being dumped entirely into one rate.
  */
-export function costToday(series: Reading[], latest: Reading | null, t: Tariff) {
-  let importCost = 0;
+export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
+  const byDate = new Map<string, Reading[]>();
+  for (const r of readings) {
+    const arr = byDate.get(r.local_date);
+    if (arr) arr.push(r);
+    else byDate.set(r.local_date, [r]);
+  }
+
   let peakKwh = 0;
   let offPeakKwh = 0;
-  for (let i = 1; i < series.length; i++) {
-    const prev = series[i - 1].grid_import_kwh_today ?? 0;
-    const cur = series[i].grid_import_kwh_today ?? 0;
-    const delta = Math.max(0, cur - prev);
-    if (isPeak(series[i].local_time, t)) {
-      peakKwh += delta;
-      importCost += delta * t.peakRate;
-    } else {
-      offPeakKwh += delta;
-      importCost += delta * t.offPeakRate;
+  let importKwh = 0;
+  let exportKwh = 0;
+  let hasGaps = false;
+
+  for (const rows of byDate.values()) {
+    const imp = rows
+      .filter((r) => r.grid_import_kwh_today != null)
+      .sort((a, b) => a.ts - b.ts);
+
+    if (imp.length > 0) {
+      // midnight -> first reading of the day
+      const first = imp[0];
+      const firstKwh = first.grid_import_kwh_today ?? 0;
+      const firstMin = minutesOfDay(first.local_time);
+      if (firstKwh > 0) {
+        const frac = peakFraction(0, firstMin, t);
+        peakKwh += firstKwh * frac;
+        offPeakKwh += firstKwh * (1 - frac);
+        importKwh += firstKwh;
+        if (firstMin > 20) hasGaps = true;
+      }
+      // deltas between consecutive readings
+      for (let i = 1; i < imp.length; i++) {
+        const delta = Math.max(
+          0,
+          (imp[i].grid_import_kwh_today ?? 0) - (imp[i - 1].grid_import_kwh_today ?? 0),
+        );
+        const a = minutesOfDay(imp[i - 1].local_time);
+        const b = minutesOfDay(imp[i].local_time);
+        if (b - a > 20) hasGaps = true;
+        if (delta === 0) continue;
+        const frac = peakFraction(a, b, t);
+        peakKwh += delta * frac;
+        offPeakKwh += delta * (1 - frac);
+        importKwh += delta;
+      }
     }
+
+    // Export is read straight off the day's highest cumulative value, so it
+    // needs no gap handling.
+    let maxExp = 0;
+    for (const r of rows) maxExp = Math.max(maxExp, r.grid_export_kwh_today ?? 0);
+    exportKwh += maxExp;
   }
-  const exportKwh = latest?.grid_export_kwh_today ?? 0;
+
+  const importCost = peakKwh * t.peakRate + offPeakKwh * t.offPeakRate;
   const exportCredit = exportKwh * t.feedIn;
-  const supply = t.supplyPerDay;
+  const days = byDate.size;
+  const supply = t.supplyPerDay * days; // one supply charge PER DAY in range
   return {
     importCost,
     exportCredit,
@@ -304,5 +401,9 @@ export function costToday(series: Reading[], latest: Reading | null, t: Tariff) 
     net: importCost + supply - exportCredit,
     peakKwh,
     offPeakKwh,
+    importKwh,
+    exportKwh,
+    days,
+    hasGaps,
   };
 }

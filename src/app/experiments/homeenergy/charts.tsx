@@ -4,11 +4,12 @@ import { useRef, useState } from "react";
 import type { ChargeSession, DailyTotal, Reading, Tariff } from "@/lib/energy";
 
 export const C = {
-  solar: "#f5b301",
-  battery: "#4ade80",
-  grid: "#f87171",
-  house: "#f5f5f4",
-  charge: "#38bdf8",
+  solar: "#f5b301", // yellow — solar generation
+  battery: "#60a5fa", // blue — battery state of charge
+  self: "#4ade80", // green — load covered by own solar/battery, and grid export
+  grid: "#f87171", // red — load drawn from the grid
+  house: "#fb923c", // orange — whole-home consumption
+  charge: "#c084fc", // violet — Tesla charging (kept clear of battery blue)
 };
 
 const fmt2 = (n: number) => n.toFixed(2);
@@ -399,11 +400,11 @@ export function GridRelianceChartDay({
             {minToTime(t)}
           </text>
         ))}
-        {greenArea && <path d={greenArea} fill={C.battery} fillOpacity={0.5} stroke="none" />}
+        {greenArea && <path d={greenArea} fill={C.self} fillOpacity={0.5} stroke="none" />}
         {redBand && <path d={redBand} fill={C.grid} fillOpacity={0.5} stroke="none" />}
         {pts.length === 1 && (
           <>
-            <rect x={x(pts[0].min) - 2} y={y(pts[0].self)} width={4} height={base - y(pts[0].self)} fill={C.battery} />
+            <rect x={x(pts[0].min) - 2} y={y(pts[0].self)} width={4} height={base - y(pts[0].self)} fill={C.self} />
             <rect x={x(pts[0].min) - 2} y={y(pts[0].house)} width={4} height={y(pts[0].self) - y(pts[0].house)} fill={C.grid} />
           </>
         )}
@@ -413,7 +414,7 @@ export function GridRelianceChartDay({
         {nearest && (
           <>
             <line x1={x(nearest.min)} x2={x(nearest.min)} y1={padT} y2={base} stroke="#737373" strokeWidth={1} strokeDasharray="2 3" />
-            <circle cx={x(nearest.min)} cy={y(nearest.self)} r={3.5} fill={C.battery} />
+            <circle cx={x(nearest.min)} cy={y(nearest.self)} r={3.5} fill={C.self} />
             <circle cx={x(nearest.min)} cy={y(nearest.house)} r={3.5} fill={C.grid} />
           </>
         )}
@@ -424,7 +425,7 @@ export function GridRelianceChartDay({
       {nearest && !dragPreviewVX && (
         <Tooltip leftPct={(x(nearest.min) / W) * 100}>
           <div className="text-foreground mb-1">{minToTime(nearest.min)}</div>
-          <TipRow color={C.battery} label="Self" value={`${fmt2(nearest.self)} kW`} />
+          <TipRow color={C.self} label="Self" value={`${fmt2(nearest.self)} kW`} />
           <TipRow color={C.grid} label="Grid" value={`${fmt2(nearest.grid)} kW`} />
           {activeCharge && <TipRow color={C.charge} label="Charging" value={`${fmt2(activeCharge.kw)} kW`} />}
         </Tooltip>
@@ -555,7 +556,7 @@ export function GridRelianceChartRange({ daily }: { daily: DailyTotal[] }) {
           const op = nearestIdx === i ? 0.7 : 0.5;
           return (
             <g key={d.date}>
-              <rect x={bx} y={y(d.selfKwh)} width={bwid} height={base - y(d.selfKwh)} fill={C.battery} fillOpacity={op} />
+              <rect x={bx} y={y(d.selfKwh)} width={bwid} height={base - y(d.selfKwh)} fill={C.self} fillOpacity={op} />
               <rect
                 x={bx}
                 y={y(d.selfKwh + d.gridImportKwh)}
@@ -578,7 +579,7 @@ export function GridRelianceChartRange({ daily }: { daily: DailyTotal[] }) {
       {nearest && nearestIdx != null && (
         <Tooltip leftPct={(xCenter(nearestIdx) / W) * 100}>
           <div className="text-foreground mb-1">{nearest.date}</div>
-          <TipRow color={C.battery} label="Self" value={`${fmt2(nearest.selfKwh)} kWh`} />
+          <TipRow color={C.self} label="Self" value={`${fmt2(nearest.selfKwh)} kWh`} />
           <TipRow color={C.grid} label="Grid" value={`${fmt2(nearest.gridImportKwh)} kWh`} />
           <TipRow color={C.charge} label="Tesla" value={`${fmt2(nearest.homeChargeKwh)} kWh`} />
         </Tooltip>

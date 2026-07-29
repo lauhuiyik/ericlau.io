@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "ericlau-energy-cron-pinger",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-01",
+  // Fires every 5 min via Cloudflare's Cron Triggers (reliable) instead of
+  // relying on GitHub Actions' own `schedule:` trigger, which failed to fire
+  // autonomously. This Worker just calls GitHub's workflow_dispatch API.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -87,6 +87,11 @@ export function melbNow(now: Date = new Date()): { date: string; time: string } 
   return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
 }
 
+/** Which Australia/Melbourne local calendar date a unix-seconds timestamp falls on. */
+export function melbDateFromTs(ts: number): string {
+  return melbNow(new Date(ts * 1000)).date;
+}
+
 export function isPeak(localTime: string, t: Tariff): boolean {
   const h = Number(localTime.slice(0, 2));
   // Handle windows that wrap past midnight (e.g. 22–6) as well as normal ones.
@@ -101,70 +106,169 @@ export async function getLatest(db: D1Database): Promise<Reading | null> {
   );
 }
 
-export type ChargeSummary = {
-  totalSessions: number;
-  homeSessions: number;
-  totalKwh: number;
-  homeKwh: number;
-  totalCost: number;
-  first: string | null;
-  last: string | null;
-  byMonth: { month: string; homeKwh: number; awayKwh: number }[];
-};
+export type DateRange = "day" | "week" | "month";
 
-export async function getChargeSummary(db: D1Database): Promise<ChargeSummary> {
-  const overall = await db
-    .prepare(
-      `SELECT COUNT(*) n, SUM(at_home) home_n,
-              ROUND(SUM(energy_added_kwh),1) total_kwh,
-              ROUND(SUM(CASE WHEN at_home=1 THEN energy_added_kwh ELSE 0 END),1) home_kwh,
-              ROUND(SUM(cost_aud),2) total_cost,
-              MIN(local_date) first, MAX(local_date) last
-       FROM tesla_charges`,
-    )
-    .first<{
-      n: number;
-      home_n: number | null;
-      total_kwh: number | null;
-      home_kwh: number | null;
-      total_cost: number | null;
-      first: string | null;
-      last: string | null;
-    }>();
-
-  const months = await db
-    .prepare(
-      `SELECT substr(local_date,1,7) month,
-              ROUND(SUM(CASE WHEN at_home=1 THEN energy_added_kwh ELSE 0 END),1) home_kwh,
-              ROUND(SUM(CASE WHEN at_home=0 THEN energy_added_kwh ELSE 0 END),1) away_kwh
-       FROM tesla_charges
-       GROUP BY month
-       ORDER BY month ASC`,
-    )
-    .all<{ month: string; home_kwh: number | null; away_kwh: number | null }>();
-
-  return {
-    totalSessions: overall?.n ?? 0,
-    homeSessions: overall?.home_n ?? 0,
-    totalKwh: overall?.total_kwh ?? 0,
-    homeKwh: overall?.home_kwh ?? 0,
-    totalCost: overall?.total_cost ?? 0,
-    first: overall?.first ?? null,
-    last: overall?.last ?? null,
-    byMonth: (months.results ?? []).map((m) => ({
-      month: m.month,
-      homeKwh: m.home_kwh ?? 0,
-      awayKwh: m.away_kwh ?? 0,
-    })),
-  };
+/** Shift a 'YYYY-MM-DD' local-calendar date by `days` (may be negative). Pure
+ * calendar-date arithmetic — deliberately not timezone-aware beyond the string. */
+export function shiftDate(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }
 
-export async function getTodaySeries(db: D1Database, date: string): Promise<Reading[]> {
+/** Inclusive [start, end] local-date window for a range anchored at `date`. */
+export function rangeWindow(range: DateRange, date: string): { start: string; end: string } {
+  if (range === "day") return { start: date, end: date };
+  if (range === "week") return { start: shiftDate(date, -6), end: date };
+  return { start: shiftDate(date, -29), end: date }; // month ≈ trailing 30 days
+}
+
+export function isFutureLocalDate(date: string, today: string): boolean {
+  return date > today;
+}
+
+export async function getReadingsForDate(db: D1Database, date: string): Promise<Reading[]> {
+  return getReadingsInRange(db, date, date);
+}
+
+export async function getReadingsInRange(
+  db: D1Database,
+  start: string,
+  end: string,
+): Promise<Reading[]> {
   const res = await db
-    .prepare("SELECT * FROM readings WHERE local_date = ? ORDER BY ts ASC")
-    .bind(date)
+    .prepare("SELECT * FROM readings WHERE local_date BETWEEN ? AND ? ORDER BY ts ASC")
+    .bind(start, end)
     .all<Reading>();
   return res.results ?? [];
+}
+
+export type DailyTotal = {
+  date: string;
+  generatedKwh: number;
+  consumedKwh: number;
+  gridImportKwh: number;
+  gridExportKwh: number;
+  selfKwh: number;
+  homeChargeKwh: number;
+};
+
+/**
+ * One row per local_date in [start,end], using the day's final running kWh
+ * totals (each reading carries a cumulative-since-midnight value, so the max
+ * for a date IS that day's total — no need to sum deltas).
+ */
+export async function getDailyTotals(
+  db: D1Database,
+  start: string,
+  end: string,
+): Promise<DailyTotal[]> {
+  const rows = await db
+    .prepare(
+      `SELECT local_date,
+              MAX(solar_new_kwh_today) sn, MAX(solar_old_kwh_today) so,
+              MAX(grid_import_kwh_today) gi, MAX(grid_export_kwh_today) ge,
+              MAX(house_kwh_today) house
+       FROM readings
+       WHERE local_date BETWEEN ? AND ?
+       GROUP BY local_date
+       ORDER BY local_date ASC`,
+    )
+    .bind(start, end)
+    .all<{
+      local_date: string;
+      sn: number | null;
+      so: number | null;
+      gi: number | null;
+      ge: number | null;
+      house: number | null;
+    }>();
+
+  const charge = await getHomeChargeKwhByDate(db, start, end);
+  const chargeByDate = new Map(charge.map((c) => [c.date, c.kwh]));
+
+  return (rows.results ?? []).map((r) => {
+    const generatedKwh = (r.sn ?? 0) + (r.so ?? 0);
+    const consumedKwh = r.house ?? 0;
+    const gridImportKwh = r.gi ?? 0;
+    return {
+      date: r.local_date,
+      generatedKwh,
+      consumedKwh,
+      gridImportKwh,
+      gridExportKwh: r.ge ?? 0,
+      selfKwh: Math.max(0, consumedKwh - gridImportKwh),
+      homeChargeKwh: chargeByDate.get(r.local_date) ?? 0,
+    };
+  });
+}
+
+export async function getHomeChargeKwhByDate(
+  db: D1Database,
+  start: string,
+  end: string,
+): Promise<{ date: string; kwh: number }[]> {
+  const res = await db
+    .prepare(
+      `SELECT local_date date, ROUND(SUM(energy_added_kwh),2) kwh
+       FROM tesla_charges
+       WHERE at_home = 1 AND local_date BETWEEN ? AND ?
+       GROUP BY local_date
+       ORDER BY local_date ASC`,
+    )
+    .bind(start, end)
+    .all<{ date: string; kwh: number | null }>();
+  return (res.results ?? []).map((r) => ({ date: r.date, kwh: r.kwh ?? 0 }));
+}
+
+export type ChargeSession = {
+  id: string;
+  started_ts: number;
+  ended_ts: number | null;
+  energy_added_kwh: number | null;
+  at_home: number;
+  avgPowerKw: number | null;
+};
+
+/** Home charging sessions overlapping a single local date, with an average
+ * power (energy ÷ duration) — an approximation until live Fleet API power
+ * data lands; there is no per-minute charge-power reading yet. */
+export async function getChargeSessionsForDate(
+  db: D1Database,
+  date: string,
+): Promise<ChargeSession[]> {
+  // A session starting the day before can still run past midnight into `date`.
+  const res = await db
+    .prepare(
+      `SELECT id, started_ts, ended_ts, energy_added_kwh, at_home
+       FROM tesla_charges
+       WHERE at_home = 1 AND local_date BETWEEN ? AND ?
+       ORDER BY started_ts ASC`,
+    )
+    .bind(shiftDate(date, -1), date)
+    .all<{
+      id: string;
+      started_ts: number;
+      ended_ts: number | null;
+      energy_added_kwh: number | null;
+      at_home: number;
+    }>();
+
+  return (res.results ?? [])
+    .map((r) => {
+      const durationH =
+        r.ended_ts && r.ended_ts > r.started_ts ? (r.ended_ts - r.started_ts) / 3600 : null;
+      const avgPowerKw =
+        durationH && r.energy_added_kwh != null ? r.energy_added_kwh / durationH : null;
+      return { ...r, avgPowerKw };
+    })
+    .filter((s) => {
+      // Keep sessions that overlap the requested Melbourne local date, using
+      // proper timezone conversion rather than a fixed UTC offset (correct
+      // across the AEST/AEDT daylight-saving boundary).
+      const end = s.ended_ts ?? s.started_ts;
+      return melbDateFromTs(s.started_ts) === date || melbDateFromTs(end) === date;
+    });
 }
 
 /**

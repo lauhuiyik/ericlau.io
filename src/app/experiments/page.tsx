@@ -3,7 +3,13 @@ import { sections } from "@/lib/sections";
 
 // Hand-curated list of HTML experiments living in /public/experiments/<slug>/.
 // To add one: drop an index.html into public/experiments/<slug>/, then add an entry here.
-const entries: { slug: string; title: string; note: string }[] = [
+const entries: { slug: string; title: string; note: string; href?: string }[] = [
+  {
+    slug: "homeenergy",
+    title: "Home Energy",
+    note: "Live solar, battery, grid & consumption for 36 Australis Dr. Login required.",
+    href: "/experiments/homeenergy",
+  },
   {
     slug: "japan2026",
     title: "Japan 2026",
@@ -50,7 +56,7 @@ export default function Page() {
           {entries.map((e) => (
             <li key={e.slug}>
               <a
-                href={`/experiments/${e.slug}/`}
+                href={e.href ?? `/experiments/${e.slug}/`}
                 className="group flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2 py-6"
               >
                 <div>

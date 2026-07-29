@@ -1,0 +1,7 @@
+aiohttp
+cryptography
+aiofiles
+paho-mqtt
+python-dotenv
+growattServer
+anker-solix-api @ git+https://github.com/thomluther/anker-solix-api.git

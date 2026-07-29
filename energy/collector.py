@@ -99,7 +99,14 @@ def collect_growatt(cfg: dict) -> dict:
         secret = cfg.get("INGEST_SECRET", "")
         if secret:
             api.session.headers.update({"x-proxy-secret": secret})
-    login = api.login(cfg["GROWATT_USERNAME"], cfg["GROWATT_PASSWORD"])
+    try:
+        login = api.login(cfg["GROWATT_USERNAME"], cfg["GROWATT_PASSWORD"])
+    except Exception as e:  # noqa: BLE001
+        # Surface the server's own response body — a bare status code hides
+        # whether the rejection came from Growatt or from the proxy in front.
+        body = getattr(getattr(e, "response", None), "text", None)
+        sent = sorted(api.session.headers.keys())
+        raise RuntimeError(f"{e} | body={body!r} | sent_headers={sent}") from e
     if isinstance(login, dict) and not login.get("success", True):
         raise RuntimeError(f"growatt login failed: {login.get('msg')}")
     uid = (login.get("user") or {}).get("id") or login.get("userId")

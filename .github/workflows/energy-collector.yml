@@ -28,6 +28,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r energy/requirements.txt
 
+      - name: DEBUG probe proxy auth
+        env:
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          GROWATT_PROXY_URL: ${{ secrets.GROWATT_PROXY_URL }}
+        run: |
+          echo "secret length: ${#INGEST_SECRET}"
+          echo "proxy url length: ${#GROWATT_PROXY_URL}"
+          echo "--- curl with header ---"
+          curl -s -o /tmp/body -w "status=%{http_code}\n" -X POST \
+            "${GROWATT_PROXY_URL}newTwoLoginAPI.do" \
+            -H "x-proxy-secret: ${INGEST_SECRET}" \
+            -H 'content-type: application/x-www-form-urlencoded' \
+            --data 'userName=probe&password=probe' || true
+          echo "body: $(cat /tmp/body)"
+
       - name: Collect and post a reading
         env:
           ANKER_EMAIL: ${{ secrets.ANKER_EMAIL }}

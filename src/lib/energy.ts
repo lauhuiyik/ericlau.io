@@ -92,6 +92,11 @@ export function melbDateFromTs(ts: number): string {
   return melbNow(new Date(ts * 1000)).date;
 }
 
+/** Melbourne local {date, time} for a unix-seconds timestamp. */
+export function melbFromTs(ts: number): { date: string; time: string } {
+  return melbNow(new Date(ts * 1000));
+}
+
 export function isPeak(localTime: string, t: Tariff): boolean {
   const h = Number(localTime.slice(0, 2));
   // Handle windows that wrap past midnight (e.g. 22–6) as well as normal ones.
@@ -104,6 +109,44 @@ export async function getLatest(db: D1Database): Promise<Reading | null> {
     (await db.prepare("SELECT * FROM readings ORDER BY ts DESC LIMIT 1").first<Reading>()) ??
     null
   );
+}
+
+export type SourceFreshness = {
+  ts: number;
+  date: string;
+  time: string;
+  kw: number | null;
+};
+
+/**
+ * When each array last actually reported a value — independent of whether
+ * it's in the single latest combined reading. Distinguishes "this array is
+ * stuck/broken" from "it just hasn't reported anything since dark", which
+ * look identical if you only ever look at the latest row.
+ */
+export async function getSourceFreshness(
+  db: D1Database,
+): Promise<{ anker: SourceFreshness | null; growatt: SourceFreshness | null }> {
+  const [anker, growatt] = await Promise.all([
+    db
+      .prepare(
+        "SELECT ts, local_date, local_time, solar_new_kw FROM readings WHERE sources LIKE '%anker%' ORDER BY ts DESC LIMIT 1",
+      )
+      .first<{ ts: number; local_date: string; local_time: string; solar_new_kw: number | null }>(),
+    db
+      .prepare(
+        "SELECT ts, local_date, local_time, solar_old_kw FROM readings WHERE sources LIKE '%growatt%' ORDER BY ts DESC LIMIT 1",
+      )
+      .first<{ ts: number; local_date: string; local_time: string; solar_old_kw: number | null }>(),
+  ]);
+  return {
+    anker: anker
+      ? { ts: anker.ts, date: anker.local_date, time: anker.local_time, kw: anker.solar_new_kw }
+      : null,
+    growatt: growatt
+      ? { ts: growatt.ts, date: growatt.local_date, time: growatt.local_time, kw: growatt.solar_old_kw }
+      : null,
+  };
 }
 
 export type DateRange = "day" | "week" | "month";

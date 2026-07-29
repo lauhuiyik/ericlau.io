@@ -10,10 +10,12 @@ import {
   getLatest,
   getReadingsForDate,
   getReadingsInRange,
+  getSourceFreshness,
   getTariff,
   isFutureLocalDate,
   melbNow,
   rangeWindow,
+  type SourceFreshness,
 } from "@/lib/energy";
 import { AutoRefresh } from "./auto-refresh";
 import { RangePicker } from "./range-picker";
@@ -98,6 +100,18 @@ function CostLine({ label, value, color }: { label: string; value: string; color
 }
 
 /** One solar array, as a self-contained box with its own live output. */
+/** "just now" / "12m ago" / "2h ago" / "yesterday 18:40" relative to nowTs. */
+function timeAgoLabel(seen: SourceFreshness | null, today: string, nowTs: number): string {
+  if (!seen) return "never reported";
+  const diffMin = Math.max(0, Math.floor((nowTs - seen.ts) / 60));
+  if (seen.date !== today) return `${seen.date} ${seen.time}`;
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const h = Math.floor(diffMin / 60);
+  const m = diffMin % 60;
+  return `${h}h${m ? ` ${m}m` : ""} ago · ${seen.time}`;
+}
+
 function ArrayBox({
   name,
   hardware,
@@ -107,6 +121,9 @@ function ArrayBox({
   ratedKw,
   extra,
   offline = false,
+  lastSeen,
+  today,
+  nowTs,
 }: {
   name: string;
   hardware: string;
@@ -116,9 +133,18 @@ function ArrayBox({
   ratedKw: number;
   extra?: string;
   offline?: boolean;
+  lastSeen: SourceFreshness | null;
+  today: string;
+  nowTs: number;
 }) {
   const utilisation =
     liveKw != null && ratedKw > 0 ? Math.min(100, Math.max(0, (liveKw / ratedKw) * 100)) : 0;
+  const staleMin = lastSeen ? Math.floor((nowTs - lastSeen.ts) / 60) : Infinity;
+  // A gap of more than ~20 min during genuine daylight is worth flagging red;
+  // otherwise (overnight, or just a normal ~5 min polling lag) it's neutral —
+  // this array simply isn't generating right now, not necessarily broken.
+  const staleWarn = offline && staleMin > 20;
+
   return (
     <div className="border border-rule p-6 flex flex-col gap-4">
       <div className="flex items-baseline justify-between gap-4">
@@ -145,13 +171,12 @@ function ArrayBox({
 
       <div className="flex flex-col gap-1 text-sm">
         <div className="text-muted">{hardware}</div>
-        {offline ? (
-          <div style={{ color: C.grid }}>No data — this array isn’t reporting</div>
-        ) : (
-          <div className="text-muted">
-            {kwh(todayKwh)} kWh today{extra ? ` · ${extra}` : ""}
-          </div>
-        )}
+        <div className="text-muted">
+          {kwh(todayKwh)} kWh today{extra ? ` · ${extra}` : ""}
+        </div>
+        <div style={{ color: staleWarn ? C.grid : undefined }} className={staleWarn ? "" : "text-muted"}>
+          Last reported: {timeAgoLabel(lastSeen, today, nowTs)}
+        </div>
       </div>
     </div>
   );
@@ -177,6 +202,11 @@ export default async function Page({
 }) {
   const { env } = await getCloudflareContext({ async: true });
   const { date: today, time: nowTime } = melbNow();
+  // force-dynamic server component: this runs once per request (not a
+  // re-rendering client component), so a per-request timestamp is correct
+  // here, not the "impure component" case the purity lint is guarding against.
+  // eslint-disable-next-line react-hooks/purity
+  const nowTs = Math.floor(Date.now() / 1000);
   const sp = await searchParams;
 
   const range: DateRange = VALID_RANGES.includes(sp.range as DateRange)
@@ -189,6 +219,7 @@ export default async function Page({
   const win = rangeWindow(range, date);
 
   const latestGlobal = await getLatest(env.DB);
+  const freshness = isLiveToday ? await getSourceFreshness(env.DB) : null;
   const tariff = await getTariff(env.ENERGY_KV);
 
   const daySeries = range === "day" ? await getReadingsForDate(env.DB, date) : [];
@@ -253,7 +284,10 @@ export default async function Page({
 
   // Which inverters reported in the most recent sample. When one is missing,
   // solar totals AND the derived house load are understated, so say so plainly
-  // rather than presenting a partial number as if it were complete.
+  // rather than presenting a partial number as if it were complete. This is
+  // routine overnight (Growatt has nothing to report without sun) — the
+  // wording below stays neutral and points at each array's own "last
+  // reported" time instead of reading as an alarm every single night.
   const reported = (latestGlobal?.sources ?? "").split(",").filter(Boolean);
   const missingSources = ["anker", "growatt"].filter((s) => !reported.includes(s));
   const showPartialWarning = isLiveToday && latestGlobal != null && missingSources.length > 0;
@@ -306,16 +340,18 @@ export default async function Page({
       {showPartialWarning && (
         <section className="border-t border-rule px-6 sm:px-12 py-5">
           <div className="flex items-start gap-3 text-sm">
-            <span style={{ color: C.grid }} className="font-mono text-[10px] uppercase tracking-[0.18em] pt-1">
-              Incomplete
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted pt-1">
+              Partial
             </span>
             <p className="text-muted max-w-2xl">
               The <span className="text-foreground">{missingSources.join(" and ")}</span> inverter
-              {missingSources.length > 1 ? "s are" : " is"} not reporting in the latest reading, so
-              solar generation and house load below are{" "}
-              <span className="text-foreground">understated</span> — house load is derived from all
-              generation sources, so a missing array pulls it down too. Grid import/export and cost
-              are unaffected.
+              {missingSources.length > 1 ? "s aren't" : " isn't"} in the latest reading, so solar
+              generation and house load below are understated for this moment — house load is
+              derived from all generation sources, so a missing array pulls it down too. Grid
+              import/export and cost are unaffected. This is expected overnight (no sun, nothing to
+              report) — check each array&apos;s{" "}
+              <span className="text-foreground">last reported</span> time below to tell that apart
+              from a genuine outage.
             </p>
           </div>
         </section>
@@ -492,6 +528,10 @@ export default async function Page({
                   todayKwh={latestGlobal.solar_new_kwh_today}
                   ratedKw={6.16}
                   extra={`Battery ${pct(latestGlobal.battery_soc)}`}
+                  offline={latestGlobal.solar_new_kw == null}
+                  lastSeen={freshness?.anker ?? null}
+                  today={today}
+                  nowTs={nowTs}
                 />
                 <ArrayBox
                   name="Original array"
@@ -501,6 +541,9 @@ export default async function Page({
                   todayKwh={latestGlobal.solar_old_kwh_today}
                   ratedKw={6.6}
                   offline={latestGlobal.solar_old_kw == null}
+                  lastSeen={freshness?.growatt ?? null}
+                  today={today}
+                  nowTs={nowTs}
                 />
               </div>
             </section>

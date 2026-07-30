@@ -51,3 +51,7 @@ worker-configuration.d.ts
 
 # Tesla public key must be committed/deployed (overrides *.pem)
 !public/.well-known/appspecific/com.tesla.3p.public-key.pem
+
+# python
+__pycache__/
+*.pyc

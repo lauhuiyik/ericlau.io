@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import ClientSession
 import growattServer
@@ -53,6 +54,7 @@ def load_config() -> dict:
     for k in (
         "ANKER_EMAIL", "ANKER_PASSWORD", "GROWATT_USERNAME", "GROWATT_PASSWORD",
         "INGEST_SECRET", "INGEST_URL", "ANKER_COUNTRY", "GROWATT_PROXY_URL",
+        "GROWATT_API_TOKEN",
     ):
         if os.environ.get(k):
             cfg[k] = os.environ[k]
@@ -84,14 +86,63 @@ def parse_qty(s) -> float | None:
     return val * _UNIT.get(unit, 1.0)
 
 
-def collect_growatt(cfg: dict) -> dict:
-    """Original 6.6 kW array via Growatt ShinePhone API (blocking).
+def _kv_base_url(cfg: dict) -> str:
+    """Site origin, derived from INGEST_URL (which points at /api/ingest)."""
+    ingest_url = cfg.get("INGEST_URL", "http://localhost:3000/api/ingest")
+    parts = urlsplit(ingest_url)
+    return f"{parts.scheme}://{parts.netloc}"
 
-    Growatt returns 403 to datacenter IPs (notably GitHub Actions runners), so
-    when GROWATT_PROXY_URL is set we send the same requests through a small
-    Cloudflare Worker whose egress Growatt does accept. The protocol handling
-    is unchanged — only the transport hop differs.
+
+def _kv_request(cfg: dict, path: str, method: str, body: dict | None = None) -> dict:
+    url = _kv_base_url(cfg) + path
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={
+            "content-type": "application/json",
+            "authorization": f"Bearer {cfg.get('INGEST_SECRET', '')}",
+            "user-agent": "ericlau-energy-collector/1.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def load_anker_cache_blob(cfg: dict) -> str | None:
+    try:
+        return _kv_request(cfg, "/api/energy/anker-cache", "GET").get("blob")
+    except Exception as e:  # noqa: BLE001
+        log.warning("anker cache load failed: %s", e)
+        return None
+
+
+def save_anker_cache_blob(cfg: dict, blob: str) -> None:
+    try:
+        _kv_request(cfg, "/api/energy/anker-cache", "POST", {"blob": blob})
+    except Exception as e:  # noqa: BLE001
+        log.warning("anker cache save failed: %s", e)
+
+
+def collect_growatt(cfg: dict) -> dict:
+    """Original 6.6 kW array. Two paths, chosen by what's configured:
+
+    - GROWATT_API_TOKEN set: the official token-authenticated OpenAPI V1
+      (no login at all — a static token in a header). This is the sanctioned,
+      sustainable path; obtained by asking the installer to apply for a
+      personal API token via Growatt's OSS system. NOT YET LIVE-TESTED end to
+      end (no token available while writing this) — verify the field names
+      in plant_power_overview's response before trusting it blindly.
+    - otherwise: the legacy ShinePhone username/password API (unofficial,
+      reverse-engineered). Growatt 403s this from GitHub Actions' IPs
+      specifically; works fine from a home IP. GROWATT_PROXY_URL can route
+      through a Cloudflare Worker if Growatt's IP-block turns out to be scoped
+      to the reverse-engineered endpoints rather than the whole host — see
+      collector git history for why that attempt didn't pan out.
     """
+    token = cfg.get("GROWATT_API_TOKEN")
+    if token:
+        return collect_growatt_v1(token)
+
     api = growattServer.GrowattApi(add_random_user_id=True)
     proxy = cfg.get("GROWATT_PROXY_URL")
     if proxy:
@@ -128,44 +179,100 @@ def collect_growatt(cfg: dict) -> dict:
     }
 
 
+def collect_growatt_v1(token: str) -> dict:
+    """Via Growatt's official token-authenticated OpenAPI V1 — no login, so
+    none of the account-lockout risk the legacy path carries. UNTESTED
+    end-to-end (no token available yet); the plant_power_overview response
+    shape is defensively parsed rather than assumed."""
+    from growattServer.open_api_v1 import OpenApiV1
+
+    api = OpenApiV1(token)
+    plants = (api.plant_list() or {}).get("plants") or []
+    if not plants:
+        raise RuntimeError("growatt v1: no plants")
+    plant_id = plants[0].get("plant_id") or plants[0].get("id")
+
+    overview = api.plant_power_overview(plant_id) or {}
+    powers = overview.get("powers") or []
+    latest = next((p for p in reversed(powers) if p.get("power") is not None), None)
+    power_w = _f(latest.get("power")) if latest else None
+
+    # today's energy total — field name unconfirmed without a real token;
+    # try the plant_list entry's own summary field(s) as a best effort.
+    today_kwh = _f(
+        plants[0].get("today_energy")
+        or plants[0].get("todayEnergy")
+        or plants[0].get("e_today"),
+    )
+
+    return {
+        "solar_old_kw": (power_w / 1000.0) if power_w is not None else None,
+        "solar_old_kwh_today": today_kwh,
+    }
+
+
 async def collect_anker(cfg: dict) -> dict:
-    """New 6.16 kW array + 10 kWh battery + grid/consumption via Anker SOLIX X1."""
+    """New 6.16 kW array + 10 kWh battery + grid/consumption via Anker SOLIX X1.
+
+    Restores the anker-solix-api library's own login-token cache from KV
+    before authenticating, and saves it back afterwards. GitHub Actions
+    runners start from a blank filesystem every run, so without this the
+    collector was doing a fresh username/password login every 5-min poll —
+    Anker rate-limits/CAPTCHAs an account after roughly 10 logins/day, and a
+    prior version of this script triggered exactly that after ~570 logins in
+    2 days. The library itself already supports a ~7-day-valid cached token;
+    this just gives it somewhere to persist between stateless CI runs.
+    """
     country = cfg.get("ANKER_COUNTRY", "AU")
     async with ClientSession() as ws:
         myapi = AnkerSolixApi(cfg["ANKER_EMAIL"], cfg["ANKER_PASSWORD"], country, ws, log)
         # Belt-and-braces: cap requests per endpoint per minute well under
         # Anker's ~10-12/min so we can never trip their limiter.
         myapi.endpointLimit(5)
-        hes = AnkerSolixHesApi(apisession=myapi.apisession)
-        hes.endpointLimit(5)
-        await hes.update_sites()
+
+        cache_path = Path(myapi.apisession._authFile)  # noqa: SLF001 — intentional: no public accessor for this path
+        cached_blob = load_anker_cache_blob(cfg)
+        if cached_blob:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(cached_blob)
+
         try:
-            await hes.update_site_details()
-        except Exception as e:  # noqa: BLE001
-            log.warning("anker site_details: %s", e)
+            hes = AnkerSolixHesApi(apisession=myapi.apisession)
+            hes.endpointLimit(5)
+            await hes.update_sites()
+            try:
+                await hes.update_site_details()
+            except Exception as e:  # noqa: BLE001
+                log.warning("anker site_details: %s", e)
 
-        if not hes.sites:
-            raise RuntimeError("anker: no HES site found")
-        site = next(iter(hes.sites.values()))
-        today = (site.get("energy_details") or {}).get("today") or {}
+            if not hes.sites:
+                raise RuntimeError("anker: no HES site found")
+            site = next(iter(hes.sites.values()))
+            today = (site.get("energy_details") or {}).get("today") or {}
 
-        # The X1 inverter device is the one exposing average_power (kW).
-        inv = next((d for d in hes.devices.values() if "average_power" in d), {})
-        ap = inv.get("average_power") or {}
+            # The X1 inverter device is the one exposing average_power (kW).
+            inv = next((d for d in hes.devices.values() if "average_power" in d), {})
+            ap = inv.get("average_power") or {}
 
-        return {
-            "solar_new_kw": _f(ap.get("solar_power_avg")),
-            "battery_soc": _f(ap.get("state_of_charge")),
-            "battery_charge_kw": _f(ap.get("charge_power_avg")),
-            "battery_discharge_kw": _f(ap.get("discharge_power_avg")),
-            "grid_import_kw": _f(ap.get("grid_import_avg")),
-            "grid_export_kw": _f(ap.get("grid_export_avg")),
-            "solar_new_kwh_today": _f(today.get("solar_production")),
-            "grid_import_kwh_today": _f(today.get("grid_import")),
-            "grid_export_kwh_today": _f(today.get("solar_to_grid")),
-            "battery_charge_kwh_today": _f(today.get("battery_charge")),
-            "battery_discharge_kwh_today": _f(today.get("battery_discharge")),
-        }
+            return {
+                "solar_new_kw": _f(ap.get("solar_power_avg")),
+                "battery_soc": _f(ap.get("state_of_charge")),
+                "battery_charge_kw": _f(ap.get("charge_power_avg")),
+                "battery_discharge_kw": _f(ap.get("discharge_power_avg")),
+                "grid_import_kw": _f(ap.get("grid_import_avg")),
+                "grid_export_kw": _f(ap.get("grid_export_avg")),
+                "solar_new_kwh_today": _f(today.get("solar_production")),
+                "grid_import_kwh_today": _f(today.get("grid_import")),
+                "grid_export_kwh_today": _f(today.get("solar_to_grid")),
+                "battery_charge_kwh_today": _f(today.get("battery_charge")),
+                "battery_discharge_kwh_today": _f(today.get("battery_discharge")),
+            }
+        finally:
+            # Persist whatever token is now on disk (fresh or reused) even if
+            # the calls above failed partway through — a successful login
+            # followed by a later error would otherwise lose the fresh token.
+            if cache_path.is_file():
+                save_anker_cache_blob(cfg, cache_path.read_text())
 
 
 async def collect_once(cfg: dict) -> dict:

@@ -23,6 +23,8 @@ import os
 import re
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -129,6 +131,108 @@ def save_anker_cache_blob(cfg: dict, blob: str) -> None:
         _kv_request(cfg, "/api/energy/anker-cache", "POST", {"blob": blob})
     except Exception as e:  # noqa: BLE001
         log.warning("anker cache save failed: %s", e)
+
+
+# 36 Australis Dr, Williams Landing — used to decide whether a charging
+# session is happening at home or out somewhere.
+HOME_LAT, HOME_LNG, HOME_RADIUS_M = -37.860447, 144.742980, 150
+
+
+def _haversine_m(lat1, lng1, lat2, lng2) -> float:
+    import math
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def collect_tesla(cfg: dict) -> dict | None:
+    """Live charge state from the Tesla Fleet API.
+
+    Returns None (rather than raising) when Tesla simply isn't connected yet,
+    so a missing authorisation doesn't look like a failure in the logs.
+
+    Refresh tokens ROTATE — Tesla invalidates the old one on use — so the
+    replacement is written straight back to KV. Skipping that would lock the
+    next run out and force a manual re-authorise.
+    """
+    try:
+        cred = _kv_request(cfg, "/api/energy/tesla-token", "GET")
+    except Exception as e:  # noqa: BLE001
+        log.warning("tesla token fetch failed: %s", e)
+        return None
+    if not cred.get("connected") or not cred.get("refresh_token"):
+        return None
+    client_id = cred.get("client_id")
+    client_secret = cred.get("client_secret")
+    base = cred.get("base_url") or "https://fleet-api.prd.na.vn.cloud.tesla.com"
+
+    # refresh -> access token (+ rotated refresh token)
+    body = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": cred["refresh_token"],
+    }).encode()
+    req = urllib.request.Request(
+        "https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token",
+        data=body, method="POST",
+        headers={"content-type": "application/x-www-form-urlencoded",
+                 "user-agent": "ericlau-energy-collector/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        tok = json.loads(resp.read().decode())
+    access = tok.get("access_token")
+    if not access:
+        raise RuntimeError(f"tesla refresh returned no access_token: {tok}")
+    if tok.get("refresh_token") and tok["refresh_token"] != cred["refresh_token"]:
+        _kv_request(cfg, "/api/energy/tesla-token", "POST",
+                    {"refresh_token": tok["refresh_token"], "base_url": base})
+
+    def api(path: str) -> dict:
+        r = urllib.request.Request(
+            f"{base}{path}",
+            headers={"authorization": f"Bearer {access}",
+                     "user-agent": "ericlau-energy-collector/1.0"},
+        )
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+
+    vehicles = (api("/api/1/vehicles").get("response") or [])
+    if not vehicles:
+        raise RuntimeError("tesla: no vehicles on this account")
+    tag = vehicles[0].get("vin") or vehicles[0].get("id_s")
+
+    # A sleeping car returns 408; that's normal and not an error worth shouting
+    # about — it just means no fresh sample this cycle.
+    try:
+        data = api(f"/api/1/vehicles/{tag}/vehicle_data?endpoints=charge_state%3Bdrive_state")
+    except urllib.error.HTTPError as e:
+        if e.code in (408, 503):
+            log.info("tesla asleep/unavailable (%s) — no sample this cycle", e.code)
+            return None
+        raise
+    resp = data.get("response") or {}
+    cs = resp.get("charge_state") or {}
+    ds = resp.get("drive_state") or {}
+
+    lat, lng = _f(ds.get("latitude")), _f(ds.get("longitude"))
+    at_home = None
+    if lat is not None and lng is not None:
+        at_home = _haversine_m(lat, lng, HOME_LAT, HOME_LNG) <= HOME_RADIUS_M
+
+    charger_w = _f(cs.get("charger_power"))  # Tesla reports this in kW already
+    return {
+        "charging_state": cs.get("charging_state"),
+        "charge_power_kw": charger_w,
+        "charge_rate_kw": _f(cs.get("charge_rate")),
+        "battery_level": _f(cs.get("battery_level")),
+        "charge_energy_added_kwh": _f(cs.get("charge_energy_added")),
+        "charge_limit_soc": _f(cs.get("charge_limit_soc")),
+        "at_home": at_home,
+    }
 
 
 def collect_growatt(cfg: dict) -> dict:
@@ -317,12 +421,38 @@ async def collect_once(cfg: dict) -> dict:
     except Exception as e:  # noqa: BLE001
         log.error("anker collect failed: %s", e)
 
+    # Tesla is posted to its own endpoint (different table), so it doesn't
+    # join the energy payload — but note it in sources for visibility.
+    try:
+        t = await asyncio.to_thread(collect_tesla, cfg)
+        if t is not None:
+            payload["_tesla"] = t
+            sources.append("tesla")
+    except Exception as e:  # noqa: BLE001
+        log.error("tesla collect failed: %s", e)
+
     payload["sources"] = ",".join(sources)
     return payload
 
 
+def post_tesla_state(cfg: dict, tesla: dict) -> None:
+    base = _kv_base_url(cfg)
+    body = json.dumps(tesla).encode()
+    req = urllib.request.Request(
+        base + "/api/ingest/tesla-state", data=body, method="POST",
+        headers={
+            "content-type": "application/json",
+            "authorization": f"Bearer {cfg.get('INGEST_SECRET', '')}",
+            "user-agent": "ericlau-energy-collector/1.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        print(f"   -> tesla {resp.status} {resp.read().decode()[:120]}")
+
+
 def post_reading(cfg: dict, payload: dict) -> None:
     url = cfg.get("INGEST_URL", "http://localhost:3000/api/ingest")
+    payload = {k: v for k, v in payload.items() if k != "_tesla"}
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         url, data=body, method="POST",
@@ -381,6 +511,11 @@ async def main() -> None:
                         post_reading(cfg, payload)
                     except Exception as e:  # noqa: BLE001
                         log.error("post failed: %s", e)
+                    if payload.get("_tesla"):
+                        try:
+                            post_tesla_state(cfg, payload["_tesla"])
+                        except Exception as e:  # noqa: BLE001
+                            log.error("tesla post failed: %s", e)
             if args.once:
                 break
             # Never poll faster than every 2 min, whatever was requested.

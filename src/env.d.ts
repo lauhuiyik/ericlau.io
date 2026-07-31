@@ -4,6 +4,9 @@ declare global {
   interface CloudflareEnv {
     /** Shared secret the Python collector uses to authenticate to POST /api/ingest. */
     INGEST_SECRET?: string;
+    /** Tesla Fleet API app credentials (developer.tesla.com). */
+    TESLA_CLIENT_ID?: string;
+    TESLA_CLIENT_SECRET?: string;
   }
 }
 

@@ -464,26 +464,34 @@ export default async function Page({
         <h1 className="text-5xl sm:text-6xl md:text-7xl font-semibold tracking-[-0.03em] leading-[0.9]">
           Home Energy
         </h1>
-        <p className="mt-5 text-sm text-muted">
-          36 Australis Dr, Williams Landing — {SYSTEM.totalDc} of solar across two arrays, a{" "}
-          10 kWh battery, and a 22 kW car charger.
+        <p className="mt-6 max-w-xl text-lg text-muted leading-relaxed">
+          {SYSTEM.totalDc} of solar across two arrays, feeding a 10 kWh battery and a 22 kW car
+          charger.
         </p>
 
-        {/* What the system physically is, at a glance */}
-        <div className="mt-7 grid grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-5 max-w-3xl">
-          {SYSTEM.arrays.map((a) => (
-            <SpecRow
-              key={a.name}
-              label={`${a.name} · ${a.year}`}
-              value={`${a.dc} · ${a.panels}`}
-              sub={a.inverter}
-            />
-          ))}
-          <SpecRow label="Battery" value={SYSTEM.battery} sub="charges from solar first" />
-          <SpecRow label="Inverters" value={SYSTEM.inverterAc} sub={`export limit ${SYSTEM.exportLimit}`} />
-          <SpecRow label="EV charger" value={SYSTEM.evCharger} sub="Tesla, charged at home" />
-          <SpecRow label="Grid" value={SYSTEM.grid} sub="Lumo · time-of-use" />
-        </div>
+        {/* Full spec tucked behind a disclosure — reference detail, not
+            something worth looking at every visit. Native <details> so this
+            stays a server component with no client JS. */}
+        <details className="group mt-6 max-w-3xl">
+          <summary className="cursor-pointer list-none font-mono text-[10px] uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors inline-flex items-center gap-2">
+            <span className="transition-transform group-open:rotate-90">›</span>
+            System spec
+          </summary>
+          <div className="mt-6 grid grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-5">
+            {SYSTEM.arrays.map((a) => (
+              <SpecRow
+                key={a.name}
+                label={`${a.name} · ${a.year}`}
+                value={`${a.dc} · ${a.panels}`}
+                sub={a.inverter}
+              />
+            ))}
+            <SpecRow label="Battery" value={SYSTEM.battery} sub="charges from solar first" />
+            <SpecRow label="Inverters" value={SYSTEM.inverterAc} sub={`export limit ${SYSTEM.exportLimit}`} />
+            <SpecRow label="EV charger" value={SYSTEM.evCharger} sub="Tesla, charged at home" />
+            <SpecRow label="Grid" value={SYSTEM.grid} sub="Lumo · time-of-use" />
+          </div>
+        </details>
         {isLiveToday && (
           <p className="mt-3 font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
             {hasData ? (

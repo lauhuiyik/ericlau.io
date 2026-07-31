@@ -20,6 +20,12 @@ type Payload = {
   grid_export_kwh_today?: number;
   battery_charge_kwh_today?: number;
   battery_discharge_kwh_today?: number;
+  // Anker's own flow accounting (where power actually went).
+  solar_to_home_kwh_today?: number;
+  solar_to_battery_kwh_today?: number;
+  battery_to_home_kwh_today?: number;
+  grid_to_home_kwh_today?: number;
+  home_usage_kwh_today?: number;
   sources?: string;
 };
 
@@ -82,6 +88,12 @@ export async function POST(request: Request) {
     (snKwh ?? 0) + (soKwh ?? 0) + (bdKwh ?? 0) + (giKwh ?? 0) -
     (bcKwh ?? 0) - (geKwh ?? 0);
 
+  const s2h = num(body.solar_to_home_kwh_today);
+  const s2b = num(body.solar_to_battery_kwh_today);
+  const b2h = num(body.battery_to_home_kwh_today);
+  const g2h = num(body.grid_to_home_kwh_today);
+  const ankerHome = num(body.home_usage_kwh_today);
+
   const sources = typeof body.sources === "string" ? body.sources : null;
 
   await env.DB.prepare(
@@ -89,13 +101,16 @@ export async function POST(request: Request) {
       (ts, local_date, local_time, solar_new_kw, solar_old_kw, solar_total_kw,
        battery_soc, battery_charge_kw, battery_discharge_kw, grid_import_kw, grid_export_kw, house_kw,
        solar_new_kwh_today, solar_old_kwh_today, grid_import_kwh_today, grid_export_kwh_today,
-       battery_charge_kwh_today, battery_discharge_kwh_today, house_kwh_today, sources)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       battery_charge_kwh_today, battery_discharge_kwh_today, house_kwh_today,
+       solar_to_home_kwh_today, solar_to_battery_kwh_today, battery_to_home_kwh_today,
+       grid_to_home_kwh_today, home_usage_kwh_today, sources)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   )
     .bind(
       ts, local_date, local_time, solarNew, solarOld, solarTotal,
       num(body.battery_soc), battChg, battDis, gridImp, gridExp, houseKw,
-      snKwh, soKwh, giKwh, geKwh, bcKwh, bdKwh, houseKwhToday, sources,
+      snKwh, soKwh, giKwh, geKwh, bcKwh, bdKwh, houseKwhToday,
+      s2h, s2b, b2h, g2h, ankerHome, sources,
     )
     .run();
 
@@ -107,7 +122,10 @@ export async function POST(request: Request) {
     solar_new_kwh_today: snKwh, solar_old_kwh_today: soKwh,
     grid_import_kwh_today: giKwh, grid_export_kwh_today: geKwh,
     battery_charge_kwh_today: bcKwh, battery_discharge_kwh_today: bdKwh,
-    house_kwh_today: houseKwhToday, sources,
+    house_kwh_today: houseKwhToday,
+    solar_to_home_kwh_today: s2h, solar_to_battery_kwh_today: s2b,
+    battery_to_home_kwh_today: b2h, grid_to_home_kwh_today: g2h,
+    home_usage_kwh_today: ankerHome, sources,
   };
   await env.ENERGY_KV.put("latest", JSON.stringify(snapshot));
 

@@ -20,6 +20,14 @@ export type Reading = {
   battery_charge_kwh_today: number | null;
   battery_discharge_kwh_today: number | null;
   house_kwh_today: number | null;
+  // Anker's own flow accounting — where power actually went, rather than
+  // derived. `home_usage_kwh_today` is Anker's own whole-home figure; it
+  // cannot see the Growatt array, so `house_kwh_today` is the truer total.
+  solar_to_home_kwh_today: number | null;
+  solar_to_battery_kwh_today: number | null;
+  battery_to_home_kwh_today: number | null;
+  grid_to_home_kwh_today: number | null;
+  home_usage_kwh_today: number | null;
   sources: string | null;
 };
 

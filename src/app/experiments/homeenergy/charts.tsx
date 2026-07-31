@@ -2,15 +2,10 @@
 
 import { useRef, useState } from "react";
 import type { ChargeSession, DailyTotal, Reading, Tariff } from "@/lib/energy";
+import { C } from "@/lib/colors";
 
-export const C = {
-  solar: "#f5b301", // yellow — solar generation
-  battery: "#60a5fa", // blue — battery state of charge
-  self: "#4ade80", // green — load covered by own solar/battery, and grid export
-  grid: "#f87171", // red — load drawn from the grid
-  house: "#fb923c", // orange — whole-home consumption
-  charge: "#c084fc", // violet — Tesla charging (kept clear of battery blue)
-};
+export { C };
+
 
 const fmt2 = (n: number) => n.toFixed(2);
 const minToTime = (min: number) => {
@@ -46,14 +41,17 @@ function useChartHover(viewBoxWidth: number) {
 
 const FULL_DAY: [number, number] = [0, 1440];
 
-/** Tick spacing (minutes) that keeps the axis readable as the visible
- * window narrows — down to 30-minute intervals when zoomed in tight. */
+/** Tick spacing (minutes) that keeps the axis readable as the visible window
+ * narrows — down to 5-minute marks when zoomed right in, since the underlying
+ * samples are ~1 minute apart. */
 function tickStepFor(spanMin: number): number {
-  if (spanMin <= 180) return 30;
-  if (spanMin <= 360) return 60;
-  if (spanMin <= 720) return 120;
-  if (spanMin <= 1440) return 240;
-  return 360;
+  if (spanMin <= 30) return 5;
+  if (spanMin <= 60) return 10;
+  if (spanMin <= 120) return 15;
+  if (spanMin <= 240) return 30;
+  if (spanMin <= 480) return 60;
+  if (spanMin <= 960) return 120;
+  return 240;
 }
 
 function ticksFor(domain: [number, number]): number[] {
@@ -186,179 +184,147 @@ function TipRow({ color, label, value }: { color: string; label: string; value: 
   );
 }
 
-// ---------- Day-mode charts (per-5-min series, x = minutes of day) ----------
+// ---------- Day-mode chart (one merged view, x = minutes of day) ----------
 
-export function PowerChartDay({ series }: { series: Reading[] }) {
-  const W = 920;
-  const H = 240;
-  const padL = 10;
-  const padR = 10;
-  const padT = 18;
-  const padB = 24;
-  const { svgRef, domain, isZoomed, resetZoom, bind, hoverMin, dragPreviewVX } = useDayChartInteraction(W, padL, padR);
-
-  const pts = series
-    .map((r) => ({ min: minutesOfDayLocal(r.local_time), solar: r.solar_total_kw ?? 0, house: r.house_kw ?? 0 }))
-    .sort((a, b) => a.min - b.min);
-
-  const visible = pts.filter((p) => p.min >= domain[0] && p.min <= domain[1]);
-  const ymax = Math.max(1, ...(visible.length ? visible : pts).map((p) => Math.max(p.solar, p.house))) * 1.15;
-  const x = (min: number) => padL + ((min - domain[0]) / (domain[1] - domain[0])) * (W - padL - padR);
-  const y = (v: number) => H - padB - (v / ymax) * (H - padT - padB);
-  const base = y(0);
-
-  const solarArea =
-    pts.length > 0
-      ? `M ${x(pts[0].min)} ${base} ` +
-        pts.map((p) => `L ${x(p.min)} ${y(p.solar)}`).join(" ") +
-        ` L ${x(pts[pts.length - 1].min)} ${base} Z`
-      : "";
-  const houseLine =
-    pts.length > 0 ? pts.map((p, i) => `${i === 0 ? "M" : "L"} ${x(p.min)} ${y(p.house)}`).join(" ") : "";
-
-  const nearest =
-    hoverMin == null || pts.length === 0
-      ? null
-      : pts.reduce((a, b) => (Math.abs(b.min - hoverMin) < Math.abs(a.min - hoverMin) ? b : a));
-
-  return (
-    <div className="relative">
-      <ZoomControls isZoomed={isZoomed} onReset={resetZoom} />
-      <svg
-        ref={svgRef}
-        viewBox={`0 0 ${W} ${H}`}
-        className="w-full touch-none cursor-crosshair"
-        role="img"
-        aria-label="Power today"
-        {...bind}
-      >
-        {[0, 0.5, 1].map((f) => (
-          <line key={f} x1={padL} x2={W - padR} y1={y(ymax * f)} y2={y(ymax * f)} stroke="#1f1f1f" strokeWidth={1} />
-        ))}
-        {[0, 0.5, 1].map((f) => (
-          <text key={`l${f}`} x={padL} y={y(ymax * f) - 4} fill="#737373" fontSize={10} fontFamily="var(--font-geist-mono)">
-            {(ymax * f).toFixed(1)} kW
-          </text>
-        ))}
-        {ticksFor(domain).map((t) => (
-          <g key={t}>
-            <line x1={x(t)} x2={x(t)} y1={padT} y2={base} stroke="#1f1f1f" strokeWidth={1} strokeDasharray="2 4" />
-            <text x={x(t)} y={H - 8} fill="#737373" fontSize={10} textAnchor="middle" fontFamily="var(--font-geist-mono)">
-              {minToTime(t)}
-            </text>
-          </g>
-        ))}
-        {solarArea && <path d={solarArea} fill={C.solar} fillOpacity={0.16} stroke="none" />}
-        {solarArea && (
-          <path
-            d={pts.map((p, i) => `${i === 0 ? "M" : "L"} ${x(p.min)} ${y(p.solar)}`).join(" ")}
-            fill="none"
-            stroke={C.solar}
-            strokeWidth={1.75}
-          />
-        )}
-        {houseLine && <path d={houseLine} fill="none" stroke={C.house} strokeOpacity={0.85} strokeWidth={1.5} />}
-        {pts.length === 1 && (
-          <>
-            <circle cx={x(pts[0].min)} cy={y(pts[0].solar)} r={3} fill={C.solar} />
-            <circle cx={x(pts[0].min)} cy={y(pts[0].house)} r={3} fill={C.house} />
-          </>
-        )}
-        {nearest && (
-          <>
-            <line x1={x(nearest.min)} x2={x(nearest.min)} y1={padT} y2={base} stroke="#737373" strokeWidth={1} strokeDasharray="2 3" />
-            <circle cx={x(nearest.min)} cy={y(nearest.solar)} r={3.5} fill={C.solar} />
-            <circle cx={x(nearest.min)} cy={y(nearest.house)} r={3.5} fill={C.house} />
-          </>
-        )}
-        {dragPreviewVX && (
-          <rect x={dragPreviewVX[0]} y={padT} width={dragPreviewVX[1] - dragPreviewVX[0]} height={base - padT} fill="#f5f5f4" fillOpacity={0.1} />
-        )}
-      </svg>
-      {nearest && !dragPreviewVX && (
-        <Tooltip leftPct={(x(nearest.min) / W) * 100}>
-          <div className="text-foreground mb-1">{minToTime(nearest.min)}</div>
-          <TipRow color={C.solar} label="Solar" value={`${fmt2(nearest.solar)} kW`} />
-          <TipRow color={C.house} label="House" value={`${fmt2(nearest.house)} kW`} />
-        </Tooltip>
-      )}
-    </div>
-  );
-}
-
-export function GridRelianceChartDay({
+/**
+ * The single live view for a day. Three series, all on one kW axis:
+ *
+ *   • red    — Tesla charging
+ *   • orange — grid draw, flipping GREEN and going NEGATIVE while exporting
+ *   • blue   — home consumption EXCLUDING the car, so the car's draw isn't
+ *              counted twice when you read the two together
+ *   • violet — battery: ABOVE zero while it powers the house, BELOW zero
+ *              while it charges (same sign convention as the grid line)
+ *
+ * Solar sits behind as a faint yellow area purely for context — without it the
+ * grid line dipping negative has no visible cause.
+ *
+ * Sample spacing is whatever the collector recorded (~1 min while it's
+ * running); the axis and hover snap to real samples rather than interpolating,
+ * so gaps stay visible instead of being smoothed over.
+ */
+export function LiveChartDay({
   series,
-  tariff,
   sessions,
+  tariff,
 }: {
   series: Reading[];
-  tariff: Tariff;
   sessions: ChargeSession[];
+  tariff: Tariff;
 }) {
   const W = 920;
-  const H = 240;
+  const H = 300;
   const padL = 10;
   const padR = 10;
   const padT = 18;
-  const padB = 24;
-  const { svgRef, domain, isZoomed, resetZoom, bind, hoverMin, dragPreviewVX } = useDayChartInteraction(W, padL, padR);
+  const padB = 26;
+  const { svgRef, domain, isZoomed, resetZoom, bind, hoverMin, dragPreviewVX } =
+    useDayChartInteraction(W, padL, padR);
+
+  // Tesla charging power per minute-of-day, expanded from session windows.
+  // Live per-minute charge power needs the Tesla Fleet API; until that's
+  // connected this is each completed session's average power (energy ÷
+  // duration) held flat across the session, which is why it reads as steps.
+  const chargeAt = (min: number): number => {
+    for (const s of sessions) {
+      if (s.avgPowerKw == null) continue;
+      const start = new Date(s.started_ts * 1000);
+      const end = new Date((s.ended_ts ?? s.started_ts) * 1000);
+      const a = start.getHours() * 60 + start.getMinutes();
+      let b = end.getHours() * 60 + end.getMinutes();
+      if (b < a) b = 1440; // ran past local midnight
+      if (min >= a && min <= b) return s.avgPowerKw;
+    }
+    return 0;
+  };
 
   const pts = series
     .map((r) => {
+      const min = minutesOfDayLocal(r.local_time);
+      const tesla = chargeAt(min);
       const house = r.house_kw ?? 0;
-      const grid = Math.max(0, r.grid_import_kw ?? 0);
-      return { min: minutesOfDayLocal(r.local_time), house, self: Math.max(0, house - grid), grid };
+      // Positive = importing, negative = exporting.
+      const grid = Math.max(0, r.grid_import_kw ?? 0) - Math.max(0, r.grid_export_kw ?? 0);
+      const bChg = Math.max(0, r.battery_charge_kw ?? 0);
+      const bDis = Math.max(0, r.battery_discharge_kw ?? 0);
+      const solar = r.solar_total_kw ?? 0;
+      return {
+        min,
+        time: r.local_time,
+        tesla,
+        grid,
+        // Positive = battery powering the house, negative = battery charging.
+        battery: bDis - bChg,
+        bChg,
+        bDis,
+        // Whether a charge is being covered by solar. Anker only splits
+        // solar-vs-grid charging in DAILY totals, not per sample, so this
+        // compares instantaneous solar against the charge rate instead of
+        // claiming a measured split.
+        chargeFromSolar: bChg > 0.05 ? solar >= bChg - 0.05 : null,
+        // Never let rounding push this below zero.
+        houseExclTesla: Math.max(0, house - tesla),
+        house,
+        solar,
+      };
     })
     .sort((a, b) => a.min - b.min);
 
-  const chargePts = sessions
-    .filter((s) => s.avgPowerKw != null)
-    .map((s) => {
-      const start = new Date(s.started_ts * 1000);
-      const end = new Date((s.ended_ts ?? s.started_ts) * 1000);
-      const startMin = start.getHours() * 60 + start.getMinutes();
-      let endMin = end.getHours() * 60 + end.getMinutes();
-      if (endMin < startMin) endMin = 1440;
-      return { startMin, endMin, kw: s.avgPowerKw as number };
-    });
+  const inView = pts.filter((p) => p.min >= domain[0] && p.min <= domain[1]);
+  const scaleSet = inView.length ? inView : pts;
 
-  const visible = pts.filter((p) => p.min >= domain[0] && p.min <= domain[1]);
-  const visibleCharge = chargePts.filter((c) => c.endMin >= domain[0] && c.startMin <= domain[1]);
   const ymax =
-    Math.max(1, ...(visible.length ? visible : pts).map((p) => p.house), ...visibleCharge.map((c) => c.kw)) * 1.15;
-  const x = (min: number) => padL + ((min - domain[0]) / (domain[1] - domain[0])) * (W - padL - padR);
-  const y = (v: number) => H - padB - (v / ymax) * (H - padT - padB);
-  const base = y(0);
+    Math.max(
+      1,
+      ...scaleSet.map((p) => Math.max(p.tesla, p.grid, p.houseExclTesla, p.solar, p.battery)),
+    ) * 1.12;
+  // Only give up axis room to negatives if something actually went negative
+  // (grid exporting, or the battery charging).
+  const minNeg = Math.min(0, ...scaleSet.map((p) => Math.min(p.grid, p.battery)));
+  const ymin = minNeg < 0 ? minNeg * 1.15 : 0;
 
-  const greenArea =
-    pts.length > 0
-      ? `M ${x(pts[0].min)} ${base} ` +
-        pts.map((p) => `L ${x(p.min)} ${y(p.self)}`).join(" ") +
-        ` L ${x(pts[pts.length - 1].min)} ${base} Z`
+  const x = (min: number) => padL + ((min - domain[0]) / (domain[1] - domain[0])) * (W - padL - padR);
+  const y = (v: number) => H - padB - ((v - ymin) / (ymax - ymin)) * (H - padT - padB);
+  const zeroY = y(0);
+
+  const linePath = (key: "tesla" | "grid" | "houseExclTesla" | "solar" | "battery") =>
+    pts.length
+      ? pts.map((p, i) => `${i === 0 ? "M" : "L"} ${x(p.min)} ${y(p[key])}`).join(" ")
       : "";
-  const redBand =
-    pts.length > 0
-      ? `M ` +
-        pts.map((p) => `${x(p.min)} ${y(p.house)}`).join(" L ") +
-        " L " +
-        [...pts].reverse().map((p) => `${x(p.min)} ${y(p.self)}`).join(" L ") +
-        " Z"
-      : "";
+
+  const solarArea = pts.length
+    ? `M ${x(pts[0].min)} ${zeroY} ` +
+      pts.map((p) => `L ${x(p.min)} ${y(p.solar)}`).join(" ") +
+      ` L ${x(pts[pts.length - 1].min)} ${zeroY} Z`
+    : "";
+
+  // The grid line is drawn per-segment so it can switch colour at zero
+  // (orange while importing, green while exporting).
+  const gridSegments = pts.slice(1).map((p, i) => {
+    const prev = pts[i];
+    const exporting = (p.grid + prev.grid) / 2 < 0;
+    return {
+      d: `M ${x(prev.min)} ${y(prev.grid)} L ${x(p.min)} ${y(p.grid)}`,
+      color: exporting ? C.export : C.grid,
+      key: `${prev.min}-${p.min}`,
+    };
+  });
 
   const peakBands: [number, number][] =
     tariff.peakStartHour <= tariff.peakEndHour
-      ? [[tariff.peakStartHour, tariff.peakEndHour]]
+      ? [[tariff.peakStartHour * 60, tariff.peakEndHour * 60]]
       : [
-          [tariff.peakStartHour, 24],
-          [0, tariff.peakEndHour],
+          [tariff.peakStartHour * 60, 1440],
+          [0, tariff.peakEndHour * 60],
         ];
 
   const nearest =
     hoverMin == null || pts.length === 0
       ? null
       : pts.reduce((a, b) => (Math.abs(b.min - hoverMin) < Math.abs(a.min - hoverMin) ? b : a));
-  const activeCharge =
-    hoverMin == null ? null : chargePts.find((c) => hoverMin >= c.startMin && hoverMin <= c.endMin) ?? null;
+
+  // Gridline values, always including zero so the export boundary is obvious.
+  const yTicks = Array.from(new Set([ymin, 0, ymax / 2, ymax].filter((v) => v >= ymin && v <= ymax)));
 
   return (
     <div className="relative">
@@ -368,18 +334,26 @@ export function GridRelianceChartDay({
         viewBox={`0 0 ${W} ${H}`}
         className="w-full touch-none cursor-crosshair"
         role="img"
-        aria-label="Grid reliance"
+        aria-label="Live power: Tesla charging, grid, and home consumption"
         {...bind}
       >
         {peakBands.map(([s, e], i) => (
-          <rect key={i} x={x(s * 60)} y={padT} width={x(e * 60) - x(s * 60)} height={base - padT} fill={C.solar} fillOpacity={0.07} />
+          <rect
+            key={i}
+            x={x(s)}
+            y={padT}
+            width={Math.max(0, x(e) - x(s))}
+            height={H - padB - padT}
+            fill={C.solar}
+            fillOpacity={0.06}
+          />
         ))}
         {peakBands.length > 0 && (
           <text
-            x={x(((peakBands[0][0] + peakBands[0][1]) / 2) * 60)}
+            x={x((peakBands[0][0] + peakBands[0][1]) / 2)}
             y={padT + 11}
             fill={C.solar}
-            fillOpacity={0.65}
+            fillOpacity={0.6}
             fontSize={9}
             textAnchor="middle"
             fontFamily="var(--font-geist-mono)"
@@ -387,47 +361,138 @@ export function GridRelianceChartDay({
             PEAK
           </text>
         )}
-        {[0, 0.5, 1].map((f) => (
-          <line key={f} x1={padL} x2={W - padR} y1={y(ymax * f)} y2={y(ymax * f)} stroke="#1f1f1f" strokeWidth={1} />
+
+        {yTicks.map((v) => (
+          <g key={v}>
+            <line
+              x1={padL}
+              x2={W - padR}
+              y1={y(v)}
+              y2={y(v)}
+              stroke={Math.abs(v) < 1e-9 ? "#3f3f3f" : "#1f1f1f"}
+              strokeWidth={1}
+            />
+            <text
+              x={padL}
+              y={y(v) - 4}
+              fill="#737373"
+              fontSize={10}
+              fontFamily="var(--font-geist-mono)"
+            >
+              {v.toFixed(1)} kW
+            </text>
+          </g>
         ))}
-        {[0, 0.5, 1].map((f) => (
-          <text key={`l${f}`} x={padL} y={y(ymax * f) - 4} fill="#737373" fontSize={10} fontFamily="var(--font-geist-mono)">
-            {(ymax * f).toFixed(1)} kW
-          </text>
-        ))}
+
         {ticksFor(domain).map((t) => (
-          <text key={t} x={x(t)} y={H - 8} fill="#737373" fontSize={10} textAnchor="middle" fontFamily="var(--font-geist-mono)">
-            {minToTime(t)}
-          </text>
+          <g key={t}>
+            <line
+              x1={x(t)}
+              x2={x(t)}
+              y1={padT}
+              y2={H - padB}
+              stroke="#1f1f1f"
+              strokeWidth={1}
+              strokeDasharray="2 4"
+            />
+            <text
+              x={x(t)}
+              y={H - 8}
+              fill="#737373"
+              fontSize={10}
+              textAnchor="middle"
+              fontFamily="var(--font-geist-mono)"
+            >
+              {minToTime(t)}
+            </text>
+          </g>
         ))}
-        {greenArea && <path d={greenArea} fill={C.self} fillOpacity={0.5} stroke="none" />}
-        {redBand && <path d={redBand} fill={C.grid} fillOpacity={0.5} stroke="none" />}
+
+        {/* solar, faint, purely as context for why grid goes negative */}
+        {solarArea && <path d={solarArea} fill={C.solar} fillOpacity={0.1} stroke="none" />}
+        {pts.length > 1 && (
+          <path d={linePath("solar")} fill="none" stroke={C.solar} strokeOpacity={0.35} strokeWidth={1} />
+        )}
+
+        {gridSegments.map((s) => (
+          <path key={s.key} d={s.d} fill="none" stroke={s.color} strokeWidth={1.75} />
+        ))}
+
+        {pts.length > 1 && (
+          <path d={linePath("battery")} fill="none" stroke={C.battery} strokeWidth={1.75} />
+        )}
+        {pts.length > 1 && (
+          <path d={linePath("houseExclTesla")} fill="none" stroke={C.house} strokeWidth={1.75} />
+        )}
+        {pts.length > 1 && (
+          <path d={linePath("tesla")} fill="none" stroke={C.charge} strokeWidth={1.75} />
+        )}
+
+        {/* single-sample day: dots, since a line needs two points */}
         {pts.length === 1 && (
           <>
-            <rect x={x(pts[0].min) - 2} y={y(pts[0].self)} width={4} height={base - y(pts[0].self)} fill={C.self} />
-            <rect x={x(pts[0].min) - 2} y={y(pts[0].house)} width={4} height={y(pts[0].self) - y(pts[0].house)} fill={C.grid} />
+            <circle cx={x(pts[0].min)} cy={y(pts[0].grid)} r={3} fill={pts[0].grid < 0 ? C.export : C.grid} />
+            <circle cx={x(pts[0].min)} cy={y(pts[0].houseExclTesla)} r={3} fill={C.house} />
+            {pts[0].tesla > 0 && <circle cx={x(pts[0].min)} cy={y(pts[0].tesla)} r={3} fill={C.charge} />}
           </>
         )}
-        {chargePts.map((c, i) => (
-          <path key={i} d={`M ${x(c.startMin)} ${y(c.kw)} L ${x(c.endMin)} ${y(c.kw)}`} stroke={C.charge} strokeWidth={2.5} strokeLinecap="round" />
-        ))}
+
         {nearest && (
           <>
-            <line x1={x(nearest.min)} x2={x(nearest.min)} y1={padT} y2={base} stroke="#737373" strokeWidth={1} strokeDasharray="2 3" />
-            <circle cx={x(nearest.min)} cy={y(nearest.self)} r={3.5} fill={C.self} />
-            <circle cx={x(nearest.min)} cy={y(nearest.house)} r={3.5} fill={C.grid} />
+            <line
+              x1={x(nearest.min)}
+              x2={x(nearest.min)}
+              y1={padT}
+              y2={H - padB}
+              stroke="#737373"
+              strokeWidth={1}
+              strokeDasharray="2 3"
+            />
+            <circle cx={x(nearest.min)} cy={y(nearest.grid)} r={3.5} fill={nearest.grid < 0 ? C.export : C.grid} />
+            <circle cx={x(nearest.min)} cy={y(nearest.houseExclTesla)} r={3.5} fill={C.house} />
+            {Math.abs(nearest.battery) > 0.05 && (
+              <circle cx={x(nearest.min)} cy={y(nearest.battery)} r={3.5} fill={C.battery} />
+            )}
+            {nearest.tesla > 0 && <circle cx={x(nearest.min)} cy={y(nearest.tesla)} r={3.5} fill={C.charge} />}
           </>
         )}
+
         {dragPreviewVX && (
-          <rect x={dragPreviewVX[0]} y={padT} width={dragPreviewVX[1] - dragPreviewVX[0]} height={base - padT} fill="#f5f5f4" fillOpacity={0.1} />
+          <rect
+            x={dragPreviewVX[0]}
+            y={padT}
+            width={dragPreviewVX[1] - dragPreviewVX[0]}
+            height={H - padB - padT}
+            fill="#f5f5f4"
+            fillOpacity={0.1}
+          />
         )}
       </svg>
+
       {nearest && !dragPreviewVX && (
         <Tooltip leftPct={(x(nearest.min) / W) * 100}>
-          <div className="text-foreground mb-1">{minToTime(nearest.min)}</div>
-          <TipRow color={C.self} label="Self" value={`${fmt2(nearest.self)} kW`} />
-          <TipRow color={C.grid} label="Grid" value={`${fmt2(nearest.grid)} kW`} />
-          {activeCharge && <TipRow color={C.charge} label="Charging" value={`${fmt2(activeCharge.kw)} kW`} />}
+          <div className="text-foreground mb-1">{nearest.time}</div>
+          <TipRow color={C.charge} label="Tesla" value={`${fmt2(nearest.tesla)} kW`} />
+          <TipRow
+            color={nearest.grid < 0 ? C.export : C.grid}
+            label={nearest.grid < 0 ? "Exporting" : "Grid"}
+            value={`${fmt2(Math.abs(nearest.grid))} kW`}
+          />
+          <TipRow color={C.house} label="Home (excl. car)" value={`${fmt2(nearest.houseExclTesla)} kW`} />
+          <TipRow
+            color={C.battery}
+            label={
+              nearest.bDis > 0.05
+                ? "Battery → home"
+                : nearest.bChg > 0.05
+                  ? nearest.chargeFromSolar
+                    ? "Charging (solar)"
+                    : "Charging (some grid)"
+                  : "Battery idle"
+            }
+            value={`${fmt2(Math.abs(nearest.battery))} kW`}
+          />
+          <TipRow color={C.solar} label="Solar" value={`${fmt2(nearest.solar)} kW`} />
         </Tooltip>
       )}
     </div>

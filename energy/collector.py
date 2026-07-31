@@ -108,6 +108,14 @@ def _kv_request(cfg: dict, path: str, method: str, body: dict | None = None) -> 
         return json.loads(resp.read().decode())
 
 
+# Process-level state so a multi-sample run touches KV exactly twice (once to
+# restore the token, once to persist it) rather than per sample. Re-reading the
+# on-disk cache each sample is cheap and does NOT re-login — the library only
+# authenticates when the cached token is missing or expired.
+_anker_cache_loaded = False
+_anker_cache_path: Path | None = None
+
+
 def load_anker_cache_blob(cfg: dict) -> str | None:
     try:
         return _kv_request(cfg, "/api/energy/anker-cache", "GET").get("blob")
@@ -230,11 +238,15 @@ async def collect_anker(cfg: dict) -> dict:
         # Anker's ~10-12/min so we can never trip their limiter.
         myapi.endpointLimit(5)
 
+        global _anker_cache_loaded, _anker_cache_path
         cache_path = Path(myapi.apisession._authFile)  # noqa: SLF001 — intentional: no public accessor for this path
-        cached_blob = load_anker_cache_blob(cfg)
-        if cached_blob:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(cached_blob)
+        _anker_cache_path = cache_path
+        if not _anker_cache_loaded:
+            cached_blob = load_anker_cache_blob(cfg)
+            if cached_blob:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(cached_blob)
+            _anker_cache_loaded = True
 
         try:
             hes = AnkerSolixHesApi(apisession=myapi.apisession)
@@ -266,13 +278,24 @@ async def collect_anker(cfg: dict) -> dict:
                 "grid_export_kwh_today": _f(today.get("solar_to_grid")),
                 "battery_charge_kwh_today": _f(today.get("battery_charge")),
                 "battery_discharge_kwh_today": _f(today.get("battery_discharge")),
+                # Anker's own flow accounting — where power actually went,
+                # rather than leaving it to be derived downstream.
+                "solar_to_home_kwh_today": _f(today.get("solar_to_home")),
+                "solar_to_battery_kwh_today": _f(today.get("solar_to_battery")),
+                "battery_to_home_kwh_today": _f(today.get("battery_to_home")),
+                "grid_to_home_kwh_today": _f(today.get("grid_to_home")),
+                "home_usage_kwh_today": _f(today.get("home_usage")),
             }
         finally:
-            # Persist whatever token is now on disk (fresh or reused) even if
-            # the calls above failed partway through — a successful login
-            # followed by a later error would otherwise lose the fresh token.
-            if cache_path.is_file():
-                save_anker_cache_blob(cfg, cache_path.read_text())
+            pass  # token is persisted once per process; see persist_anker_cache()
+
+
+def persist_anker_cache(cfg: dict) -> None:
+    """Push whatever token is on disk back to KV. Called once at process exit
+    (including after failures) so a fresh login isn't lost if a later call in
+    the same run errors out."""
+    if _anker_cache_path is not None and _anker_cache_path.is_file():
+        save_anker_cache_blob(cfg, _anker_cache_path.read_text())
 
 
 async def collect_once(cfg: dict) -> dict:
@@ -318,10 +341,15 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="run a single cycle")
     ap.add_argument("--dry-run", action="store_true", help="print payload, do not POST")
-    # 300 s is deliberately conservative. Anker rate-limits ~10-12 requests per
-    # IP per minute and each cycle makes several calls; the Growatt datalogger
-    # only reports every 5 min anyway, so faster polling gains nothing and
-    # risks the account being throttled or blocked. Enforced floor below.
+    # Multi-sample mode: take several readings within ONE process, spaced by
+    # --gap. Anker's cloud values move at roughly 1-minute granularity, so this
+    # is how the dashboard gets ~1-minute resolution without needing a CI run
+    # per minute — one 5-minute run captures ~4 samples, reusing a single
+    # authenticated session (no extra logins) for all of them.
+    ap.add_argument("--samples", type=int, default=1, help="readings per run (default 1)")
+    ap.add_argument("--gap", type=int, default=60, help="seconds between samples (default 60, min 30)")
+    # Only used in the long-running loop mode (not CI). Anker rate-limits per
+    # endpoint per minute; the floor keeps us clear of it.
     ap.add_argument("--interval", type=int, default=300, help="loop seconds (default 300, min 120)")
     args = ap.parse_args()
 
@@ -332,24 +360,35 @@ async def main() -> None:
         print(f"!! missing config: {missing}", file=sys.stderr)
         sys.exit(1)
 
-    while True:
-        t0 = time.time()
-        payload = await collect_once(cfg)
-        print(f"[{time.strftime('%H:%M:%S')}] sources={payload.get('sources')!r} "
-              f"solar_new={payload.get('solar_new_kw')} solar_old={payload.get('solar_old_kw')} "
-              f"soc={payload.get('battery_soc')} grid_imp={payload.get('grid_import_kw')}")
-        if args.dry_run:
-            print(json.dumps(payload, indent=2))
-        else:
-            try:
-                post_reading(cfg, payload)
-            except Exception as e:  # noqa: BLE001
-                log.error("post failed: %s", e)
-        if args.once:
-            break
-        # Never poll faster than every 2 min, whatever was requested.
-        interval = max(120, args.interval)
-        await asyncio.sleep(max(10, interval - (time.time() - t0)))
+    samples = max(1, args.samples)
+    gap = max(30, args.gap)
+
+    try:
+        while True:
+            t0 = time.time()
+            for i in range(samples):
+                if i:
+                    await asyncio.sleep(gap)
+                payload = await collect_once(cfg)
+                print(f"[{time.strftime('%H:%M:%S')}] ({i + 1}/{samples}) "
+                      f"sources={payload.get('sources')!r} "
+                      f"solar_new={payload.get('solar_new_kw')} solar_old={payload.get('solar_old_kw')} "
+                      f"soc={payload.get('battery_soc')} grid_imp={payload.get('grid_import_kw')}")
+                if args.dry_run:
+                    print(json.dumps(payload, indent=2))
+                else:
+                    try:
+                        post_reading(cfg, payload)
+                    except Exception as e:  # noqa: BLE001
+                        log.error("post failed: %s", e)
+            if args.once:
+                break
+            # Never poll faster than every 2 min, whatever was requested.
+            interval = max(120, args.interval)
+            await asyncio.sleep(max(10, interval - (time.time() - t0)))
+    finally:
+        if not args.dry_run:
+            persist_anker_cache(cfg)
 
 
 if __name__ == "__main__":

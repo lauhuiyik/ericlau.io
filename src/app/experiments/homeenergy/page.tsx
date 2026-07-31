@@ -19,13 +19,8 @@ import {
 } from "@/lib/energy";
 import { AutoRefresh } from "./auto-refresh";
 import { RangePicker } from "./range-picker";
-import {
-  C,
-  GridRelianceChartDay,
-  GridRelianceChartRange,
-  PowerChartDay,
-  PowerChartRange,
-} from "./charts";
+import { GridRelianceChartRange, LiveChartDay, PowerChartRange } from "./charts";
+import { C } from "@/lib/colors";
 
 export const dynamic = "force-dynamic";
 
@@ -99,7 +94,6 @@ function CostLine({ label, value, color }: { label: string; value: string; color
   );
 }
 
-/** One solar array, as a self-contained box with its own live output. */
 /** "just now" / "12m ago" / "2h ago" / "yesterday 18:40" relative to nowTs. */
 function timeAgoLabel(seen: SourceFreshness | null, today: string, nowTs: number): string {
   if (!seen) return "never reported";
@@ -112,6 +106,7 @@ function timeAgoLabel(seen: SourceFreshness | null, today: string, nowTs: number
   return `${h}h${m ? ` ${m}m` : ""} ago · ${seen.time}`;
 }
 
+/** One solar array, as a self-contained box with its own live output. */
 function ArrayBox({
   name,
   hardware,
@@ -174,10 +169,58 @@ function ArrayBox({
         <div className="text-muted">
           {kwh(todayKwh)} kWh today{extra ? ` · ${extra}` : ""}
         </div>
-        <div style={{ color: staleWarn ? C.grid : undefined }} className={staleWarn ? "" : "text-muted"}>
+        <div style={{ color: staleWarn ? C.warn : undefined }} className={staleWarn ? "" : "text-muted"}>
           Last reported: {timeAgoLabel(lastSeen, today, nowTs)}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Horizontal stacked bar showing how a total splits, with a labelled legend. */
+function FlowBar({
+  title,
+  total,
+  parts,
+  note,
+}: {
+  title: string;
+  total: number;
+  parts: { label: string; value: number; color: string }[];
+  note?: string;
+}) {
+  const shown = parts.filter((p) => p.value > 0);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-baseline justify-between gap-4">
+        <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
+          {total.toFixed(1)} kWh
+        </div>
+      </div>
+      <div className="flex h-2.5 w-full overflow-hidden bg-rule">
+        {shown.map((p) => (
+          <div
+            key={p.label}
+            style={{ width: `${total > 0 ? (p.value / total) * 100 : 0}%`, background: p.color }}
+            title={`${p.label}: ${p.value.toFixed(1)} kWh`}
+          />
+        ))}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {shown.map((p) => (
+          <div key={p.label} className="flex items-baseline justify-between gap-3 text-sm">
+            <span className="flex items-center gap-2 text-muted">
+              <span className="inline-block w-2 h-2 shrink-0" style={{ background: p.color }} />
+              {p.label}
+            </span>
+            <span className="text-foreground/90 shrink-0 font-mono text-xs">
+              {p.value.toFixed(1)} kWh · {total > 0 ? Math.round((p.value / total) * 100) : 0}%
+            </span>
+          </div>
+        ))}
+      </div>
+      {note && <p className="text-xs text-muted">{note}</p>}
     </div>
   );
 }
@@ -257,6 +300,22 @@ export default async function Page({
       ? sessions.reduce((s, c) => s + (c.energy_added_kwh ?? 0), 0)
       : daily.reduce((s, d) => s + d.homeChargeKwh, 0);
 
+  // Anker's own flow accounting for the selected day, taken from the last
+  // reading that carries it (these are cumulative-since-midnight totals).
+  const flowRow = [...costSeries].reverse().find((r) => r.home_usage_kwh_today != null) ?? null;
+  const flow = flowRow
+    ? {
+        solarToHome: flowRow.solar_to_home_kwh_today ?? 0,
+        solarToBattery: flowRow.solar_to_battery_kwh_today ?? 0,
+        solarToGrid: flowRow.grid_export_kwh_today ?? 0,
+        batteryToHome: flowRow.battery_to_home_kwh_today ?? 0,
+        gridToHome: flowRow.grid_to_home_kwh_today ?? 0,
+        ankerHome: flowRow.home_usage_kwh_today ?? 0,
+        solarTotal: flowRow.solar_new_kwh_today ?? 0,
+        growattToday: flowRow.solar_old_kwh_today,
+      }
+    : null;
+
   const cost = computeCost(costSeries, tariff);
   const gridShare = consumed > 0 ? Math.min(100, (imported / consumed) * 100) : null;
 
@@ -277,7 +336,7 @@ export default async function Page({
   const gridValue = gImp > 0.05 ? kw(gImp) : gExp > 0.05 ? kw(gExp) : "0.0";
   const gridSub = gImp > 0.05 ? "Importing" : gExp > 0.05 ? "Exporting" : "Balanced";
   // Red while drawing from the grid, green while exporting to it.
-  const gridColor = gImp > 0.05 ? C.grid : gExp > 0.05 ? C.self : undefined;
+  const gridColor = gImp > 0.05 ? C.grid : gExp > 0.05 ? C.export : undefined;
 
   const rangeLabel =
     range === "day" ? (date === today ? "Today" : date) : `${win.start} → ${win.end}`;
@@ -302,7 +361,7 @@ export default async function Page({
           ← Eric Lau
         </Link>
         <div className="flex items-center gap-6 font-mono text-xs uppercase tracking-[0.18em] text-muted">
-          {isLiveToday && <AutoRefresh seconds={30} currentTs={latestGlobal?.ts ?? null} />}
+          {isLiveToday && <AutoRefresh seconds={10} currentTs={latestGlobal?.ts ?? null} />}
           <Link href="/experiments/homeenergy/settings" className="hover:text-foreground transition-colors">
             Settings
           </Link>
@@ -345,7 +404,8 @@ export default async function Page({
             </span>
             <p className="text-muted max-w-2xl">
               The <span className="text-foreground">{missingSources.join(" and ")}</span> inverter
-              {missingSources.length > 1 ? "s aren't" : " isn't"} in the latest reading, so solar
+              {missingSources.length > 1 ? "s aren’t" : " isn’t"}{" "}
+              in the latest reading, so solar
               generation and house load below are understated for this moment — house load is
               derived from all generation sources, so a missing array pulls it down too. Grid
               import/export and cost are unaffected. This is expected overnight (no sun, nothing to
@@ -446,7 +506,7 @@ export default async function Page({
                 <CostLine
                   label={`Export credit · ${kwh(cost.exportKwh)} kWh @ $${tariff.feedIn.toFixed(3)}`}
                   value={`−${money(cost.exportCredit)}`}
-                  color={C.self}
+                  color={C.export}
                 />
                 <div className="border-t border-rule mt-1 pt-2 flex justify-between">
                   <span className="text-muted uppercase tracking-[0.18em]">Net</span>
@@ -464,42 +524,104 @@ export default async function Page({
             )}
           </section>
 
-          {/* Power / generation chart */}
-          <section className="border-t border-rule px-6 sm:px-12 py-10">
-            <div className="flex items-center gap-6 mb-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-              <span className="flex items-center gap-2">
-                <span className="inline-block w-3 h-2" style={{ background: C.solar }} /> Solar
-              </span>
-              <span className="flex items-center gap-2">
-                <span className="inline-block w-3 h-0.5" style={{ background: C.house }} /> House
-              </span>
-              <span className="ml-auto normal-case tracking-normal text-muted">
-                {range === "day" ? `${rangeLabel} · kW` : `${rangeLabel} · kWh/day`}
-              </span>
-            </div>
-            {range === "day" ? <PowerChartDay series={daySeries} /> : <PowerChartRange daily={daily} />}
-          </section>
+          {/* Where power actually came from / where solar actually went.
+              Straight from Anker's own flow accounting, not derived here. */}
+          {flow && flow.ankerHome > 0 && (
+            <section className="border-t border-rule px-6 sm:px-12 py-10">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted mb-8">
+                Energy flow · {rangeLabel}
+              </div>
+              <div className="grid sm:grid-cols-2 gap-10 sm:gap-16 max-w-4xl">
+                <FlowBar
+                  title="Where home power came from"
+                  total={flow.ankerHome}
+                  parts={[
+                    { label: "Own solar", value: flow.solarToHome, color: C.solar },
+                    { label: "Battery", value: flow.batteryToHome, color: C.battery },
+                    { label: "Grid", value: flow.gridToHome, color: C.grid },
+                  ]}
+                  note={
+                    flow.growattToday == null
+                      ? "Anker's own whole-home figure. It can't see the Growatt array, so on days that array reports, actual consumption is higher than this."
+                      : undefined
+                  }
+                />
+                <FlowBar
+                  title="Where the solar went"
+                  total={flow.solarTotal}
+                  parts={[
+                    { label: "Straight to home", value: flow.solarToHome, color: C.solar },
+                    { label: "Into battery", value: flow.solarToBattery, color: C.battery },
+                    { label: "Exported", value: flow.solarToGrid, color: C.export },
+                  ]}
+                  note={`Self-consumed ${
+                    flow.solarTotal > 0
+                      ? Math.round(((flow.solarToHome + flow.solarToBattery) / flow.solarTotal) * 100)
+                      : 0
+                  }% (home + battery) rather than exported at the ${money(tariff.feedIn)}/kWh feed-in rate.`}
+                />
+              </div>
+            </section>
+          )}
 
-          {/* Grid reliance + Tesla charging overlay */}
+          {/* One merged chart: Tesla, grid (signed), and home load excl. car */}
           <section className="border-t border-rule px-6 sm:px-12 py-10">
-            <div className="flex items-center gap-6 mb-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted flex-wrap">
-              <span className="flex items-center gap-2">
-                <span className="inline-block w-3 h-2" style={{ background: C.self }} /> Self · solar+battery
-              </span>
-              <span className="flex items-center gap-2">
-                <span className="inline-block w-3 h-2" style={{ background: C.grid }} /> Grid
-              </span>
-              <span className="flex items-center gap-2">
-                <span className="inline-block w-3 h-0.5" style={{ background: C.charge }} /> Tesla charging
-              </span>
+            <div className="flex items-center gap-x-6 gap-y-2 mb-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted flex-wrap">
+              {range === "day" ? (
+                <>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-0.5" style={{ background: C.charge }} /> Tesla charging
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-0.5" style={{ background: C.grid }} /> Grid draw
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-0.5" style={{ background: C.export }} /> Exporting (below 0)
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-0.5" style={{ background: C.house }} /> Home excl. car
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-0.5" style={{ background: C.battery }} /> Battery
+                    (− = charging)
+                  </span>
+                  <span className="flex items-center gap-2 opacity-70">
+                    <span className="inline-block w-3 h-2" style={{ background: C.solar, opacity: 0.4 }} /> Solar
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-2" style={{ background: C.self }} /> Self · solar+battery
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-2" style={{ background: C.grid }} /> Grid
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-0.5" style={{ background: C.charge }} /> Tesla charging
+                  </span>
+                </>
+              )}
               <span className="ml-auto normal-case tracking-normal text-muted">
                 {range === "day" ? `${rangeLabel} · kW` : `${rangeLabel} · kWh/day`}
               </span>
             </div>
             {range === "day" ? (
-              <GridRelianceChartDay series={daySeries} tariff={tariff} sessions={sessions} />
+              <LiveChartDay series={daySeries} tariff={tariff} sessions={sessions} />
             ) : (
               <GridRelianceChartRange daily={daily} />
+            )}
+            {range === "day" && sessions.length === 0 && (
+              <p className="mt-4 text-xs text-muted max-w-2xl">
+                No Tesla charging recorded for this day, so the red line sits at zero. Live charge
+                power needs the Tesla Fleet API connected — until then this line only shows
+                completed sessions imported from Tessie, drawn at each session&apos;s average power.
+              </p>
+            )}
+            {range !== "day" && (
+              <div className="mt-6">
+                <PowerChartRange daily={daily} />
+              </div>
             )}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-8 mt-8">
               <Stat label="Grid-powered" value={pct(gridShare)} sub="of consumption" />

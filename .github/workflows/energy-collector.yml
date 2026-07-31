@@ -23,7 +23,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 9
     steps:
       - uses: actions/checkout@v4
 
@@ -42,4 +42,8 @@ jobs:
           GROWATT_PASSWORD: ${{ secrets.GROWATT_PASSWORD }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           INGEST_URL: ${{ secrets.INGEST_URL }}
-        run: python energy/collector.py --once
+        # 4 samples 60s apart inside one run => ~1-minute resolution on the
+        # dashboard from a 5-minute CI cadence, all on one Anker session
+        # (no extra logins). Anker's cloud values move at ~1-min granularity,
+        # so this is genuinely finer data, not repeated identical samples.
+        run: python energy/collector.py --once --samples 4 --gap 60

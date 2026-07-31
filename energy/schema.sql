@@ -31,6 +31,19 @@ CREATE TABLE IF NOT EXISTS readings (
   battery_discharge_kwh_today REAL,
   house_kwh_today             REAL,                 -- derived
 
+  -- Where energy actually flowed, straight from Anker rather than derived.
+  -- Answers "where did my power come from / where did my solar go" directly,
+  -- and cross-checks house_kwh_today (verified 2026-07-31: derived 95.64 vs
+  -- Anker's own home_usage 95.63).
+  solar_to_home_kwh_today     REAL,
+  solar_to_battery_kwh_today  REAL,
+  battery_to_home_kwh_today   REAL,
+  grid_to_home_kwh_today      REAL,
+  -- Anker's OWN whole-home figure. It cannot see the Growatt array, so it
+  -- under-reports while that array generates; house_kwh_today adds it back
+  -- and is the truer total.
+  home_usage_kwh_today        REAL,
+
   sources                     TEXT                  -- which systems reported OK, e.g. 'anker,growatt'
 );
 
@@ -84,3 +97,4 @@ CREATE TABLE IF NOT EXISTS tesla_charges (
   source                   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tesla_charges_local_date ON tesla_charges (local_date);
+

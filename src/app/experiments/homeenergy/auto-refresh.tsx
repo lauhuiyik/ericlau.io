@@ -9,11 +9,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * numbers are never more than ~`seconds` stale, without pointless re-renders.
  *
  * This endpoint only reads our own KV snapshot — it never touches Anker or
- * Growatt, so it costs nothing and cannot trip their rate limits. The collector
- * (every 5 min, matching the Growatt datalogger) is what sets real freshness.
+ * Growatt, so it costs nothing and cannot trip their rate limits, which is why
+ * it can poll this often. Real freshness is set by the collector: a CI run
+ * every 5 min that takes 4 samples 60s apart, giving ~1-minute data.
  */
 export function AutoRefresh({
-  seconds = 30,
+  seconds = 10,
   currentTs,
 }: {
   seconds?: number;

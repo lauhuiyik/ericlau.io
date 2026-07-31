@@ -1,13 +1,19 @@
 name: Energy collector
 
-# Runs the home energy collector on a schedule so it works 24/7 without
-# relying on any machine being on. GitHub's scheduler can run a little late
-# under load, so this is a best-effort ~5 min cadence, matching the Growatt
-# datalogger's own reporting interval — no faster, to stay well clear of
-# Anker's rate limits.
+# Runs the home energy collector so it works 24/7 without relying on any
+# machine being on. Cadence is ~5 min, matching the Growatt datalogger's own
+# reporting interval — no faster, to stay clear of Anker's rate limits.
+#
+# Intentionally dispatch-ONLY. The schedule lives in the companion Cloudflare
+# Worker (cron-pinger/), which calls workflow_dispatch, for two reasons:
+#   1. GitHub's own `schedule:` trigger proved unreliable here — it fired at
+#      1-3 HOUR gaps rather than every 5 min, which is why the Worker exists.
+#   2. More importantly, a second uncontrolled trigger meant "pause the
+#      collector" didn't actually pause it: during a deliberate pause after an
+#      Anker rate-limit lockout, GitHub's schedule kept firing anyway and kept
+#      logging in. One controllable trigger means pausing the Worker is now a
+#      real, complete stop.
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 concurrency:

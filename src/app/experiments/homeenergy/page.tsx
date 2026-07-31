@@ -225,12 +225,86 @@ function FlowBar({
   );
 }
 
+/** One term in the energy-balance strip: a live kW figure, the running total
+ * for the period beneath it, and an optional breakdown line. */
+function BalanceTerm({
+  label,
+  nowKw,
+  todayKwh,
+  detail,
+  color,
+}: {
+  label: string;
+  nowKw: number | null;
+  todayKwh: number | null;
+  detail?: string;
+  color?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1 min-w-[7.5rem]">
+      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">{label}</div>
+      <div className="flex items-baseline gap-1">
+        <span className="text-3xl font-semibold tracking-[-0.02em]" style={{ color }}>
+          {kw(nowKw)}
+        </span>
+        <span className="text-xs text-muted">kW</span>
+      </div>
+      <div className="font-mono text-[11px] text-muted">{kwh(todayKwh)} kWh</div>
+      {detail && <div className="font-mono text-[10px] text-muted/80 leading-relaxed">{detail}</div>}
+    </div>
+  );
+}
+
+/** The +, −, = glyphs separating balance terms. */
+function Op({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-2xl text-muted/50 font-light select-none pt-5 shrink-0">{children}</div>
+  );
+}
+
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="flex flex-col gap-1.5 py-5">
       <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">{label}</div>
       <div className="text-2xl font-medium tracking-[-0.01em]">{value}</div>
       {sub && <div className="text-xs text-muted">{sub}</div>}
+    </div>
+  );
+}
+
+/** The physical system, from the signed Bascon proposals and the Clean Energy
+ * Regulator panel-validation certificate. Static facts, not telemetry. */
+const SYSTEM = {
+  arrays: [
+    {
+      name: "Original array",
+      dc: "6.6 kW",
+      panels: "20 × 330 W Jinko Cheetah",
+      inverter: "Growatt 5000TL3-S · 5 kW",
+      year: "2021",
+    },
+    {
+      name: "New array",
+      dc: "6.16 kW",
+      panels: "14 × 440 W DAS Solar",
+      inverter: "Anker SOLIX X1 · 5 kW hybrid",
+      year: "2025",
+    },
+  ],
+  totalDc: "12.76 kW",
+  battery: "10 kWh usable · 2 × Anker X1-B5-H LFP",
+  inverterAc: "10 kW AC · 3-phase",
+  evCharger: "22 kW · 3-phase",
+  exportLimit: "5 kW",
+  grid: "Powercor · 3-phase",
+} as const;
+
+function SpecRow({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-muted/70">{label}</div>
+      <div className="text-sm text-foreground/90">{value}</div>
+      {sub && <div className="font-mono text-[10px] text-muted">{sub}</div>}
     </div>
   );
 }
@@ -316,6 +390,26 @@ export default async function Page({
       }
     : null;
 
+  // ---- Energy balance ------------------------------------------------------
+  // What the property USES has to equal what SUPPLIES it:
+  //     home(excl. car) + car  =  solar + battery + grid
+  // Battery and grid are signed: battery is positive while discharging to the
+  // house and negative while charging; grid is positive while importing and
+  // negative while exporting. Both sides balance exactly, which is the point
+  // of showing them side by side.
+  //
+  // Note this is NOT "home + car − solar − battery + grid" — that mixes demand
+  // and supply on one side and double-counts (it returned 6.98 kW against an
+  // actual 3.49 kW draw when checked against live data).
+  const liveTeslaKw = 0; // live charge power needs the Tesla Fleet API; sessions are historical
+  const balNow = {
+    homeExclTesla: Math.max(0, (latestGlobal?.house_kw ?? 0) - liveTeslaKw),
+    tesla: liveTeslaKw,
+    solar: latestGlobal?.solar_total_kw ?? 0,
+    battery: (latestGlobal?.battery_discharge_kw ?? 0) - (latestGlobal?.battery_charge_kw ?? 0),
+    grid: (latestGlobal?.grid_import_kw ?? 0) - (latestGlobal?.grid_export_kw ?? 0),
+  };
+
   const cost = computeCost(costSeries, tariff);
   const gridShare = consumed > 0 ? Math.min(100, (imported / consumed) * 100) : null;
 
@@ -341,15 +435,9 @@ export default async function Page({
   const rangeLabel =
     range === "day" ? (date === today ? "Today" : date) : `${win.start} → ${win.end}`;
 
-  // Which inverters reported in the most recent sample. When one is missing,
-  // solar totals AND the derived house load are understated, so say so plainly
-  // rather than presenting a partial number as if it were complete. This is
-  // routine overnight (Growatt has nothing to report without sun) — the
-  // wording below stays neutral and points at each array's own "last
-  // reported" time instead of reading as an alarm every single night.
-  const reported = (latestGlobal?.sources ?? "").split(",").filter(Boolean);
-  const missingSources = ["anker", "growatt"].filter((s) => !reported.includes(s));
-  const showPartialWarning = isLiveToday && latestGlobal != null && missingSources.length > 0;
+  // A missing inverter is surfaced per-array in the solar boxes below (each
+  // shows its own "last reported" time), rather than as a page-level banner —
+  // Growatt reporting nothing after dark is routine, not an alert.
 
   return (
     <div className="flex flex-1 flex-col">
@@ -376,10 +464,26 @@ export default async function Page({
         <h1 className="text-5xl sm:text-6xl md:text-7xl font-semibold tracking-[-0.03em] leading-[0.9]">
           Home Energy
         </h1>
-        <p className="mt-6 max-w-xl text-lg text-muted leading-relaxed">
-          Live from 36 Australis Dr — two solar arrays (12.8 kW), a 10 kWh battery, and the grid,
-          combined into one view.
+        <p className="mt-5 text-sm text-muted">
+          36 Australis Dr, Williams Landing — {SYSTEM.totalDc} of solar across two arrays, a{" "}
+          10 kWh battery, and a 22 kW car charger.
         </p>
+
+        {/* What the system physically is, at a glance */}
+        <div className="mt-7 grid grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-5 max-w-3xl">
+          {SYSTEM.arrays.map((a) => (
+            <SpecRow
+              key={a.name}
+              label={`${a.name} · ${a.year}`}
+              value={`${a.dc} · ${a.panels}`}
+              sub={a.inverter}
+            />
+          ))}
+          <SpecRow label="Battery" value={SYSTEM.battery} sub="charges from solar first" />
+          <SpecRow label="Inverters" value={SYSTEM.inverterAc} sub={`export limit ${SYSTEM.exportLimit}`} />
+          <SpecRow label="EV charger" value={SYSTEM.evCharger} sub="Tesla, charged at home" />
+          <SpecRow label="Grid" value={SYSTEM.grid} sub="Lumo · time-of-use" />
+        </div>
         {isLiveToday && (
           <p className="mt-3 font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
             {hasData ? (
@@ -396,27 +500,6 @@ export default async function Page({
         </div>
       </section>
 
-      {showPartialWarning && (
-        <section className="border-t border-rule px-6 sm:px-12 py-5">
-          <div className="flex items-start gap-3 text-sm">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted pt-1">
-              Partial
-            </span>
-            <p className="text-muted max-w-2xl">
-              The <span className="text-foreground">{missingSources.join(" and ")}</span> inverter
-              {missingSources.length > 1 ? "s aren’t" : " isn’t"}{" "}
-              in the latest reading, so solar
-              generation and house load below are understated for this moment — house load is
-              derived from all generation sources, so a missing array pulls it down too. Grid
-              import/export and cost are unaffected. This is expected overnight (no sun, nothing to
-              report) — check each array&apos;s{" "}
-              <span className="text-foreground">last reported</span> time below to tell that apart
-              from a genuine outage.
-            </p>
-          </div>
-        </section>
-      )}
-
       {!hasData ? (
         <section className="px-6 sm:px-12 py-16 border-t border-rule">
           <p className="text-muted">
@@ -425,6 +508,96 @@ export default async function Page({
         </section>
       ) : (
         <>
+          {/* The balance: what's being used, and what's supplying it */}
+          <section className="px-6 sm:px-12 pb-10">
+            <div className="flex items-baseline justify-between gap-4 mb-8 flex-wrap">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+                Where your power is going · {isLiveToday ? "now" : rangeLabel}
+              </div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
+                big number = right now · small = {rangeLabel.toLowerCase()}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-start gap-x-2 gap-y-8">
+              <BalanceTerm
+                label="Home"
+                nowKw={isLiveToday ? balNow.homeExclTesla : null}
+                todayKwh={Math.max(0, consumed - homeChargeKwh)}
+                detail="excludes the car"
+                color={C.house}
+              />
+              <div className="flex items-start gap-2">
+                <Op>+</Op>
+                <BalanceTerm
+                  label="Tesla"
+                  nowKw={isLiveToday ? balNow.tesla : null}
+                  todayKwh={homeChargeKwh}
+                  detail="charged at home"
+                  color={C.charge}
+                />
+              </div>
+              <div className="flex items-start gap-2">
+                <Op>=</Op>
+                <BalanceTerm
+                  label="Solar"
+                  nowKw={isLiveToday ? balNow.solar : null}
+                  todayKwh={generated}
+                  detail={
+                    isLiveToday && latestGlobal
+                      ? `new ${kw(latestGlobal.solar_new_kw)} + old ${kw(latestGlobal.solar_old_kw)}`
+                      : undefined
+                  }
+                  color={C.solar}
+                />
+              </div>
+              <div className="flex items-start gap-2">
+                <Op>+</Op>
+                <BalanceTerm
+                  label="Battery"
+                  nowKw={isLiveToday ? balNow.battery : null}
+                  todayKwh={
+                    (latestGlobal?.battery_discharge_kwh_today ?? 0) -
+                    (latestGlobal?.battery_charge_kwh_today ?? 0)
+                  }
+                  detail={
+                    flow
+                      ? `charged ${flow.solarToBattery.toFixed(1)} solar / ${Math.max(
+                          0,
+                          (latestGlobal?.battery_charge_kwh_today ?? 0) - flow.solarToBattery,
+                        ).toFixed(1)} grid`
+                      : undefined
+                  }
+                  color={C.battery}
+                />
+              </div>
+              <div className="flex items-start gap-2">
+                <Op>+</Op>
+                <BalanceTerm
+                  label="Grid"
+                  nowKw={isLiveToday ? balNow.grid : null}
+                  todayKwh={cost.importKwh - cost.exportKwh}
+                  detail={`peak ${kwh(cost.peakKwh)} ${money(
+                    cost.peakKwh * tariff.peakRate,
+                  )} · off-pk ${kwh(cost.offPeakKwh)} ${money(cost.offPeakKwh * tariff.offPeakRate)}`}
+                  color={balNow.grid < 0 ? C.export : C.grid}
+                />
+              </div>
+            </div>
+
+            <p className="mt-8 text-xs text-muted max-w-3xl">
+              Read it left to right: what the house and car are using has to come from somewhere —
+              solar first, then the battery, and the grid covers whatever is left. Battery and grid
+              go <span className="text-foreground">negative</span>{" "}
+              when they&apos;re absorbing rather than supplying (battery charging, solar
+              exporting), so both sides always balance.
+              {isLiveToday && (
+                <>{" "}Tesla live charge power needs the Fleet API connected; today&apos;s total
+                comes from imported session history.</>
+              )}
+            </p>
+          </section>
+
           {/* Live tiles — only for "today" in day mode */}
           {isLiveToday && latestGlobal && (
             <section className="border-t border-rule px-6 sm:px-12">

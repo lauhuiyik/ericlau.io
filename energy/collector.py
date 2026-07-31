@@ -208,7 +208,10 @@ def collect_tesla(cfg: dict) -> dict | None:
     # A sleeping car returns 408; that's normal and not an error worth shouting
     # about — it just means no fresh sample this cycle.
     try:
-        data = api(f"/api/1/vehicles/{tag}/vehicle_data?endpoints=charge_state%3Bdrive_state")
+        data = api(
+            f"/api/1/vehicles/{tag}/vehicle_data"
+            "?endpoints=charge_state%3Bdrive_state%3Blocation_data"
+        )
     except urllib.error.HTTPError as e:
         if e.code in (408, 503):
             log.info("tesla asleep/unavailable (%s) — no sample this cycle", e.code)
@@ -218,7 +221,11 @@ def collect_tesla(cfg: dict) -> dict | None:
     cs = resp.get("charge_state") or {}
     ds = resp.get("drive_state") or {}
 
-    lat, lng = _f(ds.get("latitude")), _f(ds.get("longitude"))
+    # Coordinates come back under location_data; drive_state carries speed and
+    # heading but not position, so read location_data first and fall back.
+    loc = resp.get("location_data") or {}
+    lat = _f(loc.get("latitude")) if loc.get("latitude") is not None else _f(ds.get("latitude"))
+    lng = _f(loc.get("longitude")) if loc.get("longitude") is not None else _f(ds.get("longitude"))
     at_home = None
     if lat is not None and lng is not None:
         at_home = _haversine_m(lat, lng, HOME_LAT, HOME_LNG) <= HOME_RADIUS_M
@@ -402,7 +409,7 @@ def persist_anker_cache(cfg: dict) -> None:
         save_anker_cache_blob(cfg, _anker_cache_path.read_text())
 
 
-async def collect_once(cfg: dict) -> dict:
+async def collect_once(cfg: dict, include_tesla: bool = True) -> dict:
     payload: dict = {}
     sources: list[str] = []
 
@@ -423,6 +430,14 @@ async def collect_once(cfg: dict) -> dict:
 
     # Tesla is posted to its own endpoint (different table), so it doesn't
     # join the energy payload — but note it in sources for visibility.
+    #
+    # Deliberately only once per run, not once per sample: reading vehicle_data
+    # won't wake a sleeping car (it returns 408), but polling an awake one every
+    # ~60s stops it going back to sleep and drains the battery. Charge power
+    # moves slowly enough that 5-minute resolution is plenty.
+    if not include_tesla:
+        payload["sources"] = ",".join(sources)
+        return payload
     try:
         t = await asyncio.to_thread(collect_tesla, cfg)
         if t is not None:
@@ -499,7 +514,7 @@ async def main() -> None:
             for i in range(samples):
                 if i:
                     await asyncio.sleep(gap)
-                payload = await collect_once(cfg)
+                payload = await collect_once(cfg, include_tesla=(i == 0))
                 print(f"[{time.strftime('%H:%M:%S')}] ({i + 1}/{samples}) "
                       f"sources={payload.get('sources')!r} "
                       f"solar_new={payload.get('solar_new_kw')} solar_old={payload.get('solar_old_kw')} "

@@ -657,3 +657,82 @@ function minutesOfDayLocal(localTime: string): number {
   const [hh, mm] = localTime.split(":").map(Number);
   return hh * 60 + mm;
 }
+
+// ---------- Share-of-consumption bar ----------
+
+export type ShareSlice = { label: string; kwh: number; color: string; note?: string };
+
+/**
+ * Horizontal bar showing what share of the period's consumption came from each
+ * source, with grid split by tariff. Hovering a segment surfaces its exact kWh
+ * and share; the legend below always lists them too, so the information isn't
+ * hover-only.
+ */
+export function ShareBar({ slices }: { slices: ShareSlice[] }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const shown = slices.filter((s) => s.kwh > 0);
+  const total = shown.reduce((sum, s) => sum + s.kwh, 0);
+  if (total <= 0) return <p className="text-sm text-muted">No consumption recorded yet.</p>;
+
+  const pct = (v: number) => (v / total) * 100;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="relative">
+        <div className="flex h-8 w-full overflow-hidden bg-rule">
+          {shown.map((s, i) => (
+            <div
+              key={s.label}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover(null)}
+              className="transition-opacity cursor-default"
+              style={{
+                width: `${pct(s.kwh)}%`,
+                background: s.color,
+                opacity: hover === null || hover === i ? 1 : 0.4,
+              }}
+            />
+          ))}
+        </div>
+        {hover !== null && shown[hover] && (
+          <div
+            className="absolute -top-1 -translate-y-full -translate-x-1/2 bg-background border border-rule px-3 py-2 font-mono text-[10px] uppercase tracking-[0.1em] whitespace-nowrap pointer-events-none z-10 shadow-lg"
+            style={{
+              left: `${
+                shown.slice(0, hover).reduce((a, s) => a + pct(s.kwh), 0) + pct(shown[hover].kwh) / 2
+              }%`,
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className="inline-block w-2 h-2 rounded-full shrink-0"
+                style={{ background: shown[hover].color }}
+              />
+              <span className="text-muted">{shown[hover].label}</span>
+              <span className="text-foreground ml-1">
+                {pct(shown[hover].kwh).toFixed(1)}% · {shown[hover].kwh.toFixed(1)} kWh
+              </span>
+            </div>
+            {shown[hover].note && (
+              <div className="mt-1 text-muted/80 normal-case tracking-normal">
+                {shown[hover].note}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-x-8 gap-y-2">
+        {shown.map((s) => (
+          <div key={s.label} className="flex items-baseline gap-2">
+            <span className="inline-block w-2 h-2 shrink-0 translate-y-[-1px]" style={{ background: s.color }} />
+            <span className="text-sm text-muted">{s.label}</span>
+            <span className="font-mono text-xs text-foreground/90">
+              {Math.round(pct(s.kwh))}% · {s.kwh.toFixed(1)} kWh
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

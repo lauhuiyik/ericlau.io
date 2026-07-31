@@ -355,6 +355,38 @@ function minToTimeString(min: number): string {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
+/**
+ * Split home charging energy across peak / off-peak by when each session
+ * actually ran, apportioning a session that straddles the boundary in
+ * proportion to the time it spent either side.
+ *
+ * The resulting $ figures are "what this energy costs at grid rates for that
+ * time of day" — NOT necessarily what was paid, since some of it may have come
+ * from solar or the battery. Anker doesn't break the car out as its own load,
+ * so a true solar-vs-grid attribution for the car isn't measurable from this
+ * data; that needs the Tesla Fleet API alongside per-interval flow data.
+ */
+export function splitChargingByTariff(
+  sessions: ChargeSession[],
+  t: Tariff,
+): { peakKwh: number; offPeakKwh: number } {
+  let peakKwh = 0;
+  let offPeakKwh = 0;
+  for (const s of sessions) {
+    const kwh = s.energy_added_kwh ?? 0;
+    if (kwh <= 0) continue;
+    const start = new Date(s.started_ts * 1000);
+    const end = new Date((s.ended_ts ?? s.started_ts) * 1000);
+    const a = start.getHours() * 60 + start.getMinutes();
+    let b = end.getHours() * 60 + end.getMinutes();
+    if (b < a) b = 1440; // ran past local midnight
+    const frac = peakFraction(a, b, t);
+    peakKwh += kwh * frac;
+    offPeakKwh += kwh * (1 - frac);
+  }
+  return { peakKwh, offPeakKwh };
+}
+
 export type CostBreakdown = {
   importCost: number;
   exportCredit: number;

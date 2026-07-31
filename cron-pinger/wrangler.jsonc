@@ -3,13 +3,14 @@
   "name": "ericlau-energy-cron-pinger",
   "main": "src/index.ts",
   "compatibility_date": "2025-03-01",
-  // PAUSED 2026-07-31: the collector was re-logging into Anker with a fresh
-  // username/password every 5 min (no token persistence across GitHub Actions'
-  // stateless runners), which triggered an Anker CAPTCHA requirement after
-  // ~570 logins over 2 days. Paused to stop repeating that pattern while
-  // token caching is added. Re-enable ("*/5 * * * *") once fixed.
+  // RE-ENABLED 2026-07-31: was paused after the collector's lack of token
+  // persistence across GitHub Actions' stateless runners triggered an Anker
+  // CAPTCHA requirement (~570 fresh logins in 2 days). Fixed by caching the
+  // login token in KV (see /api/energy/anker-cache + collector.py) — verified
+  // directly that a real run now reuses the cached token instead of a fresh
+  // login (log: "Cached Login for ... " with no passport/login call).
   "triggers": {
-    "crons": []
+    "crons": ["*/5 * * * *"]
   },
   "observability": {
     "enabled": true

@@ -539,6 +539,12 @@ async def main() -> None:
 
     samples = max(1, args.samples)
     gap = max(30, args.gap)
+    # Tracks whether the run produced anything usable, so a run that completes
+    # but collects nothing exits non-zero. Without this the job goes green while
+    # silently recording empty rows — which is exactly how a two-day Anker
+    # outage went unnoticed. A non-zero exit makes GitHub send its normal
+    # failed-run notification.
+    any_source = False
 
     try:
         while True:
@@ -551,6 +557,8 @@ async def main() -> None:
                       f"sources={payload.get('sources')!r} "
                       f"solar_new={payload.get('solar_new_kw')} solar_old={payload.get('solar_old_kw')} "
                       f"soc={payload.get('battery_soc')} grid_imp={payload.get('grid_import_kw')}")
+                if payload.get("sources"):
+                    any_source = True
                 if args.dry_run:
                     print(json.dumps(payload, indent=2))
                 else:
@@ -571,6 +579,13 @@ async def main() -> None:
     finally:
         if not args.dry_run:
             persist_anker_cache(cfg)
+
+    if not any_source:
+        print(
+            "!! no source returned data this run — every reading would be empty",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

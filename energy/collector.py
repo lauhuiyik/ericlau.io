@@ -117,6 +117,15 @@ def _kv_request(cfg: dict, path: str, method: str, body: dict | None = None) -> 
 _anker_cache_loaded = False
 _anker_cache_path: Path | None = None
 
+# Growatt's V1 API rate-limits per plant (error code 10012
+# 'error_frequently_access') and its datalogger only publishes every ~5 min,
+# so it's fetched once per run and reused across that run's samples. The
+# reused value is genuinely current, not invented — the upstream number
+# hasn't changed — and carrying it matters because house load is derived
+# from total generation: dropping it on 3 of 4 samples would understate
+# consumption on those rows.
+_growatt_cache: dict | None = None
+
 
 def load_anker_cache_blob(cfg: dict) -> str | None:
     try:
@@ -245,12 +254,10 @@ def collect_tesla(cfg: dict) -> dict | None:
 def collect_growatt(cfg: dict) -> dict:
     """Original 6.6 kW array. Two paths, chosen by what's configured:
 
-    - GROWATT_API_TOKEN set: the official token-authenticated OpenAPI V1
-      (no login at all — a static token in a header). This is the sanctioned,
-      sustainable path; obtained by asking the installer to apply for a
-      personal API token via Growatt's OSS system. NOT YET LIVE-TESTED end to
-      end (no token available while writing this) — verify the field names
-      in plant_power_overview's response before trusting it blindly.
+    - GROWATT_API_TOKEN set (PREFERRED, and what's in use): the official
+      token-authenticated OpenAPI V1. No login, so it sidesteps both the
+      IP-block that stops the legacy endpoint working from CI and any
+      login-frequency risk. Verified live against the real plant.
     - otherwise: the legacy ShinePhone username/password API (unofficial,
       reverse-engineered). Growatt 403s this from GitHub Actions' IPs
       specifically; works fine from a home IP. GROWATT_PROXY_URL can route
@@ -299,34 +306,29 @@ def collect_growatt(cfg: dict) -> dict:
 
 
 def collect_growatt_v1(token: str) -> dict:
-    """Via Growatt's official token-authenticated OpenAPI V1 — no login, so
-    none of the account-lockout risk the legacy path carries. UNTESTED
-    end-to-end (no token available yet); the plant_power_overview response
-    shape is defensively parsed rather than assumed."""
+    """Original array via Growatt's official token-authenticated OpenAPI V1.
+
+    No login at all — a static token in a header — so none of the
+    account-lockout or IP-block problems the reverse-engineered ShinePhone
+    endpoint has. This is the path that finally works from CI.
+
+    `plant/energy` returns current power and today's total together, which is
+    everything we need from one call. Note the units differ between endpoints:
+    plant_energy_overview reports current_power in kW, while plant_list reports
+    it in WATTS — verified against the same instant (3.07 vs "3068.9").
+    """
     from growattServer.open_api_v1 import OpenApiV1
 
     api = OpenApiV1(token)
     plants = (api.plant_list() or {}).get("plants") or []
     if not plants:
-        raise RuntimeError("growatt v1: no plants")
+        raise RuntimeError("growatt v1: no plants on this token")
     plant_id = plants[0].get("plant_id") or plants[0].get("id")
 
-    overview = api.plant_power_overview(plant_id) or {}
-    powers = overview.get("powers") or []
-    latest = next((p for p in reversed(powers) if p.get("power") is not None), None)
-    power_w = _f(latest.get("power")) if latest else None
-
-    # today's energy total — field name unconfirmed without a real token;
-    # try the plant_list entry's own summary field(s) as a best effort.
-    today_kwh = _f(
-        plants[0].get("today_energy")
-        or plants[0].get("todayEnergy")
-        or plants[0].get("e_today"),
-    )
-
+    ov = api.plant_energy_overview(plant_id) or {}
     return {
-        "solar_old_kw": (power_w / 1000.0) if power_w is not None else None,
-        "solar_old_kwh_today": today_kwh,
+        "solar_old_kw": _f(ov.get("current_power")),      # already kW here
+        "solar_old_kwh_today": _f(ov.get("today_energy")),
     }
 
 
@@ -409,17 +411,23 @@ def persist_anker_cache(cfg: dict) -> None:
         save_anker_cache_blob(cfg, _anker_cache_path.read_text())
 
 
-async def collect_once(cfg: dict, include_tesla: bool = True) -> dict:
+async def collect_once(cfg: dict, include_slow: bool = True) -> dict:
+    """`include_slow` controls the ~5-minute-granularity sources (Growatt and
+    Tesla), which both rate-limit and gain nothing from faster polling. Anker
+    is read on every sample since it genuinely updates about once a minute."""
     payload: dict = {}
     sources: list[str] = []
 
     # Growatt (sync) in a thread so it doesn't block the loop.
-    try:
-        g = await asyncio.to_thread(collect_growatt, cfg)
-        payload.update(g)
+    global _growatt_cache
+    if include_slow:
+        try:
+            _growatt_cache = await asyncio.to_thread(collect_growatt, cfg)
+        except Exception as e:  # noqa: BLE001
+            log.error("growatt collect failed: %s", e)
+    if _growatt_cache:
+        payload.update(_growatt_cache)
         sources.append("growatt")
-    except Exception as e:  # noqa: BLE001
-        log.error("growatt collect failed: %s", e)
 
     try:
         a = await collect_anker(cfg)
@@ -435,7 +443,7 @@ async def collect_once(cfg: dict, include_tesla: bool = True) -> dict:
     # won't wake a sleeping car (it returns 408), but polling an awake one every
     # ~60s stops it going back to sleep and drains the battery. Charge power
     # moves slowly enough that 5-minute resolution is plenty.
-    if not include_tesla:
+    if not include_slow:
         payload["sources"] = ",".join(sources)
         return payload
     try:
@@ -514,7 +522,7 @@ async def main() -> None:
             for i in range(samples):
                 if i:
                     await asyncio.sleep(gap)
-                payload = await collect_once(cfg, include_tesla=(i == 0))
+                payload = await collect_once(cfg, include_slow=(i == 0))
                 print(f"[{time.strftime('%H:%M:%S')}] ({i + 1}/{samples}) "
                       f"sources={payload.get('sources')!r} "
                       f"solar_new={payload.get('solar_new_kw')} solar_old={payload.get('solar_old_kw')} "

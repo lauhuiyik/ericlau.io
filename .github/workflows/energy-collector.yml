@@ -40,6 +40,9 @@ jobs:
           ANKER_PASSWORD: ${{ secrets.ANKER_PASSWORD }}
           GROWATT_USERNAME: ${{ secrets.GROWATT_USERNAME }}
           GROWATT_PASSWORD: ${{ secrets.GROWATT_PASSWORD }}
+          # Official token API — no login, and unlike the ShinePhone
+          # endpoint it is not blocked from CI's IP range.
+          GROWATT_API_TOKEN: ${{ secrets.GROWATT_API_TOKEN }}
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           INGEST_URL: ${{ secrets.INGEST_URL }}
         # 4 samples 60s apart inside one run => ~1-minute resolution on the

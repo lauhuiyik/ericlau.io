@@ -56,7 +56,7 @@ def load_config() -> dict:
     for k in (
         "ANKER_EMAIL", "ANKER_PASSWORD", "GROWATT_USERNAME", "GROWATT_PASSWORD",
         "INGEST_SECRET", "INGEST_URL", "ANKER_COUNTRY", "GROWATT_PROXY_URL",
-        "GROWATT_API_TOKEN",
+        "GROWATT_API_TOKEN", "GROWATT_PLANT_ID",
     ):
         if os.environ.get(k):
             cfg[k] = os.environ[k]
@@ -267,7 +267,7 @@ def collect_growatt(cfg: dict) -> dict:
     """
     token = cfg.get("GROWATT_API_TOKEN")
     if token:
-        return collect_growatt_v1(token)
+        return collect_growatt_v1(token, cfg.get("GROWATT_PLANT_ID"))
 
     api = growattServer.GrowattApi(add_random_user_id=True)
     proxy = cfg.get("GROWATT_PROXY_URL")
@@ -305,7 +305,7 @@ def collect_growatt(cfg: dict) -> dict:
     }
 
 
-def collect_growatt_v1(token: str) -> dict:
+def collect_growatt_v1(token: str, plant_id_hint: str | int | None = None) -> dict:
     """Original array via Growatt's official token-authenticated OpenAPI V1.
 
     No login at all — a static token in a header — so none of the
@@ -319,15 +319,32 @@ def collect_growatt_v1(token: str) -> dict:
     """
     from growattServer.open_api_v1 import OpenApiV1
 
-    api = OpenApiV1(token)
-    plants = (api.plant_list() or {}).get("plants") or []
-    if not plants:
-        raise RuntimeError("growatt v1: no plants on this token")
-    plant_id = plants[0].get("plant_id") or plants[0].get("id")
+    from growattServer.exceptions import GrowattV1ApiError
 
-    ov = api.plant_energy_overview(plant_id) or {}
+    api = OpenApiV1(token)
+    try:
+        # The plant id never changes, so it can be supplied directly to avoid a
+        # second API call every cycle — Growatt rate-limits per plant and the
+        # lookup is pure overhead once known.
+        plant_id = plant_id_hint or None
+        if plant_id is None:
+            plants = (api.plant_list() or {}).get("plants") or []
+            if not plants:
+                raise RuntimeError("growatt v1: no plants on this token")
+            plant_id = plants[0].get("plant_id") or plants[0].get("id")
+
+        ov = api.plant_energy_overview(plant_id) or {}
+    except GrowattV1ApiError as e:
+        # The library's message alone doesn't say *why*; code 10012 is
+        # 'error_frequently_access' (rate limit), which is by far the most
+        # common cause and is otherwise indistinguishable from a real fault.
+        raise RuntimeError(
+            f"growatt v1: {e} (code={getattr(e, 'error_code', None)} "
+            f"msg={getattr(e, 'error_msg', None)})"
+        ) from e
+
     return {
-        "solar_old_kw": _f(ov.get("current_power")),      # already kW here
+        "solar_old_kw": _f(ov.get("current_power")),      # kW on this endpoint
         "solar_old_kwh_today": _f(ov.get("today_energy")),
     }
 

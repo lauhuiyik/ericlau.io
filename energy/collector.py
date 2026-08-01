@@ -126,6 +126,10 @@ _anker_cache_path: Path | None = None
 # consumption on those rows.
 _growatt_cache: dict | None = None
 
+# Whether the car reported "Charging" on the most recent sample. Drives the
+# adaptive Tesla cadence in collect_once — see the note there.
+_tesla_charging: bool = False
+
 
 def load_anker_cache_blob(cfg: dict) -> str | None:
     try:
@@ -429,9 +433,10 @@ def persist_anker_cache(cfg: dict) -> None:
 
 
 async def collect_once(cfg: dict, include_slow: bool = True) -> dict:
-    """`include_slow` controls the ~5-minute-granularity sources (Growatt and
-    Tesla), which both rate-limit and gain nothing from faster polling. Anker
-    is read on every sample since it genuinely updates about once a minute."""
+    """`include_slow` controls the ~5-minute-granularity sources. Growatt is
+    strictly rate-limited and gains nothing from faster polling. Anker is read
+    on every sample since it genuinely updates about once a minute. Tesla is
+    adaptive: once per run normally, every sample while it is charging."""
     payload: dict = {}
     sources: list[str] = []
 
@@ -463,11 +468,17 @@ async def collect_once(cfg: dict, include_slow: bool = True) -> dict:
     # Tesla is posted to its own endpoint (different table), so it doesn't
     # join the energy payload — but note it in sources for visibility.
     #
-    # Deliberately only once per run, not once per sample: reading vehicle_data
-    # won't wake a sleeping car (it returns 408), but polling an awake one every
-    # ~60s stops it going back to sleep and drains the battery. Charge power
-    # moves slowly enough that 5-minute resolution is plenty.
-    if not include_slow:
+    # ADAPTIVE CADENCE. The reason not to poll often is battery drain: reading
+    # vehicle_data won't wake a sleeping car (it returns 408), but polling an
+    # awake one every ~60s keeps it from going back to sleep.
+    #
+    # That cost doesn't apply while the car is charging — it can't sleep then
+    # anyway — so polling every sample during a charge is effectively free and
+    # gives ~1-minute resolution on the one number that actually moves fast.
+    # Once charging stops, the next fast sample notices and the cadence drops
+    # straight back to once per run.
+    global _tesla_charging
+    if not (include_slow or _tesla_charging):
         payload["sources"] = ",".join(sources)
         return payload
     try:
@@ -475,6 +486,10 @@ async def collect_once(cfg: dict, include_slow: bool = True) -> dict:
         if t is not None:
             payload["_tesla"] = t
             sources.append("tesla")
+            _tesla_charging = t.get("charging_state") == "Charging"
+        else:
+            # Asleep or unplugged: stop fast-polling so it can stay asleep.
+            _tesla_charging = False
     except Exception as e:  # noqa: BLE001
         log.error("tesla collect failed: %s", e)
 

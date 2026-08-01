@@ -269,8 +269,11 @@ export function LiveChartDay({
   const pts = series
     .map((r) => {
       const min = minutesOfDayLocal(r.local_time);
-      const tesla = chargeAt(min);
       const house = r.house_kw ?? 0;
+      // The house meter includes the car, so the car can never exceed it. Tesla
+      // samples are up to 5 min apart against the meter's ~1 min, so without
+      // this a just-ended charge draws above the house line.
+      const tesla = Math.min(chargeAt(min), Math.max(0, house));
       // Positive = importing, negative = exporting.
       const grid = Math.max(0, r.grid_import_kw ?? 0) - Math.max(0, r.grid_export_kw ?? 0);
       const bChg = Math.max(0, r.battery_charge_kw ?? 0);

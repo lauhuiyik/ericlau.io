@@ -358,10 +358,15 @@ export async function getTeslaStateForDate(db: D1Database, date: string): Promis
  * Returns null when the newest sample is older than `maxAgeSec` — the car sleeps
  * and the collector skips samples while it does, so a stale row must not be
  * presented as current draw.
+ *
+ * 8 minutes tolerates one missed cycle of the idle 5-minute cadence with slack.
+ * It used to be 15, which was long enough for a finished charge to keep showing
+ * as active. While a charge is actually running the collector samples every
+ * ~1 min, so this window is never the binding constraint then.
  */
 export async function getLatestTeslaState(
   db: D1Database,
-  maxAgeSec = 15 * 60,
+  maxAgeSec = 8 * 60,
 ): Promise<TeslaSample | null> {
   const row = await db
     .prepare(

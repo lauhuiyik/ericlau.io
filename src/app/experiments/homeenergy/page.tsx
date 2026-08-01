@@ -388,15 +388,23 @@ export default async function Page({
   // Note this is NOT "home + car − solar − battery + grid" — that mixes demand
   // and supply on one side and double-counts (it returned 6.98 kW against an
   // actual 3.49 kW draw when checked against live data).
-  // Live charge power, straight from the Fleet API's newest sample. Only counted
-  // while the car is actually drawing at home: a parked car still reports its
-  // last session's power, which would show phantom load. getLatestTeslaState
-  // already discards samples older than 15 min (the car sleeps and stops
-  // reporting), so a stale row can't masquerade as current draw either.
-  const liveTeslaKw =
+  // Live charge power, from the Fleet API's newest sample. Only counted while the
+  // car is actually drawing at home: a parked car still reports its last
+  // session's power, which would show phantom load.
+  const teslaReportedKw =
     latestTesla && latestTesla.charging_state === "Charging" && latestTesla.at_home !== 0
       ? (latestTesla.charge_power_kw ?? 0)
       : 0;
+
+  // Cross-check against the house meter, which is ~1 min fresh where Tesla is up
+  // to ~5 min behind. Anker meters the whole house INCLUDING the car, so the car
+  // physically cannot be drawing more than the house total. Without this clamp,
+  // stopping a charge left the car showing 11 kW while the house read 2.1 kW —
+  // an impossible state, and the reason the page looked stuck mid-charge.
+  //
+  // Clamping rather than zeroing keeps a genuine charge visible: mid-charge the
+  // house total is at least the car's draw, so the clamp does nothing.
+  const liveTeslaKw = Math.min(teslaReportedKw, Math.max(0, latestGlobal?.house_kw ?? 0));
   const balNow = {
     homeExclTesla: Math.max(0, (latestGlobal?.house_kw ?? 0) - liveTeslaKw),
     tesla: liveTeslaKw,

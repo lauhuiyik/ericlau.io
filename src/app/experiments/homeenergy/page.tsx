@@ -4,11 +4,12 @@ import {
   type DailyTotal,
   type DateRange,
   computeCost,
+  computeTeslaCost,
   chargedKwhFromSamples,
   getChargeSessionsForDate,
   getTeslaStateForDate,
+  getTeslaStateInRange,
   getLatestTeslaState,
-  splitSamplesByTariff,
   getDailyTotals,
   getHomeChargeKwhByDate,
   getLatest,
@@ -17,7 +18,6 @@ import {
   getSourceFreshness,
   getTariff,
   isFutureLocalDate,
-  splitChargingByTariff,
   melbNow,
   rangeWindow,
   type SourceFreshness,
@@ -326,6 +326,10 @@ export default async function Page({
   // Live Fleet API samples are the real source for any day it was connected;
   // `sessions` (the Tessie CSV import) only covers history to 2026-07-10.
   const teslaSamples = range === "day" ? await getTeslaStateForDate(env.DB, date) : [];
+  // The week and month views need their own samples: without these the car's
+  // cost silently vanished from every range except a single day.
+  const teslaRangeSamples =
+    range === "day" ? teslaSamples : await getTeslaStateInRange(env.DB, win.start, win.end);
   const dailyRaw = range !== "day" ? await getDailyTotals(env.DB, win.start, win.end) : [];
   const chargeByDate = range !== "day" ? await getHomeChargeKwhByDate(env.DB, win.start, win.end) : [];
   const daily = range !== "day" ? mergeChargeOnlyDates(dailyRaw, chargeByDate) : [];
@@ -415,16 +419,26 @@ export default async function Page({
 
   const cost = computeCost(costSeries, tariff);
 
-  // Car charging split by when it actually ran (see splitChargingByTariff for
-  // why the $ figures are "at grid rates", not necessarily what was paid).
-  // Live samples apportion each 5-minute increment to the window it actually
-  // accrued in; the session-level fallback can only spread a whole session's
-  // total across its span. Without this the live path reported 0.0 kWh in both
-  // buckets, so charging appeared to cost nothing.
-  const teslaSplit =
-    teslaSamples.length > 0
-      ? splitSamplesByTariff(teslaSamples, tariff)
-      : splitChargingByTariff(sessions, tariff);
+  // What the car cost. NOT an addition to the bill: the car is part of the house
+  // load, so its energy is already inside the metered import that computeCost
+  // charges for. This attributes a share of that same cost to the car.
+  const teslaCost = computeTeslaCost(costSeries, teslaRangeSamples, sessions, tariff);
+
+  // Round once, then derive the totals from the rounded parts, so the car's
+  // peak + off-peak lines visibly add up to its total on screen. Deriving the
+  // total from full precision instead leaves a cent unaccounted for ($0.50 +
+  // $1.46 displayed against a $1.97 total), which reads like an error.
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const carPeakKwh = r1(teslaCost.gridPeakKwh);
+  const carOffPeakKwh = r1(teslaCost.gridOffPeakKwh);
+  const carPeakCost = r2(teslaCost.gridPeakCost);
+  const carOffPeakCost = r2(teslaCost.gridOffPeakCost);
+  const carTotalCost = r2(carPeakCost + carOffPeakCost);
+  const carTotalKwh = r1(teslaCost.kwh);
+  const carSelfKwh = r1(carTotalKwh - carPeakKwh - carOffPeakKwh);
+  const carFullGridCost = r2(teslaCost.fullGridCost);
+  const carSaved = r2(carFullGridCost - carTotalCost);
 
   // Share of what the home actually consumed, grid split by tariff. Anker
   // meters grid_to_home as one figure, so the peak/off-peak split is applied
@@ -449,6 +463,29 @@ export default async function Page({
       note: `${money(tariff.offPeakRate)}/kWh · all other hours`,
     },
   ];
+
+  // Second bar: where the power WENT, rather than where it came from. Keeping
+  // the two dimensions in separate bars matters — putting the car alongside
+  // "Solar"/"Grid" would mix destination with source and the percentages would
+  // no longer mean anything.
+  const destSlices: ShareSlice[] = [
+    {
+      label: "Home",
+      kwh: Math.max(0, consumed - homeChargeKwh),
+      color: C.house,
+      note: "everything but the car",
+    },
+    {
+      label: "Tesla",
+      kwh: homeChargeKwh,
+      color: C.charge,
+      note:
+        teslaCost.kwh > 0
+          ? `${money(teslaCost.gridCost)} of grid energy · ${kwh(teslaCost.selfKwh)} kWh free from solar/battery`
+          : "no charging this period",
+    },
+  ];
+
   const gridShare = consumed > 0 ? Math.min(100, (imported / consumed) * 100) : null;
 
   let busiest: { kw: number; time: string; date?: string } | null = null;
@@ -771,21 +808,18 @@ export default async function Page({
                 value={kwh(homeChargeKwh)}
                 sub={
                   homeChargeKwh > 0
-                    ? `kWh · peak ${kwh(teslaSplit.peakKwh)} ${money(
-                        teslaSplit.peakKwh * tariff.peakRate,
-                      )} · off-pk ${kwh(teslaSplit.offPeakKwh)} ${money(
-                        teslaSplit.offPeakKwh * tariff.offPeakRate,
-                      )}`
+                    ? `kWh · cost ${money(carTotalCost)} (peak ${money(
+                        carPeakCost,
+                      )} · off-pk ${money(carOffPeakCost)})`
                     : "kWh at home"
                 }
               />
             </div>
             {homeChargeKwh > 0 && (
               <p className="pb-5 text-xs text-muted max-w-3xl">
-                Car charging $ is what that energy costs at the grid rate for the time it ran — not
-                necessarily what was paid, since some may have come from solar or the battery. The
-                Fleet API reports how much the car took but not where it came from, and Anker meters
-                the house as a whole, so the true source split isn&apos;t measurable from either.
+                Car cost counts only the grid-supplied share, apportioned from the house meter
+                over each stretch of charging — see the cost breakdown below for the full working,
+                including what it would have cost drawn entirely from the grid.
               </p>
             )}
           </section>
@@ -800,6 +834,9 @@ export default async function Page({
                 hover a band for its exact share
               </div>
             </div>
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted mb-3">
+              Where it came from
+            </div>
             <ShareBar slices={shareSlices} />
             <p className="mt-6 text-xs text-muted max-w-3xl">
               Where the power your home actually used came from. The grid portion is split by
@@ -807,6 +844,20 @@ export default async function Page({
               part of that import charged the battery rather than running the house, so the split is
               proportional rather than separately metered.
             </p>
+
+            {homeChargeKwh > 0 && (
+              <div className="mt-10">
+                <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted mb-3">
+                  Where it went
+                </div>
+                <ShareBar slices={destSlices} />
+                <p className="mt-6 text-xs text-muted max-w-3xl">
+                  The car&apos;s share of everything the property consumed. This is a different cut
+                  of the same energy as the bar above — that one splits it by source, this one by
+                  where it ended up.
+                </p>
+              </div>
+            )}
           </section>
 
           {/* What it costs, and how that number is built */}
@@ -852,8 +903,54 @@ export default async function Page({
                   <span className="text-muted uppercase tracking-[0.18em]">Net</span>
                   <span className="text-foreground">{money(cost.net)}</span>
                 </div>
+
+                {teslaCost.kwh > 0 && (
+                  <div className="mt-5 pt-4 border-t border-rule flex flex-col gap-2">
+                    <div className="text-muted uppercase tracking-[0.18em] text-[10px]">
+                      Of which the car — already inside the peak / off-peak lines above
+                    </div>
+                    <CostLine
+                      label={`Car · peak · ${kwh(carPeakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
+                      value={money(carPeakCost)}
+                      color={C.charge}
+                    />
+                    <CostLine
+                      label={`Car · off-peak · ${kwh(carOffPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
+                      value={money(carOffPeakCost)}
+                      color={C.charge}
+                    />
+                    <div className="border-t border-rule mt-1 pt-2 flex justify-between">
+                      <span className="text-muted uppercase tracking-[0.18em]">Car total</span>
+                      <span className="text-foreground">{money(carTotalCost)}</span>
+                    </div>
+                    {carSelfKwh > 0.05 && (
+                      <CostLine
+                        label={`Free from solar / battery · ${kwh(carSelfKwh)} kWh`}
+                        value={`saved ${money(carSaved)}`}
+                        color={C.self}
+                      />
+                    )}
+                    <CostLine
+                      label={`If it had all come from the grid · ${kwh(carTotalKwh)} kWh`}
+                      value={money(carFullGridCost)}
+                    />
+                  </div>
+                )}
               </div>
             </div>
+
+            {teslaCost.kwh > 0 && (
+              <p className="mt-6 text-xs text-muted max-w-3xl">
+                The car&apos;s cost is a <span className="text-foreground">share of the net above,
+                not an addition to it</span> — the car is part of the house load, so its energy is
+                already in the metered import. Splitting solar-vs-grid is apportioned rather than
+                measured: Anker meters the whole house as one figure and can&apos;t see the car, so
+                for each stretch of charging the grid&apos;s share of total house draw over that same
+                window is applied to it.
+                {!teslaCost.measured &&
+                  " No meter readings overlapped this charging, so it's all counted as grid-supplied — the cautious assumption."}
+              </p>
+            )}
 
             {cost.hasGaps && (
               <p className="mt-6 text-xs text-muted max-w-2xl">

@@ -316,6 +316,7 @@ export async function getHomeChargeKwhByDate(
 /** One live Fleet API sample of the car's state. */
 export type TeslaSample = {
   ts: number;
+  local_date: string;
   local_time: string;
   charging_state: string | null;
   charge_power_kw: number | null;
@@ -334,8 +335,8 @@ export type TeslaSample = {
 export async function getTeslaStateForDate(db: D1Database, date: string): Promise<TeslaSample[]> {
   const res = await db
     .prepare(
-      `SELECT ts, local_time, charging_state, charge_power_kw, battery_level,
-              charge_energy_added_kwh, at_home
+      `SELECT ts, local_date, local_time, charging_state, charge_power_kw,
+              battery_level, charge_energy_added_kwh, at_home
        FROM tesla_state WHERE local_date = ? ORDER BY ts ASC`,
     )
     .bind(date)
@@ -370,8 +371,8 @@ export async function getLatestTeslaState(
 ): Promise<TeslaSample | null> {
   const row = await db
     .prepare(
-      `SELECT ts, local_time, charging_state, charge_power_kw, battery_level,
-              charge_energy_added_kwh, at_home
+      `SELECT ts, local_date, local_time, charging_state, charge_power_kw,
+              battery_level, charge_energy_added_kwh, at_home
        FROM tesla_state ORDER BY ts DESC LIMIT 1`,
     )
     .first<TeslaSample>();
@@ -380,8 +381,25 @@ export async function getLatestTeslaState(
   return age <= maxAgeSec ? row : null;
 }
 
+/** Live samples across a date range, for the week and month views. */
+export async function getTeslaStateInRange(
+  db: D1Database,
+  start: string,
+  end: string,
+): Promise<TeslaSample[]> {
+  const res = await db
+    .prepare(
+      `SELECT ts, local_date, local_time, charging_state, charge_power_kw,
+              battery_level, charge_energy_added_kwh, at_home
+       FROM tesla_state WHERE local_date BETWEEN ? AND ? ORDER BY ts ASC`,
+    )
+    .bind(start, end)
+    .all<TeslaSample>();
+  return res.results ?? [];
+}
+
 /** One chunk of charging: how much, and the window it accrued over. */
-type ChargeDelta = { kwh: number; fromMin: number; toMin: number };
+type ChargeDelta = { kwh: number; fromMin: number; toMin: number; date: string };
 
 function minuteOfDay(localTime: string): number {
   const [h, m] = localTime.split(":");
@@ -397,23 +415,29 @@ function chargeDeltas(samples: TeslaSample[]): ChargeDelta[] {
   const out: ChargeDelta[] = [];
   let prev: number | null = null;
   let prevMin = 0;
+  let prevDate: string | null = null;
   for (const s of samples) {
     if (s.at_home === 0) continue; // only count charging done at home
     const v = s.charge_energy_added_kwh;
     if (v == null) continue;
     const min = minuteOfDay(s.local_time);
+    // Over a multi-day range, don't let a window run from yesterday's clock time
+    // to today's — that would span the wrong tariff bands.
+    if (prevDate !== null && s.local_date !== prevDate) prevMin = 0;
+    prevDate = s.local_date;
 
     if (prev == null) {
       // The day's first sample may already be mid-session, so its counter
       // reading is energy we'd otherwise never see. Only trust it while the car
       // is actually charging — a parked car reports the *previous* session's
       // total, which would double-count it.
-      if (s.charging_state === "Charging" && v > 0) out.push({ kwh: v, fromMin: 0, toMin: min });
+      if (s.charging_state === "Charging" && v > 0)
+        out.push({ kwh: v, fromMin: 0, toMin: min, date: s.local_date });
     } else if (v > prev) {
-      out.push({ kwh: v - prev, fromMin: prevMin, toMin: min });
+      out.push({ kwh: v - prev, fromMin: prevMin, toMin: min, date: s.local_date });
     } else if (v < prev * 0.5) {
       // A genuine reset: the counter drops to ~0 when a new session starts.
-      if (v > 0) out.push({ kwh: v, fromMin: prevMin, toMin: min });
+      if (v > 0) out.push({ kwh: v, fromMin: prevMin, toMin: min, date: s.local_date });
     }
     // Anything else is a decrease that isn't a reset — ignore it. Tesla's
     // charge_energy_added creeps *downward* by ~0.02 kWh per sample once a
@@ -430,30 +454,148 @@ export function chargedKwhFromSamples(samples: TeslaSample[]): number {
   return chargeDeltas(samples).reduce((s, d) => s + d.kwh, 0);
 }
 
+/** Cost attributed to charging the car. */
+export type TeslaCost = {
+  /** Total charged at home over the period. */
+  kwh: number;
+  peakKwh: number;
+  offPeakKwh: number;
+  /** Portion the grid actually supplied, apportioned from the meter. */
+  gridKwh: number;
+  /** Grid-supplied portion split by tariff window. These two are what you
+   *  actually pay for, and their costs sum to `gridCost` exactly. */
+  gridPeakKwh: number;
+  gridOffPeakKwh: number;
+  gridPeakCost: number;
+  gridOffPeakCost: number;
+  /** Portion covered by solar or the battery, so it cost nothing to import. */
+  selfKwh: number;
+  /** Cost of the grid-supplied portion at time-of-use rates. */
+  gridCost: number;
+  /** What the whole charge would have cost drawn entirely from the grid. */
+  fullGridCost: number;
+  /** Saved by charging off solar/battery rather than importing it all. */
+  saved: number;
+  /** False when no readings overlapped the charging windows, so the
+   *  solar-vs-grid attribution is a whole-period average rather than measured. */
+  measured: boolean;
+};
+
 /**
- * Tariff split for live samples. Preferred over splitChargingByTariff when
- * tesla_state has data, because it apportions each 5-minute increment by the
- * window it actually accrued in rather than spreading a whole session's total
- * across its full span.
+ * What the car cost to charge.
+ *
+ * Important: this is NOT an extra line on the bill. The car is part of the house
+ * load, so its energy is already inside the metered import that `computeCost`
+ * charges for. This attributes a share of that existing cost to the car rather
+ * than adding to it — adding would double-count.
+ *
+ * The solar-vs-grid split is apportioned, not measured directly: Anker meters
+ * the whole house as one figure and cannot see the car separately. For each
+ * increment of charge we take the grid's share of total house draw over that
+ * same window — if the house was pulling 60% of its load from the grid while the
+ * car charged, 60% of that increment is treated as grid-supplied. Averaging over
+ * the window (rather than assuming the car is the marginal load) is the
+ * conservative reading and is what the meter can actually support.
  */
-export function splitSamplesByTariff(
+export function computeTeslaCost(
+  readings: Reading[],
   samples: TeslaSample[],
+  sessions: ChargeSession[],
   t: Tariff,
-): { peakKwh: number; offPeakKwh: number } {
+): TeslaCost {
+  // Live samples give ~1-minute increments. For dates the Fleet API never
+  // covered, fall back to the imported Tessie sessions, treating each whole
+  // session as one increment spanning its own duration — coarser, but it keeps
+  // history costed instead of silently reporting $0.
+  const deltas: ChargeDelta[] =
+    samples.length > 0
+      ? chargeDeltas(samples)
+      : sessions
+          .filter((c) => c.at_home === 1 && (c.energy_added_kwh ?? 0) > 0)
+          .map((c) => {
+            const start = new Date(c.started_ts * 1000);
+            const end = new Date((c.ended_ts ?? c.started_ts) * 1000);
+            const fromMin = start.getHours() * 60 + start.getMinutes();
+            let toMin = end.getHours() * 60 + end.getMinutes();
+            if (toMin < fromMin) toMin = 1440; // ran past local midnight
+            return { kwh: c.energy_added_kwh ?? 0, fromMin, toMin, date: c.local_date };
+          });
+  // Keyed by date as well as minute: over a week view, matching on minute alone
+  // would attribute Monday's charging against Thursday's meter readings.
+  const byDate = new Map<string, { min: number; house: number; grid: number }[]>();
+  for (const r of readings) {
+    if (r.house_kw == null) continue;
+    const row = {
+      min: minuteOfDay(r.local_time),
+      house: r.house_kw ?? 0,
+      grid: Math.max(0, r.grid_import_kw ?? 0),
+    };
+    const list = byDate.get(r.local_date);
+    if (list) list.push(row);
+    else byDate.set(r.local_date, [row]);
+  }
+
+  let kwh = 0;
   let peakKwh = 0;
   let offPeakKwh = 0;
-  for (const d of chargeDeltas(samples)) {
-    // A zero-length window (two samples in the same minute) still has to land
-    // somewhere, so widen it by a minute to get a usable fraction.
-    const frac = peakFraction(d.fromMin, Math.max(d.toMin, d.fromMin + 1), t);
+  let gridPeakKwh = 0;
+  let gridOffPeakKwh = 0;
+  let anyOverlap = false;
+
+  for (const d of deltas) {
+    const to = Math.max(d.toMin, d.fromMin + 1);
+    const frac = peakFraction(d.fromMin, to, t);
+
+    kwh += d.kwh;
     peakKwh += d.kwh * frac;
     offPeakKwh += d.kwh * (1 - frac);
+
+    // Grid's share of house draw across this window.
+    const dayRows = byDate.get(d.date) ?? [];
+    const inWindow = dayRows.filter((r) => r.min >= d.fromMin && r.min <= to);
+    const totalHouse = inWindow.reduce((a, r) => a + r.house, 0);
+    const totalGrid = inWindow.reduce((a, r) => a + r.grid, 0);
+    let gridShare: number;
+    if (inWindow.length > 0 && totalHouse > 0) {
+      gridShare = Math.min(1, totalGrid / totalHouse);
+      anyOverlap = true;
+    } else {
+      // No overlapping readings: charging overnight almost certainly came off
+      // the grid, so assume the worst rather than quietly reporting it as free.
+      gridShare = 1;
+    }
+    gridPeakKwh += d.kwh * gridShare * frac;
+    gridOffPeakKwh += d.kwh * gridShare * (1 - frac);
   }
-  return { peakKwh, offPeakKwh };
+
+  // Costs are derived from the kWh buckets rather than accumulated separately,
+  // so the peak and off-peak lines always add up to the total exactly.
+  const gridPeakCost = gridPeakKwh * t.peakRate;
+  const gridOffPeakCost = gridOffPeakKwh * t.offPeakRate;
+  const gridCost = gridPeakCost + gridOffPeakCost;
+  const fullGridCost = peakKwh * t.peakRate + offPeakKwh * t.offPeakRate;
+  const gridKwh = gridPeakKwh + gridOffPeakKwh;
+
+  return {
+    kwh,
+    peakKwh,
+    offPeakKwh,
+    gridKwh,
+    gridPeakKwh,
+    gridOffPeakKwh,
+    gridPeakCost,
+    gridOffPeakCost,
+    selfKwh: Math.max(0, kwh - gridKwh),
+    gridCost,
+    fullGridCost,
+    saved: Math.max(0, fullGridCost - gridCost),
+    measured: anyOverlap,
+  };
 }
 
 export type ChargeSession = {
   id: string;
+  local_date: string;
   started_ts: number;
   ended_ts: number | null;
   energy_added_kwh: number | null;
@@ -471,7 +613,7 @@ export async function getChargeSessionsForDate(
   // A session starting the day before can still run past midnight into `date`.
   const res = await db
     .prepare(
-      `SELECT id, started_ts, ended_ts, energy_added_kwh, at_home
+      `SELECT id, local_date, started_ts, ended_ts, energy_added_kwh, at_home
        FROM tesla_charges
        WHERE at_home = 1 AND local_date BETWEEN ? AND ?
        ORDER BY started_ts ASC`,
@@ -479,6 +621,7 @@ export async function getChargeSessionsForDate(
     .bind(shiftDate(date, -1), date)
     .all<{
       id: string;
+      local_date: string;
       started_ts: number;
       ended_ts: number | null;
       energy_added_kwh: number | null;
@@ -535,37 +678,6 @@ function minToTimeString(min: number): string {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-/**
- * Split home charging energy across peak / off-peak by when each session
- * actually ran, apportioning a session that straddles the boundary in
- * proportion to the time it spent either side.
- *
- * The resulting $ figures are "what this energy costs at grid rates for that
- * time of day" — NOT necessarily what was paid, since some of it may have come
- * from solar or the battery. Anker doesn't break the car out as its own load,
- * so a true solar-vs-grid attribution for the car isn't measurable from this
- * data; that needs the Tesla Fleet API alongside per-interval flow data.
- */
-export function splitChargingByTariff(
-  sessions: ChargeSession[],
-  t: Tariff,
-): { peakKwh: number; offPeakKwh: number } {
-  let peakKwh = 0;
-  let offPeakKwh = 0;
-  for (const s of sessions) {
-    const kwh = s.energy_added_kwh ?? 0;
-    if (kwh <= 0) continue;
-    const start = new Date(s.started_ts * 1000);
-    const end = new Date((s.ended_ts ?? s.started_ts) * 1000);
-    const a = start.getHours() * 60 + start.getMinutes();
-    let b = end.getHours() * 60 + end.getMinutes();
-    if (b < a) b = 1440; // ran past local midnight
-    const frac = peakFraction(a, b, t);
-    peakKwh += kwh * frac;
-    offPeakKwh += kwh * (1 - frac);
-  }
-  return { peakKwh, offPeakKwh };
-}
 
 export type CostBreakdown = {
   importCost: number;

@@ -12,6 +12,11 @@
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
+  // Same namespace the main site binds, so the Growatt snapshot this Worker
+  // fetches can be read by /api/ingest.
+  "kv_namespaces": [
+    { "binding": "ENERGY_KV", "id": "fce2b129d1ed462c853380cb027bca32" }
+  ],
   "observability": {
     "enabled": true
   }

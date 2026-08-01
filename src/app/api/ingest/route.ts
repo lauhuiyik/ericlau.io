@@ -66,7 +66,36 @@ export async function POST(request: Request) {
   const { date: local_date, time: local_time } = melbParts(now);
 
   const solarNew = num(body.solar_new_kw);
-  const solarOld = num(body.solar_old_kw);
+
+  // Growatt is fetched by the companion Worker, not the collector: Growatt
+  // refuses datacenter IPs, so the collector (GitHub Actions) gets
+  // 10011 error_permission_denied while Cloudflare's egress is accepted. The
+  // Worker stashes a snapshot in KV on its 5-minute cron and we merge it here.
+  // Ignored if older than 15 min so a stalled Worker can't keep injecting a
+  // stale figure into fresh readings.
+  let solarOld = num(body.solar_old_kw);
+  let solarOldKwhToday = num(body.solar_old_kwh_today);
+  let growattMerged = false;
+  if (solarOld == null) {
+    try {
+      const raw = await env.ENERGY_KV.get("growatt_latest");
+      if (raw) {
+        const g = JSON.parse(raw) as {
+          solar_old_kw?: number | null;
+          solar_old_kwh_today?: number | null;
+          fetched_ts?: number;
+        };
+        const ageSec = ts - (g.fetched_ts ?? 0);
+        if (g.fetched_ts && ageSec >= 0 && ageSec < 15 * 60) {
+          solarOld = num(g.solar_old_kw);
+          solarOldKwhToday = num(g.solar_old_kwh_today);
+          growattMerged = solarOld != null;
+        }
+      }
+    } catch {
+      // treat as simply unavailable
+    }
+  }
   const solarTotal = (solarNew ?? 0) + (solarOld ?? 0);
   const battChg = num(body.battery_charge_kw);
   const battDis = num(body.battery_discharge_kw);
@@ -79,7 +108,7 @@ export async function POST(request: Request) {
     (battChg ?? 0) - (gridExp ?? 0);
 
   const snKwh = num(body.solar_new_kwh_today);
-  const soKwh = num(body.solar_old_kwh_today);
+  const soKwh = solarOldKwhToday;
   const giKwh = num(body.grid_import_kwh_today);
   const geKwh = num(body.grid_export_kwh_today);
   const bcKwh = num(body.battery_charge_kwh_today);
@@ -94,7 +123,12 @@ export async function POST(request: Request) {
   const g2h = num(body.grid_to_home_kwh_today);
   const ankerHome = num(body.home_usage_kwh_today);
 
-  const sources = typeof body.sources === "string" ? body.sources : null;
+  let sources = typeof body.sources === "string" ? body.sources : null;
+  if (growattMerged) {
+    const parts = (sources ?? "").split(",").filter(Boolean);
+    if (!parts.includes("growatt")) parts.push("growatt");
+    sources = parts.join(",");
+  }
 
   await env.DB.prepare(
     `INSERT OR REPLACE INTO readings

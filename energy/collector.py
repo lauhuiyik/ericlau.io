@@ -56,7 +56,7 @@ def load_config() -> dict:
     for k in (
         "ANKER_EMAIL", "ANKER_PASSWORD", "GROWATT_USERNAME", "GROWATT_PASSWORD",
         "INGEST_SECRET", "INGEST_URL", "ANKER_COUNTRY", "GROWATT_PROXY_URL",
-        "GROWATT_API_TOKEN", "GROWATT_PLANT_ID",
+        "GROWATT_API_TOKEN", "GROWATT_PLANT_ID", "GROWATT_SKIP",
     ):
         if os.environ.get(k):
             cfg[k] = os.environ[k]
@@ -436,8 +436,15 @@ async def collect_once(cfg: dict, include_slow: bool = True) -> dict:
     sources: list[str] = []
 
     # Growatt (sync) in a thread so it doesn't block the loop.
+    #
+    # In CI this is skipped entirely (GROWATT_SKIP=1): Growatt refuses
+    # datacenter IPs, so the call can only ever fail from here. The companion
+    # Cloudflare Worker fetches it instead and /api/ingest merges that snapshot.
+    # Left enabled by default so a run from a home IP still works directly.
     global _growatt_cache
-    if include_slow:
+    if cfg.get("GROWATT_SKIP"):
+        pass
+    elif include_slow:
         try:
             _growatt_cache = await asyncio.to_thread(collect_growatt, cfg)
         except Exception as e:  # noqa: BLE001

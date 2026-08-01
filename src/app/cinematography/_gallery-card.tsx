@@ -10,6 +10,12 @@ type Props = {
   vimeoId: string;
 };
 
+/** Only the fields used here. Vimeo's v2 endpoint returns an array of one. */
+type VimeoVideo = {
+  thumbnail_large?: string;
+  thumbnail_medium?: string;
+};
+
 export function GalleryCard({ slug, title, client, vimeoId }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -37,9 +43,9 @@ export function GalleryCard({ slug, title, client, vimeoId }: Props) {
   useEffect(() => {
     if (!visible) return;
     fetch(`https://vimeo.com/api/v2/video/${vimeoId}.json`)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<VimeoVideo[]>)
       .then((data) => {
-        const url: string = data[0]?.thumbnail_large ?? data[0]?.thumbnail_medium ?? "";
+        const url = data[0]?.thumbnail_large ?? data[0]?.thumbnail_medium ?? "";
         if (url) setThumbnail(url);
       })
       .catch(() => {});

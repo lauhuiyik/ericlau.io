@@ -1,0 +1,6 @@
+{
+  "GrowattToken": "PASTE_GROWATT_API_TOKEN_HERE",
+  "PlantId": "549780",
+  "IngestSecret": "PASTE_INGEST_SECRET_HERE",
+  "SiteUrl": "https://ericlau.io"
+}

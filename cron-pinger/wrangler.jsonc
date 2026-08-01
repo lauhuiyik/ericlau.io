@@ -14,6 +14,15 @@
   },
   // Same namespace the main site binds, so the Growatt snapshot this Worker
   // fetches can be read by /api/ingest.
+  // Reads the newest reading directly for the freshness watchdog. Previously it
+  // read a "latest" KV key that /api/ingest mirrored on every reading, but that
+  // cost ~1,160 KV writes a day against a 1,000/day allowance. Going over took
+  // every other KV write down with it, including the Growatt snapshot. The
+  // site's /api/energy/latest is behind the Cloudflare Access gate, so a plain
+  // fetch from here would 302 — querying D1 avoids both problems.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "ericlau-energy", "database_id": "296f6f55-74f5-4809-ae12-e8b46a9f8636" }
+  ],
   "kv_namespaces": [
     { "binding": "ENERGY_KV", "id": "fce2b129d1ed462c853380cb027bca32" }
   ],

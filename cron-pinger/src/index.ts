@@ -26,12 +26,16 @@ export interface Env {
   GROWATT_API_TOKEN?: string;
   GROWATT_PLANT_ID?: string;
   ENERGY_KV?: KVNamespace; // same namespace the main site binds
+  DB?: D1Database; // same database the main site binds
 }
 
 const REPO = "lauhuiyik/ericlau.io";
 const WORKFLOW = "energy-collector.yml";
 const GROWATT_KV_KEY = "growatt_latest";
-const LATEST_KV_KEY = "latest";
+/** Last Growatt attempt, success or failure, so a silent failure is visible
+ *  without tailing the Worker. Diagnostics only — nothing reads it to decide
+ *  behaviour. */
+const GROWATT_DIAG_KV_KEY = "growatt_diag";
 /** How stale the newest reading may get before it counts as a stall. The
  * collector runs every 5 min, so this tolerates three missed cycles before
  * crying wolf. */
@@ -40,9 +44,9 @@ const STALE_AFTER_SEC = 20 * 60;
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     // All independent: none of these may stop the others running.
-    ctx.waitUntil(dispatch(env));
-    ctx.waitUntil(refreshGrowatt(env));
-    ctx.waitUntil(checkFreshness(env));
+    ctx.waitUntil(dispatch(env).then((r) => console.log("dispatch", JSON.stringify(r))));
+    ctx.waitUntil(refreshGrowatt(env).then((r) => console.log("growatt", JSON.stringify(r))));
+    ctx.waitUntil(checkFreshness(env).then((r) => console.log("freshness", JSON.stringify(r))));
   },
 
   // Manual trigger, handy for testing or forcing a fresh reading.
@@ -92,20 +96,86 @@ async function refreshGrowatt(env: Env): Promise<{ ok: boolean; detail: string }
   if (!env.GROWATT_API_TOKEN || !env.GROWATT_PLANT_ID || !env.ENERGY_KV) {
     return { ok: false, detail: "growatt not configured" };
   }
+  // Records what happened either way. Growatt failing silently is exactly how
+  // this went unnoticed for a day: the error was returned but never read.
+  //
+  // Only writes when the outcome CHANGES. KV allows 1,000 writes a day against
+  // 100,000 reads, so a diagnostic written every 5-minute cycle (288/day) is a
+  // third of the entire write budget spent on telling us nothing new. Reading
+  // first to compare costs essentially nothing.
+  const diag = async (d: Record<string, unknown>) => {
+    try {
+      const next = JSON.stringify(d);
+      const prevRaw = await env.ENERGY_KV!.get(GROWATT_DIAG_KV_KEY);
+      if (prevRaw) {
+        const { at_ts: _ignored, ...prev } = JSON.parse(prevRaw) as Record<string, unknown>;
+        if (JSON.stringify(prev) === next) return; // unchanged, don't spend a write
+      }
+      await env.ENERGY_KV!.put(
+        GROWATT_DIAG_KV_KEY,
+        JSON.stringify({ ...d, at_ts: Math.floor(Date.now() / 1000) }),
+      );
+    } catch {
+      // diagnostics must never break collection
+    }
+  };
+
+  type Body = {
+    error_code?: number;
+    error_msg?: string;
+    data?: { current_power?: number; today_energy?: string; last_update_time?: string };
+  };
+
   try {
-    const res = await fetch(
-      `https://openapi.growatt.com/v1/plant/data?plant_id=${encodeURIComponent(env.GROWATT_PLANT_ID)}`,
-      { headers: { token: env.GROWATT_API_TOKEN, "user-agent": "ericlau-energy/1.0" } },
-    );
-    const body = (await res.json()) as {
-      error_code?: number;
-      error_msg?: string;
-      data?: { current_power?: number; today_energy?: string; last_update_time?: string };
-    };
-    // 10012 is 'error_frequently_access' (rate limit) — expected occasionally,
-    // and no reason to clobber the last good value, so just report and leave KV.
-    if (body.error_code !== 0 || !body.data) {
-      return { ok: false, detail: `growatt error_code=${body.error_code} msg=${body.error_msg}` };
+    // Growatt answers 10011 error_permission_denied depending on which IP the
+    // request leaves from — the same token and plant succeed from a home
+    // connection. Cloudflare's egress is usually rejected but not always (it
+    // worked at 10:31 and 21:04 today), so retry a few times: attempts are
+    // cheap and a rejected call doesn't appear to consume quota.
+    //
+    // Spaced ~2s to stay clear of 10012 error_frequently_access, and the loop
+    // stops the moment one succeeds.
+    const attempts: { status: number; error_code?: number; error_msg?: string }[] = [];
+    let body: Body | null = null;
+    let lastStatus = 0;
+
+    for (let i = 0; i < 3; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 2000));
+      const res = await fetch(
+        `https://openapi.growatt.com/v1/plant/data?plant_id=${encodeURIComponent(env.GROWATT_PLANT_ID)}`,
+        { headers: { token: env.GROWATT_API_TOKEN, "user-agent": "ericlau-energy/1.0" } },
+      );
+      lastStatus = res.status;
+      // Read as text first: a block page or gateway error is HTML, and
+      // res.json() would throw before we ever saw what it actually said.
+      const raw = await res.text();
+      let parsed: Body;
+      try {
+        parsed = JSON.parse(raw) as Body;
+      } catch {
+        attempts.push({ status: res.status, error_msg: `non-JSON: ${raw.slice(0, 80)}` });
+        continue;
+      }
+      attempts.push({
+        status: res.status,
+        error_code: parsed.error_code,
+        error_msg: parsed.error_msg,
+      });
+      if (parsed.error_code === 0 && parsed.data) {
+        body = parsed;
+        break;
+      }
+      // Rate-limited: backing off further won't help within this cycle.
+      if (parsed.error_code === 10012) break;
+    }
+
+    if (!body) {
+      await diag({ ok: false, stage: "api", status: lastStatus, attempts });
+      const last = attempts[attempts.length - 1];
+      return {
+        ok: false,
+        detail: `growatt failed after ${attempts.length} attempts: error_code=${last?.error_code} msg=${last?.error_msg}`,
+      };
     }
     const num = (v: unknown): number | null => {
       const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN;
@@ -114,14 +184,16 @@ async function refreshGrowatt(env: Env): Promise<{ ok: boolean; detail: string }
     const snapshot: GrowattSnapshot = {
       // NOTE: plant/data reports current_power in kW. plant/list reports the
       // same value in WATTS — don't mix them up.
-      solar_old_kw: num(body.data.current_power),
-      solar_old_kwh_today: num(body.data.today_energy),
-      last_update_time: body.data.last_update_time ?? null,
+      solar_old_kw: num(body.data!.current_power),
+      solar_old_kwh_today: num(body.data!.today_energy),
+      last_update_time: body.data!.last_update_time ?? null,
       fetched_ts: Math.floor(Date.now() / 1000),
     };
     await env.ENERGY_KV.put(GROWATT_KV_KEY, JSON.stringify(snapshot));
+    await diag({ ok: true, stage: "ok", attempts: attempts.length, ...snapshot });
     return { ok: true, detail: `${snapshot.solar_old_kw} kW / ${snapshot.solar_old_kwh_today} kWh` };
   } catch (e) {
+    await diag({ ok: false, stage: "throw", error: String(e) });
     return { ok: false, detail: String(e) };
   }
 }
@@ -143,11 +215,14 @@ async function refreshGrowatt(env: Env): Promise<{ ok: boolean; detail: string }
  * produces one notification rather than one every five minutes.
  */
 async function checkFreshness(env: Env): Promise<{ ok: boolean; detail: string }> {
-  if (!env.ENERGY_KV) return { ok: false, detail: "no KV binding" };
   try {
-    const raw = await env.ENERGY_KV.get(LATEST_KV_KEY);
-    if (!raw) return { ok: false, detail: "no reading yet" };
-    const latest = JSON.parse(raw) as { ts?: number; local_time?: string };
+    // Straight from D1. See the wrangler.jsonc note for why this isn't a KV
+    // read or a fetch of the site's own endpoint.
+    if (!env.DB) return { ok: false, detail: "no D1 binding" };
+    const latest = await env.DB.prepare(
+      "SELECT ts, local_time FROM readings ORDER BY ts DESC LIMIT 1",
+    ).first<{ ts: number; local_time: string }>();
+    if (!latest) return { ok: false, detail: "no reading yet" };
     if (!latest.ts) return { ok: false, detail: "reading has no timestamp" };
 
     const ageSec = Math.floor(Date.now() / 1000) - latest.ts;

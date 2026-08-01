@@ -147,21 +147,11 @@ export async function POST(request: Request) {
       s2h, s2b, b2h, g2h, ankerHome, sources,
     )
     .run();
-
-  const snapshot = {
-    ts, local_date, local_time,
-    solar_new_kw: solarNew, solar_old_kw: solarOld, solar_total_kw: solarTotal,
-    battery_soc: num(body.battery_soc), battery_charge_kw: battChg, battery_discharge_kw: battDis,
-    grid_import_kw: gridImp, grid_export_kw: gridExp, house_kw: houseKw,
-    solar_new_kwh_today: snKwh, solar_old_kwh_today: soKwh,
-    grid_import_kwh_today: giKwh, grid_export_kwh_today: geKwh,
-    battery_charge_kwh_today: bcKwh, battery_discharge_kwh_today: bdKwh,
-    house_kwh_today: houseKwhToday,
-    solar_to_home_kwh_today: s2h, solar_to_battery_kwh_today: s2b,
-    battery_to_home_kwh_today: b2h, grid_to_home_kwh_today: g2h,
-    home_usage_kwh_today: ankerHome, sources,
-  };
-  await env.ENERGY_KV.put("latest", JSON.stringify(snapshot));
-
+  // NOTE: deliberately no KV write here. This used to mirror the snapshot into
+  // a "latest" key, once per reading — about 1,160 writes a day, which on its
+  // own exceeded Cloudflare's 1,000/day free KV write allowance. Once the
+  // allowance ran out every other KV write failed too, which is how the Growatt
+  // snapshot silently stopped updating. The row is already in D1, so
+  // /api/energy/latest reads it from there instead; D1 allows 5M reads a day.
   return Response.json({ ok: true, ts, house_kw: houseKw, solar_total_kw: solarTotal });
 }

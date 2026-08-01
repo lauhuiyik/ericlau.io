@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type { ChargeSession, DailyTotal, Reading, Tariff } from "@/lib/energy";
+import type { ChargeSession, DailyTotal, Reading, Tariff, TeslaSample } from "@/lib/energy";
 import { C } from "@/lib/colors";
 
 export { C };
@@ -207,10 +207,15 @@ export function LiveChartDay({
   series,
   sessions,
   tariff,
+  teslaSamples = [],
 }: {
   series: Reading[];
   sessions: ChargeSession[];
   tariff: Tariff;
+  /** Live Fleet API samples. When present these are used for the charging line
+   * instead of `sessions`, giving actual measured power per sample rather than
+   * a session average held flat. */
+  teslaSamples?: TeslaSample[];
 }) {
   const W = 920;
   const H = 300;
@@ -225,7 +230,30 @@ export function LiveChartDay({
   // Live per-minute charge power needs the Tesla Fleet API; until that's
   // connected this is each completed session's average power (energy ÷
   // duration) held flat across the session, which is why it reads as steps.
+  // Live samples, keyed by minute-of-day, for nearest-sample lookup.
+  const livePoints = teslaSamples
+    .filter((s) => s.at_home !== 0)
+    .map((s) => ({
+      min: minutesOfDayLocal(s.local_time),
+      // Only count power while the car says it is actually charging. A plugged-in
+      // but idle car reports a small non-zero charge_power_kw (observed 1 kW at
+      // "Stopped" with zero energy added), which would otherwise draw a phantom
+      // charging line.
+      kw: s.charging_state === "Charging" ? (s.charge_power_kw ?? 0) : 0,
+    }))
+    .sort((a, b) => a.min - b.min);
+  const hasLive = livePoints.length > 0;
+
   const chargeAt = (min: number): number => {
+    if (hasLive) {
+      // Snap to the closest live sample within ~6 min (one collector cycle);
+      // beyond that treat it as no data rather than smearing a stale value.
+      let best: { min: number; kw: number } | null = null;
+      for (const p of livePoints) {
+        if (best === null || Math.abs(p.min - min) < Math.abs(best.min - min)) best = p;
+      }
+      return best && Math.abs(best.min - min) <= 6 ? best.kw : 0;
+    }
     for (const s of sessions) {
       if (s.avgPowerKw == null) continue;
       const start = new Date(s.started_ts * 1000);

@@ -254,22 +254,197 @@ export async function getDailyTotals(
   });
 }
 
+/**
+ * Home-charging kWh per date, live Fleet API data taking precedence.
+ *
+ * Two sources exist and they must not be added together:
+ *  - `tesla_state` — live 5-minute Fleet API samples. Authoritative.
+ *  - `tesla_charges` — the one-off Tessie CSV import, history only (to
+ *    2026-07-10). Reference for dates the Fleet API never covered.
+ *
+ * Resolved per date rather than by a single cutoff, so a date is served by live
+ * samples whenever it has any and falls back to Tessie only where it has none.
+ */
 export async function getHomeChargeKwhByDate(
   db: D1Database,
   start: string,
   end: string,
 ): Promise<{ date: string; kwh: number }[]> {
+  const [legacy, live] = await Promise.all([
+    db
+      .prepare(
+        `SELECT local_date date, ROUND(SUM(energy_added_kwh),2) kwh
+         FROM tesla_charges
+         WHERE at_home = 1 AND local_date BETWEEN ? AND ?
+         GROUP BY local_date
+         ORDER BY local_date ASC`,
+      )
+      .bind(start, end)
+      .all<{ date: string; kwh: number | null }>(),
+    db
+      .prepare(
+        `SELECT local_date, ts, local_time, charging_state, charge_power_kw,
+                battery_level, charge_energy_added_kwh, at_home
+         FROM tesla_state
+         WHERE local_date BETWEEN ? AND ?
+         ORDER BY ts ASC`,
+      )
+      .bind(start, end)
+      .all<TeslaSample & { local_date: string }>(),
+  ]);
+
+  const byDate = new Map<string, number>();
+  for (const r of legacy.results ?? []) byDate.set(r.date, r.kwh ?? 0);
+
+  // Group live samples per date, then reuse the same delta walk the day view
+  // uses so the two views can't report different numbers.
+  const grouped = new Map<string, TeslaSample[]>();
+  for (const r of live.results ?? []) {
+    const list = grouped.get(r.local_date);
+    if (list) list.push(r);
+    else grouped.set(r.local_date, [r]);
+  }
+  for (const [date, samples] of grouped) {
+    byDate.set(date, chargedKwhFromSamples(samples)); // live overrides Tessie
+  }
+
+  return [...byDate.entries()]
+    .map(([date, kwh]) => ({ date, kwh }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** One live Fleet API sample of the car's state. */
+export type TeslaSample = {
+  ts: number;
+  local_time: string;
+  charging_state: string | null;
+  charge_power_kw: number | null;
+  battery_level: number | null;
+  charge_energy_added_kwh: number | null;
+  at_home: number | null;
+};
+
+/**
+ * Live per-sample car state for a day, from the Fleet API.
+ *
+ * This is the source the chart should use for any day the Fleet API was
+ * connected. `tesla_charges` (the Tessie CSV import) only covers history up to
+ * 2026-07-10 and is the fallback for older days.
+ */
+export async function getTeslaStateForDate(db: D1Database, date: string): Promise<TeslaSample[]> {
   const res = await db
     .prepare(
-      `SELECT local_date date, ROUND(SUM(energy_added_kwh),2) kwh
-       FROM tesla_charges
-       WHERE at_home = 1 AND local_date BETWEEN ? AND ?
-       GROUP BY local_date
-       ORDER BY local_date ASC`,
+      `SELECT ts, local_time, charging_state, charge_power_kw, battery_level,
+              charge_energy_added_kwh, at_home
+       FROM tesla_state WHERE local_date = ? ORDER BY ts ASC`,
     )
-    .bind(start, end)
-    .all<{ date: string; kwh: number | null }>();
-  return (res.results ?? []).map((r) => ({ date: r.date, kwh: r.kwh ?? 0 }));
+    .bind(date)
+    .all<TeslaSample>();
+  return res.results ?? [];
+}
+
+/**
+ * kWh added at home over a day's samples.
+ *
+ * `charge_energy_added_kwh` is cumulative within a charging session and resets
+ * when a new one starts, so this sums positive deltas and treats a drop as a
+ * fresh session (counting the new value). That's more accurate than integrating
+ * power over 5-minute samples, which would miss charging that starts and stops
+ * between them.
+ */
+/**
+ * Newest Tesla sample regardless of date, for the "right now" strip.
+ *
+ * Returns null when the newest sample is older than `maxAgeSec` — the car sleeps
+ * and the collector skips samples while it does, so a stale row must not be
+ * presented as current draw.
+ */
+export async function getLatestTeslaState(
+  db: D1Database,
+  maxAgeSec = 15 * 60,
+): Promise<TeslaSample | null> {
+  const row = await db
+    .prepare(
+      `SELECT ts, local_time, charging_state, charge_power_kw, battery_level,
+              charge_energy_added_kwh, at_home
+       FROM tesla_state ORDER BY ts DESC LIMIT 1`,
+    )
+    .first<TeslaSample>();
+  if (!row) return null;
+  const age = Math.floor(Date.now() / 1000) - row.ts;
+  return age <= maxAgeSec ? row : null;
+}
+
+/** One chunk of charging: how much, and the window it accrued over. */
+type ChargeDelta = { kwh: number; fromMin: number; toMin: number };
+
+function minuteOfDay(localTime: string): number {
+  const [h, m] = localTime.split(":");
+  return (Number(h) || 0) * 60 + (Number(m) || 0);
+}
+
+/**
+ * Walks a day's samples and yields each increment of charge, with the window it
+ * happened in. Both the day total and the tariff split derive from this, so
+ * they can never disagree.
+ */
+function chargeDeltas(samples: TeslaSample[]): ChargeDelta[] {
+  const out: ChargeDelta[] = [];
+  let prev: number | null = null;
+  let prevMin = 0;
+  for (const s of samples) {
+    if (s.at_home === 0) continue; // only count charging done at home
+    const v = s.charge_energy_added_kwh;
+    if (v == null) continue;
+    const min = minuteOfDay(s.local_time);
+
+    if (prev == null) {
+      // The day's first sample may already be mid-session, so its counter
+      // reading is energy we'd otherwise never see. Only trust it while the car
+      // is actually charging — a parked car reports the *previous* session's
+      // total, which would double-count it.
+      if (s.charging_state === "Charging" && v > 0) out.push({ kwh: v, fromMin: 0, toMin: min });
+    } else if (v > prev) {
+      out.push({ kwh: v - prev, fromMin: prevMin, toMin: min });
+    } else if (v < prev * 0.5) {
+      // A genuine reset: the counter drops to ~0 when a new session starts.
+      if (v > 0) out.push({ kwh: v, fromMin: prevMin, toMin: min });
+    }
+    // Anything else is a decrease that isn't a reset — ignore it. Tesla's
+    // charge_energy_added creeps *downward* by ~0.02 kWh per sample once a
+    // session completes (observed 13.70 -> 13.68 -> 13.66 ...). Treating those
+    // as resets added the full counter back on every sample, which turned one
+    // real 13.7 kWh session into a reported 110 kWh.
+    prev = v;
+    prevMin = min;
+  }
+  return out;
+}
+
+export function chargedKwhFromSamples(samples: TeslaSample[]): number {
+  return chargeDeltas(samples).reduce((s, d) => s + d.kwh, 0);
+}
+
+/**
+ * Tariff split for live samples. Preferred over splitChargingByTariff when
+ * tesla_state has data, because it apportions each 5-minute increment by the
+ * window it actually accrued in rather than spreading a whole session's total
+ * across its full span.
+ */
+export function splitSamplesByTariff(
+  samples: TeslaSample[],
+  t: Tariff,
+): { peakKwh: number; offPeakKwh: number } {
+  let peakKwh = 0;
+  let offPeakKwh = 0;
+  for (const d of chargeDeltas(samples)) {
+    // A zero-length window (two samples in the same minute) still has to land
+    // somewhere, so widen it by a minute to get a usable fraction.
+    const frac = peakFraction(d.fromMin, Math.max(d.toMin, d.fromMin + 1), t);
+    peakKwh += d.kwh * frac;
+    offPeakKwh += d.kwh * (1 - frac);
+  }
+  return { peakKwh, offPeakKwh };
 }
 
 export type ChargeSession = {

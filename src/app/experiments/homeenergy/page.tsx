@@ -4,7 +4,11 @@ import {
   type DailyTotal,
   type DateRange,
   computeCost,
+  chargedKwhFromSamples,
   getChargeSessionsForDate,
+  getTeslaStateForDate,
+  getLatestTeslaState,
+  splitSamplesByTariff,
   getDailyTotals,
   getHomeChargeKwhByDate,
   getLatest,
@@ -19,6 +23,7 @@ import {
   type SourceFreshness,
 } from "@/lib/energy";
 import { AutoRefresh } from "./auto-refresh";
+import { FlowDiagram } from "./flow-diagram";
 import { RangePicker } from "./range-picker";
 import { GridRelianceChartRange, LiveChartDay, PowerChartRange, ShareBar, type ShareSlice } from "./charts";
 import { C } from "@/lib/colors";
@@ -310,11 +315,17 @@ export default async function Page({
   const win = rangeWindow(range, date);
 
   const latestGlobal = await getLatest(env.DB);
+  // Not date-scoped: the balance strip always describes right now, whichever day
+  // is being browsed.
+  const latestTesla = await getLatestTeslaState(env.DB);
   const freshness = isLiveToday ? await getSourceFreshness(env.DB) : null;
   const tariff = await getTariff(env.ENERGY_KV);
 
   const daySeries = range === "day" ? await getReadingsForDate(env.DB, date) : [];
   const sessions = range === "day" ? await getChargeSessionsForDate(env.DB, date) : [];
+  // Live Fleet API samples are the real source for any day it was connected;
+  // `sessions` (the Tessie CSV import) only covers history to 2026-07-10.
+  const teslaSamples = range === "day" ? await getTeslaStateForDate(env.DB, date) : [];
   const dailyRaw = range !== "day" ? await getDailyTotals(env.DB, win.start, win.end) : [];
   const chargeByDate = range !== "day" ? await getHomeChargeKwhByDate(env.DB, win.start, win.end) : [];
   const daily = range !== "day" ? mergeChargeOnlyDates(dailyRaw, chargeByDate) : [];
@@ -339,9 +350,15 @@ export default async function Page({
     range === "day" ? (dayLatest?.house_kwh_today ?? 0) : daily.reduce((s, d) => s + d.consumedKwh, 0);
   const imported =
     range === "day" ? (dayLatest?.grid_import_kwh_today ?? 0) : daily.reduce((s, d) => s + d.gridImportKwh, 0);
+  // Live Fleet API samples are authoritative. The Tessie CSV import is
+  // reference-only history (to 2026-07-10) and is used solely for dates the
+  // Fleet API never covered — never combined with live data.
+  const liveChargedKwh = chargedKwhFromSamples(teslaSamples);
   const homeChargeKwh =
     range === "day"
-      ? sessions.reduce((s, c) => s + (c.energy_added_kwh ?? 0), 0)
+      ? teslaSamples.length > 0
+        ? liveChargedKwh
+        : sessions.reduce((s, c) => s + (c.energy_added_kwh ?? 0), 0)
       : daily.reduce((s, d) => s + d.homeChargeKwh, 0);
 
   // Anker's own flow accounting for the selected day, taken from the last
@@ -371,7 +388,15 @@ export default async function Page({
   // Note this is NOT "home + car − solar − battery + grid" — that mixes demand
   // and supply on one side and double-counts (it returned 6.98 kW against an
   // actual 3.49 kW draw when checked against live data).
-  const liveTeslaKw = 0; // live charge power needs the Tesla Fleet API; sessions are historical
+  // Live charge power, straight from the Fleet API's newest sample. Only counted
+  // while the car is actually drawing at home: a parked car still reports its
+  // last session's power, which would show phantom load. getLatestTeslaState
+  // already discards samples older than 15 min (the car sleeps and stops
+  // reporting), so a stale row can't masquerade as current draw either.
+  const liveTeslaKw =
+    latestTesla && latestTesla.charging_state === "Charging" && latestTesla.at_home !== 0
+      ? (latestTesla.charge_power_kw ?? 0)
+      : 0;
   const balNow = {
     homeExclTesla: Math.max(0, (latestGlobal?.house_kw ?? 0) - liveTeslaKw),
     tesla: liveTeslaKw,
@@ -384,7 +409,14 @@ export default async function Page({
 
   // Car charging split by when it actually ran (see splitChargingByTariff for
   // why the $ figures are "at grid rates", not necessarily what was paid).
-  const teslaSplit = splitChargingByTariff(sessions, tariff);
+  // Live samples apportion each 5-minute increment to the window it actually
+  // accrued in; the session-level fallback can only spread a whole session's
+  // total across its span. Without this the live path reported 0.0 kWh in both
+  // buckets, so charging appeared to cost nothing.
+  const teslaSplit =
+    teslaSamples.length > 0
+      ? splitSamplesByTariff(teslaSamples, tariff)
+      : splitChargingByTariff(sessions, tariff);
 
   // Share of what the home actually consumed, grid split by tariff. Anker
   // meters grid_to_home as one figure, so the peak/off-peak split is applied
@@ -502,6 +534,30 @@ export default async function Page({
         </section>
       ) : (
         <>
+          {/* Live flow first: the at-a-glance "where is power moving" view.
+              Only meaningful for right now, so it's hidden on past dates. */}
+          {isLiveToday && latestGlobal && (
+            <section className="px-6 sm:px-12 pb-4">
+              <div className="flex items-baseline justify-between gap-4 mb-2 flex-wrap">
+                <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+                  Live flow · pulses show direction, speed shows power
+                </div>
+              </div>
+              <div className="max-w-5xl">
+                <FlowDiagram
+                  solarNewKw={latestGlobal.solar_new_kw}
+                  solarOldKw={latestGlobal.solar_old_kw}
+                  batteryKw={balNow.battery}
+                  batterySoc={latestGlobal.battery_soc}
+                  gridKw={balNow.grid}
+                  houseKw={latestGlobal.house_kw ?? 0}
+                  teslaKw={liveTeslaKw}
+                  teslaState={latestTesla?.charging_state ?? null}
+                />
+              </div>
+            </section>
+          )}
+
           {/* The balance: what's being used, and what's supplying it */}
           <section className="px-6 sm:px-12 pb-10">
             <div className="flex items-baseline justify-between gap-4 mb-8 flex-wrap">
@@ -589,8 +645,8 @@ export default async function Page({
               when they&apos;re absorbing rather than supplying (battery charging, solar
               exporting), so both sides always balance.
               {isLiveToday && (
-                <>{" "}Tesla live charge power needs the Fleet API connected; today&apos;s total
-                comes from imported session history.</>
+                <>{" "}Tesla figures are live from the Fleet API, sampled every 5 minutes; the car
+                stops reporting while asleep, so its power reads zero rather than stale.</>
               )}
             </p>
           </section>
@@ -638,15 +694,18 @@ export default async function Page({
               </span>
             </div>
             {range === "day" ? (
-              <LiveChartDay series={daySeries} tariff={tariff} sessions={sessions} />
+              <LiveChartDay
+                series={daySeries}
+                tariff={tariff}
+                sessions={sessions}
+                teslaSamples={teslaSamples}
+              />
             ) : (
               <GridRelianceChartRange daily={daily} />
             )}
-            {range === "day" && sessions.length === 0 && (
+            {range === "day" && sessions.length === 0 && teslaSamples.length === 0 && (
               <p className="mt-4 text-xs text-muted max-w-2xl">
-                No Tesla charging recorded for this day, so the red line sits at zero. Live charge
-                power needs the Tesla Fleet API connected — until then this line only shows
-                completed sessions imported from Tessie, drawn at each session&apos;s average power.
+                No Tesla charging recorded for this day, so the red line sits at zero.
               </p>
             )}
             {range !== "day" && (
@@ -716,8 +775,9 @@ export default async function Page({
             {homeChargeKwh > 0 && (
               <p className="pb-5 text-xs text-muted max-w-3xl">
                 Car charging $ is what that energy costs at the grid rate for the time it ran — not
-                necessarily what was paid, since some may have come from solar or the battery. Anker
-                doesn&apos;t meter the car separately, so a true split needs the Tesla Fleet API.
+                necessarily what was paid, since some may have come from solar or the battery. The
+                Fleet API reports how much the car took but not where it came from, and Anker meters
+                the house as a whole, so the true source split isn&apos;t measurable from either.
               </p>
             )}
           </section>

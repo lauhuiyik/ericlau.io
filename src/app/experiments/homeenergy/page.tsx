@@ -330,9 +330,14 @@ export default async function Page({
   // cost silently vanished from every range except a single day.
   const teslaRangeSamples =
     range === "day" ? teslaSamples : await getTeslaStateInRange(env.DB, win.start, win.end);
-  const dailyRaw = range !== "day" ? await getDailyTotals(env.DB, win.start, win.end) : [];
-  const chargeByDate = range !== "day" ? await getHomeChargeKwhByDate(env.DB, win.start, win.end) : [];
-  const daily = range !== "day" ? mergeChargeOnlyDates(dailyRaw, chargeByDate) : [];
+  // Fetched for every range, including a single day. The day view used to read
+  // its totals off one row's stored counters, which breaks in two ways: that
+  // row may have missed the Growatt merge (excluding array #1 from consumption
+  // entirely), and a failed Anker fetch used to store a literal 0. Deriving the
+  // day's totals the same way as a week's keeps one code path and one answer.
+  const dailyRaw = await getDailyTotals(env.DB, win.start, win.end);
+  const chargeByDate = await getHomeChargeKwhByDate(env.DB, win.start, win.end);
+  const daily = mergeChargeOnlyDates(dailyRaw, chargeByDate);
   const costSeries =
     range === "day" ? daySeries : await getReadingsInRange(env.DB, win.start, win.end);
 
@@ -342,18 +347,9 @@ export default async function Page({
       ? daySeries.length > 0 || sessions.length > 0
       : daily.length > 0;
 
-  // Tile/stat data source: the live snapshot for "today", otherwise the last
-  // reading of the selected day, otherwise aggregated range totals.
-  const dayLatest = range === "day" ? (isLiveToday ? latestGlobal : daySeries[daySeries.length - 1] ?? null) : null;
-
-  const generated =
-    range === "day"
-      ? (dayLatest?.solar_new_kwh_today ?? 0) + (dayLatest?.solar_old_kwh_today ?? 0)
-      : daily.reduce((s, d) => s + d.generatedKwh, 0);
-  const consumed =
-    range === "day" ? (dayLatest?.house_kwh_today ?? 0) : daily.reduce((s, d) => s + d.consumedKwh, 0);
-  const imported =
-    range === "day" ? (dayLatest?.grid_import_kwh_today ?? 0) : daily.reduce((s, d) => s + d.gridImportKwh, 0);
+  const generated = daily.reduce((s, d) => s + d.generatedKwh, 0);
+  const consumed = daily.reduce((s, d) => s + d.consumedKwh, 0);
+  const imported = daily.reduce((s, d) => s + d.gridImportKwh, 0);
   // Live Fleet API samples are authoritative. The Tessie CSV import is
   // reference-only history (to 2026-07-10) and is used solely for dates the
   // Fleet API never covered — never combined with live data.

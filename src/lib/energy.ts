@@ -241,9 +241,12 @@ export async function getDailyTotals(
               (SELECT r.grid_export_kwh_today FROM readings r
                 WHERE r.local_date = d.local_date AND r.grid_export_kwh_today IS NOT NULL
                 ORDER BY r.ts DESC LIMIT 1) ge,
-              (SELECT r.house_kwh_today FROM readings r
-                WHERE r.local_date = d.local_date AND r.house_kwh_today IS NOT NULL
-                ORDER BY r.ts DESC LIMIT 1) house
+              (SELECT r.battery_charge_kwh_today FROM readings r
+                WHERE r.local_date = d.local_date AND r.battery_charge_kwh_today IS NOT NULL
+                ORDER BY r.ts DESC LIMIT 1) bc,
+              (SELECT r.battery_discharge_kwh_today FROM readings r
+                WHERE r.local_date = d.local_date AND r.battery_discharge_kwh_today IS NOT NULL
+                ORDER BY r.ts DESC LIMIT 1) bd
        FROM (SELECT DISTINCT local_date FROM readings
               WHERE local_date BETWEEN ? AND ?) d
        ORDER BY d.local_date ASC`,
@@ -255,7 +258,8 @@ export async function getDailyTotals(
       so: number | null;
       gi: number | null;
       ge: number | null;
-      house: number | null;
+      bc: number | null;
+      bd: number | null;
     }>();
 
   const charge = await getHomeChargeKwhByDate(db, start, end);
@@ -263,7 +267,16 @@ export async function getDailyTotals(
 
   return (rows.results ?? []).map((r) => {
     const generatedKwh = (r.sn ?? 0) + (r.so ?? 0);
-    const consumedKwh = r.house ?? 0;
+    // Derived here rather than read from the stored house_kwh_today. Each
+    // column above is the day's last known value for that column, which may
+    // come from a different row — and the stored house figure was computed on
+    // whichever row it came from, so on a row that missed the Growatt merge it
+    // excludes array #1 entirely. Recomputing from the day's best value for
+    // each component keeps the day internally consistent.
+    const consumedKwh = Math.max(
+      0,
+      generatedKwh + (r.bd ?? 0) + (r.gi ?? 0) - (r.bc ?? 0) - (r.ge ?? 0),
+    );
     const gridImportKwh = r.gi ?? 0;
     return {
       date: r.local_date,
@@ -748,9 +761,25 @@ export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
   let hasGaps = false;
 
   for (const rows of byDate.values()) {
-    const imp = rows
+    const impAll = rows
       .filter((r) => r.grid_import_kwh_today != null)
       .sort((a, b) => a.ts - b.ts);
+
+    // Anker resets its daily counters a little AFTER local midnight, so the
+    // first readings of a date still carry the previous day's totals. Left in,
+    // that leading value gets billed as the midnight-to-first-reading block and
+    // then the day's real consumption is added on top of it: 2026-08-01
+    // reconstructed 142.16 kWh against a true 61.72, very nearly doubling the
+    // day's cost. Start from the last reset instead — a drop to under half the
+    // previous value, which a monotonic within-day counter can't otherwise do.
+    let startIdx = 0;
+    for (let i = 1; i < impAll.length; i++) {
+      const prev = impAll[i - 1].grid_import_kwh_today ?? 0;
+      const cur = impAll[i].grid_import_kwh_today ?? 0;
+      if (prev > 0 && cur < prev * 0.5) startIdx = i;
+    }
+    const imp = impAll.slice(startIdx);
+    const dayRows = startIdx > 0 ? rows.filter((r) => r.ts >= imp[0].ts) : rows;
 
     if (imp.length > 0) {
       // midnight -> first reading of the day
@@ -781,10 +810,11 @@ export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
       }
     }
 
-    // Export is read straight off the day's highest cumulative value, so it
-    // needs no gap handling.
+    // Export is read off the day's highest cumulative value, so it needs no gap
+    // handling — but it must skip the same pre-reset carryover rows, or a day
+    // that exported less than the day before inherits the larger figure.
     let maxExp = 0;
-    for (const r of rows) maxExp = Math.max(maxExp, r.grid_export_kwh_today ?? 0);
+    for (const r of dayRows) maxExp = Math.max(maxExp, r.grid_export_kwh_today ?? 0);
     exportKwh += maxExp;
   }
 

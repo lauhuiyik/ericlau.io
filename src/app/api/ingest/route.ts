@@ -135,9 +135,17 @@ export async function POST(request: Request) {
   const gridExp = num(body.grid_export_kw);
 
   // Whole-home load = everything coming in − everything going out.
-  const houseKw =
-    (solarNew ?? 0) + (solarOld ?? 0) + (battDis ?? 0) + (gridImp ?? 0) -
-    (battChg ?? 0) - (gridExp ?? 0);
+  //
+  // Null when we have no components at all, rather than 0. A failed Anker fetch
+  // posts a reading with everything null, and summing those with ?? 0 stored a
+  // literal 0 that is indistinguishable from "the house used nothing". Those
+  // zeros then won every "last known value" lookup, which is how 2026-07-29
+  // came to report 0.0 kWh consumed for the whole day.
+  const anyKw = [solarNew, solarOld, battDis, battChg, gridImp, gridExp].some((v) => v != null);
+  const houseKw = anyKw
+    ? (solarNew ?? 0) + (solarOld ?? 0) + (battDis ?? 0) + (gridImp ?? 0) -
+      (battChg ?? 0) - (gridExp ?? 0)
+    : null;
 
   const snKwh = num(body.solar_new_kwh_today);
   const soKwh = solarOldKwhToday;
@@ -145,9 +153,11 @@ export async function POST(request: Request) {
   const geKwh = num(body.grid_export_kwh_today);
   const bcKwh = num(body.battery_charge_kwh_today);
   const bdKwh = num(body.battery_discharge_kwh_today);
-  const houseKwhToday =
-    (snKwh ?? 0) + (soKwh ?? 0) + (bdKwh ?? 0) + (giKwh ?? 0) -
-    (bcKwh ?? 0) - (geKwh ?? 0);
+  const anyKwh = [snKwh, soKwh, bdKwh, giKwh, bcKwh, geKwh].some((v) => v != null);
+  const houseKwhToday = anyKwh
+    ? (snKwh ?? 0) + (soKwh ?? 0) + (bdKwh ?? 0) + (giKwh ?? 0) -
+      (bcKwh ?? 0) - (geKwh ?? 0)
+    : null;
 
   const s2h = num(body.solar_to_home_kwh_today);
   const s2b = num(body.solar_to_battery_kwh_today);

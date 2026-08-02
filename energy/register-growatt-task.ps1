@@ -1,15 +1,18 @@
 <#
-  Registers the Growatt poller as a scheduled task that runs every 5 minutes,
-  including while nobody is logged in.
+  Registers the Growatt poller to run every 5 minutes.
 
-  Run once, in PowerShell *as Administrator*, from the folder holding
-  growatt-poller.ps1:
+  Uses schtasks.exe rather than the ScheduledTasks cmdlets. The previous version
+  built a New-ScheduledTaskTrigger -AtStartup trigger with a repetition grafted
+  onto it, which looks right and silently doesn't work: the repetition only
+  begins once the startup trigger fires, so nothing runs until the next reboot.
+  Registration "succeeded", the manual test run "succeeded", and collection then
+  sat dead for 23 minutes looking like a Growatt outage.
 
-      .\register-growatt-task.ps1
+  schtasks /SC MINUTE /MO 5 starts immediately, repeats indefinitely, and
+  resumes on its own after a reboot.
 
-  To remove it later:
-
-      Unregister-ScheduledTask -TaskName 'Growatt poller' -Confirm:$false
+  Run as Administrator from the folder holding growatt-poller.ps1.
+  To remove:  schtasks /Delete /TN "Growatt poller" /F
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -18,25 +21,36 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script = Join-Path $here 'growatt-poller.ps1'
 if (-not (Test-Path $script)) { throw "growatt-poller.ps1 not found in $here" }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
+$taskName = 'Growatt poller'
+$run = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
 
-# Starts at boot and repeats forever. RepetitionDuration of MaxValue means it
-# keeps going rather than stopping after a day, which is the default trap here.
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)).Repetition
+schtasks /Create /TN $taskName /TR $run /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /F | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "schtasks failed with exit code $LASTEXITCODE" }
+Write-Host "Registered '$taskName' - every 5 minutes, as SYSTEM, survives reboot."
 
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+# Prove it actually runs. Registration succeeding is not evidence that the
+# schedule works, which is exactly how the previous version slipped through.
+$logPath = Join-Path $here 'growatt-poller.log'
+$before = if (Test-Path $logPath) { (Get-Item $logPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-Register-ScheduledTask -TaskName 'Growatt poller' -Action $action -Trigger $trigger `
-    -Settings $settings -RunLevel Highest -User 'SYSTEM' -Force | Out-Null
+Write-Host 'Running it once now to verify...'
+schtasks /Run /TN $taskName | Out-Null
 
-Write-Host "Registered. Starting it once now to check it works..."
-Start-ScheduledTask -TaskName 'Growatt poller'
-Start-Sleep -Seconds 10
-Get-Content (Join-Path $here 'growatt-poller.log') -Tail 5
+$deadline = (Get-Date).AddSeconds(60)
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 3
+    if ((Test-Path $logPath) -and (Get-Item $logPath).LastWriteTimeUtc -gt $before) {
+        Write-Host ''
+        Get-Content $logPath -Tail 3
+        if ((Get-Content $logPath -Tail 1) -match 'OK') {
+            Write-Host ''
+            Write-Host 'Working. Next run within 5 minutes.'
+        } else {
+            Write-Host ''
+            Write-Host 'It ran but reported a problem - see the line above.'
+        }
+        exit 0
+    }
+}
+
+Write-Warning "Registered, but no log appeared within 60s. Check with: schtasks /Query /TN `"$taskName`" /V /FO LIST"

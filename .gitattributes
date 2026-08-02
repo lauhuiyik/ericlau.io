@@ -1,0 +1,2 @@
+energy/Install-Growatt.cmd text eol=crlf
+energy/*.ps1 text eol=crlf

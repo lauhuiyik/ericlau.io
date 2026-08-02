@@ -43,7 +43,16 @@ if (-not (Test-Path $configPath)) {
     Write-Log "ERROR: no config at $configPath"
     exit 1
 }
-$cfg = Get-Content $configPath -Raw | ConvertFrom-Json
+try {
+    $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
+} catch {
+    # Overwhelmingly the cause is pasting a value over the quotes as well as the
+    # placeholder, leaving  "GrowattToken": abc123  instead of  "abc123".
+    Write-Log "ERROR: $configPath is not valid JSON. Every value must stay wrapped in double quotes."
+    Write-Log "       Rebuild it with:  .\write-growatt-config.ps1"
+    Write-Log "       (parser said: $($_.Exception.Message))"
+    exit 1
+}
 
 foreach ($key in 'GrowattToken', 'PlantId', 'IngestSecret', 'SiteUrl') {
     if (-not $cfg.$key) { Write-Log "ERROR: config is missing $key"; exit 1 }

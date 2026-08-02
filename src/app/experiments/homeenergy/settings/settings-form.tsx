@@ -42,7 +42,9 @@ export function SettingsForm() {
     e.preventDefault();
     setStatus("saving");
     try {
-      const r = await fetch("/api/energy/tariff", {
+      // Not /api/energy/tariff: that requires a Bearer secret the browser
+      // cannot hold, so every save 401'd. This path sits inside the Access gate.
+      const r = await fetch("/experiments/homeenergy/settings/save", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(tariff),

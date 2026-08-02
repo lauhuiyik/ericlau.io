@@ -25,6 +25,7 @@ import {
 } from "@/lib/energy";
 import { AutoRefresh } from "./auto-refresh";
 import { FlowDiagram } from "./flow-diagram";
+import { getWeatherNow, checkSolarAgainstSky } from "@/lib/weather";
 import { RangePicker } from "./range-picker";
 import { GridRelianceChartRange, LiveChartDay, PowerChartRange, ShareBar, type ShareSlice } from "./charts";
 import { C } from "@/lib/colors";
@@ -319,6 +320,11 @@ export default async function Page({
   // Not date-scoped: the balance strip always describes right now, whichever day
   // is being browsed.
   const latestTesla = await getLatestTeslaState(env.DB);
+  // Independent physical reference. Every other check on this page compares our
+  // own derived numbers with each other, which is how a stuck 4.5 kW reading
+  // survived a full arithmetic audit and was only caught by someone noticing
+  // solar after dark. Sunlight is the one input our code can't fake.
+  const weather = isLiveToday ? await getWeatherNow() : null;
   const freshness = isLiveToday ? await getSourceFreshness(env.DB) : null;
   const tariff = await getTariff(env.ENERGY_KV);
 
@@ -497,6 +503,10 @@ export default async function Page({
   const rangeLabel =
     range === "day" ? (date === today ? "Today" : date) : `${win.start} → ${win.end}`;
 
+  // 12.76 kW across both arrays. Compared against what the current sky can
+  // physically support, not against our own other figures.
+  const sky = checkSolarAgainstSky(latestGlobal?.solar_total_kw ?? null, 12.76, weather);
+
   // A missing inverter is surfaced per-array in the solar boxes below (each
   // shows its own "last reported" time), rather than as a page-level banner —
   // Growatt reporting nothing after dark is routine, not an alert.
@@ -578,6 +588,28 @@ export default async function Page({
         </section>
       ) : (
         <>
+          {sky && (
+            <section className="px-6 sm:px-12 pt-2 pb-4">
+              <div
+                className="border-l-2 pl-4 py-1"
+                style={{
+                  borderColor:
+                    sky.level === "bad" ? C.warn : sky.level === "warn" ? C.solar : C.self,
+                }}
+              >
+                <div
+                  className="font-mono text-[10px] uppercase tracking-[0.22em] mb-1"
+                  style={{
+                    color: sky.level === "bad" ? C.warn : sky.level === "warn" ? C.solar : C.self,
+                  }}
+                >
+                  Sky check · {sky.headline}
+                </div>
+                <p className="text-xs text-muted max-w-3xl">{sky.detail}</p>
+              </div>
+            </section>
+          )}
+
           {/* Live flow first: the at-a-glance "where is power moving" view.
               Only meaningful for right now, so it's hidden on past dates. */}
           {isLiveToday && latestGlobal && (

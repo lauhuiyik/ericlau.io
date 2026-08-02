@@ -486,6 +486,34 @@ function chargeDeltas(samples: TeslaSample[]): ChargeDelta[] {
   return out;
 }
 
+/**
+ * Longest gap in minutes between consecutive at-home samples for a day,
+ * measured from midnight.
+ *
+ * The car can run a scheduled charge without coming online for third-party
+ * polling — vehicle_data just returns 408 — so a charge can complete entirely
+ * between samples and be invisible. Observed 2026-08-02: no samples at all
+ * between 22:46 and 11:06, over which 2.9 kWh went in unrecorded.
+ *
+ * Deliberately reported rather than guessed at. The first sample after a gap
+ * does carry a counter value, but counting it risks double-counting a stale
+ * session, and Tesla's counter creeps downward after a session ends, so it
+ * can't be told apart from a genuine new charge with any confidence.
+ *
+ * Note this only affects attribution of energy TO the car. Anker meters the
+ * whole house including the charger, so consumption, grid import and cost are
+ * unaffected by these gaps.
+ */
+export function teslaCoverageGapMin(samples: TeslaSample[]): number {
+  const home = samples.filter((s) => s.at_home !== 0);
+  if (home.length === 0) return 0;
+  let worst = minuteOfDay(home[0].local_time); // midnight -> first sample
+  for (let i = 1; i < home.length; i++) {
+    worst = Math.max(worst, minuteOfDay(home[i].local_time) - minuteOfDay(home[i - 1].local_time));
+  }
+  return worst;
+}
+
 export function chargedKwhFromSamples(samples: TeslaSample[]): number {
   return chargeDeltas(samples).reduce((s, d) => s + d.kwh, 0);
 }

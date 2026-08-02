@@ -6,6 +6,7 @@ import {
   computeCost,
   computeTeslaCost,
   chargedKwhFromSamples,
+  teslaCoverageGapMin,
   getChargeSessionsForDate,
   getTeslaStateForDate,
   getTeslaStateInRange,
@@ -354,6 +355,8 @@ export default async function Page({
   // reference-only history (to 2026-07-10) and is used solely for dates the
   // Fleet API never covered — never combined with live data.
   const liveChargedKwh = chargedKwhFromSamples(teslaSamples);
+  // Surfaced rather than silently reporting a low number as if it were complete.
+  const teslaGapMin = range === "day" ? teslaCoverageGapMin(teslaSamples) : 0;
   const homeChargeKwh =
     range === "day"
       ? teslaSamples.length > 0
@@ -781,9 +784,16 @@ export default async function Page({
                 value={kwh(consumed)}
                 sub={
                   flow
-                    ? `kWh · solar ${flow.solarToHome.toFixed(1)} · battery ${flow.batteryToHome.toFixed(
+                    ? // Anker's flow accounting covers only what Anker can see, so these
+                      // three summed to 35.9 against a 45.4 headline — array #1's 9.5 kWh
+                      // was simply missing and the figures looked wrong. It's listed
+                      // separately because Anker can't tell us how much of it went to the
+                      // house versus the grid.
+                      `kWh · solar ${flow.solarToHome.toFixed(1)} · battery ${flow.batteryToHome.toFixed(
                         1,
-                      )} · grid ${flow.gridToHome.toFixed(1)}`
+                      )} · grid ${flow.gridToHome.toFixed(1)}${
+                        flow.growattToday ? ` · array 1 ${flow.growattToday.toFixed(1)}` : ""
+                      }`
                     : `kWh · ${rangeLabel}`
                 }
               />
@@ -935,6 +945,14 @@ export default async function Page({
               </div>
             </div>
 
+            {teslaGapMin >= 60 && (
+              <p className="mt-6 text-xs" style={{ color: C.warn }}>
+                The car went {Math.floor(teslaGapMin / 60)}h{teslaGapMin % 60 ? ` ${teslaGapMin % 60}m` : ""}{" "}
+                without reporting, so charging in that window isn&apos;t counted here — Tesla can run a
+                scheduled charge without coming online for polling. House consumption, grid import and
+                cost are unaffected: Anker meters the whole house including the charger.
+              </p>
+            )}
             {teslaCost.kwh > 0 && (
               <p className="mt-6 text-xs text-muted max-w-3xl">
                 The car&apos;s cost is a <span className="text-foreground">share of the net above,

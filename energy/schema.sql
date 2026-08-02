@@ -49,24 +49,6 @@ CREATE TABLE IF NOT EXISTS readings (
 
 CREATE INDEX IF NOT EXISTS idx_readings_local_date ON readings (local_date);
 
--- Optional end-of-day rollup (populated later from readings) for fast long-range charts
--- and bill reconciliation against Lumo tariffs.
-CREATE TABLE IF NOT EXISTS daily_summary (
-  local_date                  TEXT PRIMARY KEY,
-  solar_new_kwh               REAL,
-  solar_old_kwh               REAL,
-  solar_total_kwh             REAL,
-  grid_import_kwh             REAL,
-  grid_export_kwh             REAL,
-  battery_charge_kwh          REAL,
-  battery_discharge_kwh       REAL,
-  house_kwh                   REAL,
-  -- $ using the stored Lumo tariff (peak/offpeak/supply/FiT); computed on rollup
-  cost_aud                    REAL,
-  feed_in_credit_aud          REAL,
-  updated_ts                  INTEGER
-);
-
 -- Tesla live vehicle/charging state, sampled alongside energy readings.
 CREATE TABLE IF NOT EXISTS tesla_state (
   ts                       INTEGER PRIMARY KEY,  -- unix epoch seconds, UTC

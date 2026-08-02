@@ -41,11 +41,18 @@ for %%F in (growatt-poller.ps1 write-growatt-config.ps1 register-growatt-task.ps
 
 echo.
 echo === 2 of 4  Settings ===
-echo Paste the two values from .dev.vars on the Mac.
-echo GROWATT_API_TOKEN first, then INGEST_SECRET.
-echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%\write-growatt-config.ps1"
-if errorlevel 1 goto :fail
+rem Re-running the installer to pick up a fix shouldn't mean re-entering
+rem secrets, so an existing config that still parses is kept as-is.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Get-Content '%TARGET%\growatt-poller.config.json' -Raw | ConvertFrom-Json | Out-Null; exit 0 } catch { exit 1 }"
+if errorlevel 1 (
+  echo Paste the two values from .dev.vars on the Mac.
+  echo GROWATT_API_TOKEN first, then INGEST_SECRET.
+  echo.
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%\write-growatt-config.ps1"
+  if errorlevel 1 goto :fail
+) else (
+  echo Existing settings found and valid - keeping them.
+)
 
 echo.
 echo === 3 of 4  Test run ===

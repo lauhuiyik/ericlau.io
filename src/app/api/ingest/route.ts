@@ -85,12 +85,44 @@ export async function POST(request: Request) {
           solar_old_kwh_today?: number | null;
           fetched_ts?: number;
         };
+        // Tolerate a little negative skew: the snapshot's fetched_ts and this
+        // request's ts are stamped by different Worker invocations, whose
+        // Date.now() can disagree by a second or two.
         const ageSec = ts - (g.fetched_ts ?? 0);
-        if (g.fetched_ts && ageSec >= 0 && ageSec < 15 * 60) {
+        if (g.fetched_ts && ageSec > -120 && ageSec < 15 * 60) {
           solarOld = num(g.solar_old_kw);
           solarOldKwhToday = num(g.solar_old_kwh_today);
           growattMerged = solarOld != null;
         }
+      }
+    } catch {
+      // treat as simply unavailable
+    }
+  }
+
+  // Carry the last known value forward if that KV read came back empty.
+  //
+  // house_kw and house_kwh_today are DERIVED from solar + battery + grid, so a
+  // single missed merge doesn't just lose array #1 — it drops the whole-house
+  // figure by array #1's entire output. Observed live: consecutive readings
+  // alternating between 44.75 and 35.25 kWh, and the day view reads the last
+  // row, so which number you saw was luck. A one-off KV miss must not do that.
+  //
+  // Same 15-minute window as above, so a genuinely stalled poller still stops
+  // contributing rather than being propagated indefinitely.
+  if (solarOld == null) {
+    try {
+      const prev = await env.DB.prepare(
+        `SELECT solar_old_kw, solar_old_kwh_today, ts FROM readings
+          WHERE local_date = ? AND solar_old_kw IS NOT NULL
+          ORDER BY ts DESC LIMIT 1`,
+      )
+        .bind(local_date)
+        .first<{ solar_old_kw: number | null; solar_old_kwh_today: number | null; ts: number }>();
+      if (prev && ts - prev.ts < 15 * 60) {
+        solarOld = prev.solar_old_kw;
+        solarOldKwhToday = prev.solar_old_kwh_today;
+        growattMerged = solarOld != null;
       }
     } catch {
       // treat as simply unavailable

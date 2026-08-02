@@ -98,3 +98,7 @@ CREATE TABLE IF NOT EXISTS tesla_charges (
 );
 CREATE INDEX IF NOT EXISTS idx_tesla_charges_local_date ON tesla_charges (local_date);
 
+
+-- Daily totals look up the last non-null value per column per date, which is an
+-- ordered scan within one date. The local_date-only index leaves that as a sort.
+CREATE INDEX IF NOT EXISTS idx_readings_date_ts ON readings (local_date, ts DESC);

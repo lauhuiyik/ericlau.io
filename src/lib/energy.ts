@@ -216,14 +216,37 @@ export async function getDailyTotals(
 ): Promise<DailyTotal[]> {
   const rows = await db
     .prepare(
-      `SELECT local_date,
-              MAX(solar_new_kwh_today) sn, MAX(solar_old_kwh_today) so,
-              MAX(grid_import_kwh_today) gi, MAX(grid_export_kwh_today) ge,
-              MAX(house_kwh_today) house
-       FROM readings
-       WHERE local_date BETWEEN ? AND ?
-       GROUP BY local_date
-       ORDER BY local_date ASC`,
+      // Each of these is a counter that resets at local midnight, so a day's
+      // total is its LAST value, not its MAX.
+      //
+      // MAX is wrong for two independent reasons. Readings taken just after
+      // midnight still carry the previous day's totals — Anker resets its
+      // counters a little later — so MAX inflates every day to at least the day
+      // before it (2026-08-02 read 54.33 kWh against a true 16.82). And a plain
+      // last-row-of-the-day fetch fails too, because solar_old_kwh_today is only
+      // populated on rows where the Growatt snapshot was fresh enough to merge,
+      // so the final row is usually NULL for it.
+      //
+      // Hence: per column, the last NON-NULL value of that date.
+      `SELECT d.local_date,
+              (SELECT r.solar_new_kwh_today FROM readings r
+                WHERE r.local_date = d.local_date AND r.solar_new_kwh_today IS NOT NULL
+                ORDER BY r.ts DESC LIMIT 1) sn,
+              (SELECT r.solar_old_kwh_today FROM readings r
+                WHERE r.local_date = d.local_date AND r.solar_old_kwh_today IS NOT NULL
+                ORDER BY r.ts DESC LIMIT 1) so,
+              (SELECT r.grid_import_kwh_today FROM readings r
+                WHERE r.local_date = d.local_date AND r.grid_import_kwh_today IS NOT NULL
+                ORDER BY r.ts DESC LIMIT 1) gi,
+              (SELECT r.grid_export_kwh_today FROM readings r
+                WHERE r.local_date = d.local_date AND r.grid_export_kwh_today IS NOT NULL
+                ORDER BY r.ts DESC LIMIT 1) ge,
+              (SELECT r.house_kwh_today FROM readings r
+                WHERE r.local_date = d.local_date AND r.house_kwh_today IS NOT NULL
+                ORDER BY r.ts DESC LIMIT 1) house
+       FROM (SELECT DISTINCT local_date FROM readings
+              WHERE local_date BETWEEN ? AND ?) d
+       ORDER BY d.local_date ASC`,
     )
     .bind(start, end)
     .all<{

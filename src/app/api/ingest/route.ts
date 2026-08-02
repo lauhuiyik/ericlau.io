@@ -100,34 +100,18 @@ export async function POST(request: Request) {
     }
   }
 
-  // Carry the last known value forward if that KV read came back empty.
+  // NOTE: there is deliberately no D1 "carry the last value forward" fallback
+  // here. A previous version looked for the most recent row within 15 minutes
+  // that carried a Growatt value — but it also WROTE that value onto every new
+  // row, so each row became the source for the next and the value propagated
+  // indefinitely. When the home poller stalled at 11:43 the array kept
+  // reporting 4.50 kW into the night, inflating solar, house load and the day's
+  // totals for 8.5 hours.
   //
-  // house_kw and house_kwh_today are DERIVED from solar + battery + grid, so a
-  // single missed merge doesn't just lose array #1 — it drops the whole-house
-  // figure by array #1's entire output. Observed live: consecutive readings
-  // alternating between 44.75 and 35.25 kWh, and the day view reads the last
-  // row, so which number you saw was luck. A one-off KV miss must not do that.
-  //
-  // Same 15-minute window as above, so a genuinely stalled poller still stops
-  // contributing rather than being propagated indefinitely.
-  if (solarOld == null) {
-    try {
-      const prev = await env.DB.prepare(
-        `SELECT solar_old_kw, solar_old_kwh_today, ts FROM readings
-          WHERE local_date = ? AND solar_old_kw IS NOT NULL
-          ORDER BY ts DESC LIMIT 1`,
-      )
-        .bind(local_date)
-        .first<{ solar_old_kw: number | null; solar_old_kwh_today: number | null; ts: number }>();
-      if (prev && ts - prev.ts < 15 * 60) {
-        solarOld = prev.solar_old_kw;
-        solarOldKwhToday = prev.solar_old_kwh_today;
-        growattMerged = solarOld != null;
-      }
-    } catch {
-      // treat as simply unavailable
-    }
-  }
+  // The KV snapshot's own fetched_ts is the only honest record of when Growatt
+  // was actually read, and the window above already enforces it. If the poller
+  // stops, array #1 correctly goes quiet.
+
   const solarTotal = (solarNew ?? 0) + (solarOld ?? 0);
   const battChg = num(body.battery_charge_kw);
   const battDis = num(body.battery_discharge_kw);

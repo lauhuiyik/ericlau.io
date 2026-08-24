@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { DateRange } from "@/lib/energy";
 
 const RANGES: { key: DateRange; label: string; days: number }[] = [
@@ -25,8 +25,17 @@ export function RangePicker({
   today: string;
 }) {
   const router = useRouter();
+  const params = useSearchParams();
 
-  const go = (r: DateRange, d: string) => router.push(`?range=${r}&date=${d}`);
+  // Preserve any other params (e.g. the billing cycle) and don't reset scroll —
+  // the range picker sits mid-page and jumping to the top on every change is
+  // disorienting.
+  const go = (r: DateRange, d: string) => {
+    const q = new URLSearchParams(params.toString());
+    q.set("range", r);
+    q.set("date", d);
+    router.push(`?${q.toString()}`, { scroll: false });
+  };
   const step = RANGES.find((r) => r.key === range)?.days ?? 1;
   const canGoForward = date < today;
 

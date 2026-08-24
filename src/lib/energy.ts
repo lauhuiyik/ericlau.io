@@ -482,13 +482,150 @@ export async function reconcileMeterVsReadings(
   });
 }
 
+export type TeslaCycleCost = {
+  kwh: number; // total charged at home over the window
+  freeKwh: number; // covered by solar/battery (grid wasn't importing)
+  gridPeakKwh: number;
+  gridOffPeakKwh: number;
+  gridPeakCost: number;
+  gridOffPeakCost: number;
+  gridCost: number; // gridPeakCost + gridOffPeakCost — what the car added to the bill
+  fullGridCost: number; // what it would cost if every kWh were grid-charged
+  saved: number; // fullGridCost − gridCost, i.e. the value of the free solar charging
+  hadMeterGap: boolean; // some charging had no meter interval yet (e.g. today), counted as grid
+};
+
+const slotLabel = (time: string) =>
+  `${time.slice(0, 2)}:${Number(time.slice(3, 5)) >= 30 ? "30" : "00"}`;
+
+/**
+ * The car's home charging over [start,end], attributed to grid vs solar using
+ * the METER (billing-grade), so it's accurate for any historic cycle — not just
+ * the recent days the Anker clamps cover. For each 30-minute interval the car's
+ * grid draw is capped at the whole-home grid import then (min): if the house
+ * wasn't importing, the car ran on solar/battery and cost nothing; the rest is
+ * priced at that interval's tariff window. An upper bound (other loads compete
+ * for the same import), stated as such on the page.
+ *
+ * Charging comes from tesla_state deltas (live, from 2026-08) and the tesla_charges
+ * session history (to 2026-07-10); the two never overlap in time, so no double-count.
+ */
+export async function getTeslaCycleGridCost(
+  db: D1Database,
+  start: string,
+  end: string,
+  t: Tariff,
+): Promise<TeslaCycleCost> {
+  // meter grid import per 30-min interval, keyed "YYYY-MM-DD HH:MM"
+  const meter = await db
+    .prepare(
+      "SELECT local_date, interval_start, kwh FROM meter_intervals WHERE stream='import' AND local_date BETWEEN ? AND ?",
+    )
+    .bind(start, end)
+    .all<{ local_date: string; interval_start: string; kwh: number }>();
+  const imp = new Map<string, number>();
+  for (const r of meter.results ?? []) imp.set(`${r.local_date} ${r.interval_start}`, r.kwh);
+
+  // car kWh per interval
+  const car = new Map<string, number>();
+  const addCar = (date: string, slot: string, kwh: number) => {
+    if (date < start || date > end || !(kwh > 0)) return;
+    const k = `${date} ${slot}`;
+    car.set(k, (car.get(k) ?? 0) + kwh);
+  };
+
+  // (a) session history — distribute each session across the local half-hours it spans
+  const sess = await db
+    .prepare(
+      "SELECT started_ts, ended_ts, energy_added_kwh e FROM tesla_charges WHERE at_home=1 AND energy_added_kwh > 0 AND local_date BETWEEN ? AND ?",
+    )
+    .bind(shiftDate(start, -1), end)
+    .all<{ started_ts: number; ended_ts: number | null; e: number }>();
+  for (const s of sess.results ?? []) {
+    const startTs = s.started_ts;
+    const endTs = s.ended_ts && s.ended_ts > startTs ? s.ended_ts : startTs + 1800;
+    const dur = Math.max(1, endTs - startTs);
+    let ts = startTs;
+    for (let guard = 0; ts < endTs && guard < 500; guard++) {
+      const { date, time } = melbFromTs(ts);
+      const stepSec = (30 - (Number(time.slice(3, 5)) % 30)) * 60;
+      const stepEnd = Math.min(endTs, ts + stepSec);
+      addCar(date, slotLabel(time), (s.e * (stepEnd - ts)) / dur);
+      ts = stepEnd;
+    }
+  }
+
+  // (b) live state — sum positive deltas of the per-session cumulative counter
+  const st = await db
+    .prepare(
+      "SELECT local_date, local_time, charge_energy_added_kwh e, at_home h FROM tesla_state WHERE local_date BETWEEN ? AND ? ORDER BY ts",
+    )
+    .bind(start, end)
+    .all<{ local_date: string; local_time: string; e: number | null; h: number | null }>();
+  let last: number | null = null;
+  for (const r of st.results ?? []) {
+    if (r.e == null) {
+      last = null;
+      continue;
+    }
+    if (last != null && r.e >= last && r.h === 1) {
+      const d = r.e - last;
+      if (d > 0 && d < 50) addCar(r.local_date, slotLabel(r.local_time), d);
+    }
+    last = r.e;
+  }
+
+  // attribute each interval
+  let kwh = 0;
+  let freeKwh = 0;
+  let gridPeakKwh = 0;
+  let gridOffPeakKwh = 0;
+  let fullPeakKwh = 0;
+  let fullOffPeakKwh = 0;
+  let hadMeterGap = false;
+  for (const [key, ck] of car) {
+    kwh += ck;
+    const hour = Number(key.slice(11, 13));
+    const peak = hour >= t.peakStartHour && hour < t.peakEndHour;
+    const gi = imp.get(key);
+    if (gi == null) hadMeterGap = true;
+    const grid = gi == null ? ck : Math.min(ck, gi);
+    freeKwh += ck - grid;
+    if (peak) {
+      gridPeakKwh += grid;
+      fullPeakKwh += ck;
+    } else {
+      gridOffPeakKwh += grid;
+      fullOffPeakKwh += ck;
+    }
+  }
+  const gridPeakCost = gridPeakKwh * t.peakRate;
+  const gridOffPeakCost = gridOffPeakKwh * t.offPeakRate;
+  const gridCost = gridPeakCost + gridOffPeakCost;
+  const fullGridCost = fullPeakKwh * t.peakRate + fullOffPeakKwh * t.offPeakRate;
+  return {
+    kwh,
+    freeKwh,
+    gridPeakKwh,
+    gridOffPeakKwh,
+    gridPeakCost,
+    gridOffPeakCost,
+    gridCost,
+    fullGridCost,
+    saved: fullGridCost - gridCost,
+    hadMeterGap,
+  };
+}
+
 export type BillSplit = {
   cycle: { start: string; end: string; lengthDays: number };
   daysCovered: number; // days of the cycle the meter has data for
+  lengthDays: number;
   lastMeterDate: string | null;
+  complete: boolean; // meter covers the whole cycle (a past bill), so no projection
   soFar: CostBreakdown; // billing-grade cost for the covered days
   projectedNet: number; // linear projection to the full cycle
-  tesla: { kwh: number; freeKwh: number; gridCost: number; projectedGridCost: number; measured: boolean };
+  tesla: TeslaCycleCost & { projectedGridCost: number };
   houseSoFar: number; // net minus the car's grid cost
   houseProjected: number;
   housemates: number;
@@ -497,31 +634,26 @@ export type BillSplit = {
 };
 
 /**
- * The monthly bill, split for housemates. Everything is grounded in the meter
- * (billing-grade) for cost; the car's grid-supplied share is attributed with
- * computeTeslaCost and treated as the bill-payer's alone, so the rest divides
- * cleanly N ways. Projection is linear: the covered days' rate extended across
- * the whole cycle — rough early in a cycle, tightening as it fills in.
- *
- * `cycleReadings`/`cycleTeslaSamples` should span the same covered window as
- * `meterDaily` so the car cost lines up with the metered cost it's a share of.
+ * The bill for one cycle, split for housemates. Cost is billing-grade (meter);
+ * the car's grid-supplied share (from getTeslaCycleGridCost) is treated as the
+ * bill-payer's alone so the rest divides N ways. For a completed past cycle the
+ * meter covers every day, so projection = actual; for the current cycle it's a
+ * linear extension of the covered days.
  */
 export function computeBillSplit(
-  today: string,
+  cycle: { start: string; end: string; lengthDays: number },
   meterDaily: MeterDailyTotal[],
-  cycleReadings: Reading[],
-  cycleTeslaSamples: TeslaSample[],
+  tesla: TeslaCycleCost,
   t: Tariff,
   housemates = 4,
 ): BillSplit {
-  const cycle = currentBillingCycle(today);
   const soFar = meterCost(meterDaily, t);
   const daysCovered = meterDaily.length;
   const lastMeterDate = daysCovered > 0 ? meterDaily[daysCovered - 1].date : null;
+  const complete = daysCovered >= cycle.lengthDays;
   const factor = daysCovered > 0 ? cycle.lengthDays / daysCovered : 0;
 
-  const tc = computeTeslaCost(cycleReadings, cycleTeslaSamples, [], t);
-  const teslaGrid = tc.gridCost;
+  const teslaGrid = tesla.gridCost;
   const projectedNet = soFar.net * factor;
   const houseSoFar = Math.max(0, soFar.net - teslaGrid);
   const houseProjected = houseSoFar * factor;
@@ -530,16 +662,12 @@ export function computeBillSplit(
   return {
     cycle,
     daysCovered,
+    lengthDays: cycle.lengthDays,
     lastMeterDate,
+    complete,
     soFar,
     projectedNet,
-    tesla: {
-      kwh: tc.kwh,
-      freeKwh: tc.selfKwh,
-      gridCost: teslaGrid,
-      projectedGridCost: teslaGrid * factor,
-      measured: tc.measured,
-    },
+    tesla: { ...tesla, projectedGridCost: teslaGrid * factor },
     houseSoFar,
     houseProjected,
     housemates,

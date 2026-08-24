@@ -6,11 +6,11 @@ import {
   computeCost,
   computeBillSplit,
   currentBillingCycle,
+  getTeslaCycleGridCost,
   type BillSplit,
   chargedKwhFromSamples,
   getChargeSessionsForDate,
   getTeslaStateForDate,
-  getTeslaStateInRange,
   getLatestTeslaState,
   getDailyTotals,
   getMeterDailyTotals,
@@ -24,13 +24,15 @@ import {
   isFutureLocalDate,
   melbNow,
   rangeWindow,
+  shiftDate,
   type SourceFreshness,
 } from "@/lib/energy";
 import { AutoRefresh } from "./auto-refresh";
 import { FlowDiagram } from "./flow-diagram";
 import { getWeatherNow, checkSolarAgainstSky } from "@/lib/weather";
 import { RangePicker } from "./range-picker";
-import { GridRelianceChartRange, LiveChartDay, PowerChartRange } from "./charts";
+import { CycleNav, TodayCostToggle } from "./controls";
+import { LiveChartDay, RangeChart } from "./charts";
 import { C } from "@/lib/colors";
 
 export const dynamic = "force-dynamic";
@@ -221,34 +223,42 @@ function BillingCard({ bill, tariff }: { bill: BillSplit; tariff: Tariff }) {
       </p>
     );
   }
-  const pctThrough = Math.round((b.daysCovered / b.cycle.lengthDays) * 100);
+  const pctThrough = Math.round((b.daysCovered / b.lengthDays) * 100);
+  const car = b.tesla;
+  const carGridKwh = car.gridPeakKwh + car.gridOffPeakKwh;
+  const freePct = car.kwh > 0 ? Math.round((car.freeKwh / car.kwh) * 100) : 0;
+  // Projected fields equal the actuals once a cycle is complete (factor = 1).
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-col sm:flex-row sm:items-end gap-8 sm:gap-14">
         <div className="flex flex-col gap-1">
           <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-            Projected bill
+            {b.complete ? "Bill · final" : "Projected bill"}
           </div>
           <div className="text-5xl sm:text-6xl font-semibold tracking-[-0.02em]">
             {money(b.projectedNet)}
           </div>
-          <div className="text-sm text-muted">whole cycle · {b.cycle.start} → {b.cycle.end}</div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-            Cost so far
-          </div>
-          <div className="text-3xl font-semibold tracking-[-0.01em]">{money(b.soFar.net)}</div>
           <div className="text-sm text-muted">
-            {b.daysCovered} of {b.cycle.lengthDays} days metered · {pctThrough}%
+            {b.complete ? "metered in full" : `on track · ${pctThrough}% of the cycle so far`}
           </div>
         </div>
+        {!b.complete && (
+          <div className="flex flex-col gap-1">
+            <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+              Cost so far
+            </div>
+            <div className="text-3xl font-semibold tracking-[-0.01em]">{money(b.soFar.net)}</div>
+            <div className="text-sm text-muted">
+              {b.daysCovered} of {b.lengthDays} days metered
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="grid sm:grid-cols-2 gap-x-14 gap-y-8">
         <div className="flex flex-col gap-2 font-mono text-[11px] sm:text-xs">
           <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted">
-            Cost so far, itemised
+            {b.complete ? "Bill, itemised" : "Cost so far, itemised"}
           </div>
           <CostLine
             label={`Peak · ${kwh(b.soFar.peakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
@@ -267,17 +277,17 @@ function BillingCard({ bill, tariff }: { bill: BillSplit; tariff: Tariff }) {
             color={C.export}
           />
           <div className="mt-1 flex justify-between border-t border-rule pt-2">
-            <span className="uppercase tracking-[0.18em] text-muted">Net so far</span>
+            <span className="uppercase tracking-[0.18em] text-muted">{b.complete ? "Net" : "Net so far"}</span>
             <span className="text-foreground">{money(b.soFar.net)}</span>
           </div>
         </div>
 
         <div className="flex flex-col gap-2 font-mono text-[11px] sm:text-xs">
           <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted">
-            Your share · projected
+            Your share {b.complete ? "" : "· projected"}
           </div>
           <CostLine
-            label={`Tesla — yours · ${kwh(b.tesla.kwh)} kWh charged`}
+            label={`Tesla — yours · ${kwh(car.kwh)} kWh charged`}
             value={money(b.tesla.projectedGridCost)}
             color={C.charge}
           />
@@ -288,21 +298,66 @@ function BillingCard({ bill, tariff }: { bill: BillSplit; tariff: Tariff }) {
             <span className="text-base text-foreground">{money(b.yourShare)}</span>
           </div>
           <p className="mt-1 text-[10px] normal-case leading-relaxed tracking-normal text-muted/80">
-            Your car&apos;s grid charging is yours alone; the rest splits {b.housemates} ways.{" "}
-            {kwh(b.tesla.freeKwh)} kWh of charging came free from solar / battery.
+            Your car&apos;s grid charging is yours alone; the rest splits {b.housemates} ways.
           </p>
         </div>
       </div>
 
+      {/* Tesla cost detail — how much the car actually added, and what solar saved */}
+      <div className="border border-rule rounded-none p-5 flex flex-col gap-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: C.charge }}>
+            Tesla charging · this cycle{b.complete ? "" : " · so far"}
+          </div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
+            {kwh(car.kwh)} kWh charged at home
+          </div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-4">
+          <Stat label="Cost to you" value={money(car.gridCost)} sub={`grid-charged only`} />
+          <Stat
+            label="Free from solar"
+            value={`${kwh(car.freeKwh)} kWh`}
+            sub={`${freePct}% of charging`}
+          />
+          <Stat
+            label="Grid-charged"
+            value={`${kwh(carGridKwh)} kWh`}
+            sub={`peak ${kwh(car.gridPeakKwh)} · off-pk ${kwh(car.gridOffPeakKwh)}`}
+          />
+          <Stat
+            label="Saved by solar"
+            value={money(car.saved)}
+            sub={`vs ${money(car.fullGridCost)} all-grid`}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5 font-mono text-[11px] text-muted">
+          <CostLine
+            label={`Peak · ${kwh(car.gridPeakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
+            value={money(car.gridPeakCost)}
+            color={C.charge}
+          />
+          <CostLine
+            label={`Off-peak · ${kwh(car.gridOffPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
+            value={money(car.gridOffPeakCost)}
+            color={C.charge}
+          />
+        </div>
+      </div>
+
       <p className="max-w-3xl text-xs text-muted">
-        Projected linearly from {b.daysCovered} day{b.daysCovered === 1 ? "" : "s"} of billing-grade
-        meter data (to {b.lastMeterDate}) across the {b.cycle.lengthDays}-day cycle — it tightens as
-        the month fills in. The car&apos;s grid share is attributed from the house meter over each
-        charging window
-        {b.tesla.measured
-          ? ""
-          : " (no overlapping readings, so counted as grid — the cautious assumption)"}
-        .
+        {b.complete ? (
+          <>Final figures from billing-grade meter data for the whole cycle.</>
+        ) : (
+          <>
+            Projected linearly from {b.daysCovered} day{b.daysCovered === 1 ? "" : "s"} of
+            billing-grade meter data (to {b.lastMeterDate}) across the {b.lengthDays}-day cycle — it
+            tightens as the month fills in.
+          </>
+        )}{" "}
+        The car&apos;s grid share is attributed from the house meter over each 30-minute charging
+        window (capped at the grid import then, so it&apos;s an upper bound)
+        {car.hadMeterGap ? "; today's charging has no meter read yet and is counted as grid" : ""}.
       </p>
     </div>
   );
@@ -351,7 +406,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export default async function Page({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string; date?: string }>;
+  searchParams: Promise<{ range?: string; date?: string; cycle?: string }>;
 }) {
   const { env } = await getCloudflareContext({ async: true });
   const { date: today, time: nowTime } = melbNow();
@@ -477,24 +532,37 @@ export default async function Page({
       }
     : null;
 
-  // "This billing period" — always the current Lumo cycle (18th→17th), grounded
-  // in the meter, with the car's grid cost split out as the bill-payer's own.
+  // "This billing period" — a Lumo cycle (18th→17th). Defaults to the current
+  // cycle; ?cycle=YYYY-MM-DD picks a historic one. Grounded in the meter, with
+  // the car's grid cost split out as the bill-payer's own.
   const HOUSEMATES = 4;
-  const cycle = currentBillingCycle(today);
-  const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, today, tariff);
-  const billLastDate = meterDaily.length ? meterDaily[meterDaily.length - 1].date : today;
-  const cycleReadings = await getReadingsInRange(env.DB, cycle.start, billLastDate);
-  const cycleTeslaSamples = await getTeslaStateInRange(env.DB, cycle.start, billLastDate);
-  const bill = computeBillSplit(today, meterDaily, cycleReadings, cycleTeslaSamples, tariff, HOUSEMATES);
+  const currentCycle = currentBillingCycle(today);
+  const firstMeterDate =
+    (await env.DB.prepare("SELECT MIN(local_date) d FROM meter_intervals").first<{
+      d: string | null;
+    }>())?.d ?? currentCycle.start;
+  const earliestStart = currentBillingCycle(firstMeterDate).start;
+  const wantStart = sp.cycle && DATE_RE.test(sp.cycle) ? sp.cycle : currentCycle.start;
+  const clampedStart =
+    wantStart < earliestStart ? earliestStart : wantStart > currentCycle.start ? currentCycle.start : wantStart;
+  const cycle = currentBillingCycle(clampedStart);
+  const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, cycle.end, tariff);
+  const teslaCycle = await getTeslaCycleGridCost(env.DB, cycle.start, cycle.end, tariff);
+  const bill = computeBillSplit(cycle, meterDaily, teslaCycle, tariff, HOUSEMATES);
+
+  const mkCycleHref = (c: string) => `?range=${range}&date=${date}&cycle=${c}`;
+  const prevHref = cycle.start > earliestStart ? mkCycleHref(currentBillingCycle(shiftDate(cycle.start, -1)).start) : null;
+  const nextHref = cycle.start < currentCycle.start ? mkCycleHref(currentBillingCycle(shiftDate(cycle.end, 1)).start) : null;
+  const MON3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const fmtCycleDay = (iso: string) => {
+    const dt = new Date(`${iso}T00:00:00Z`);
+    return `${dt.getUTCDate()} ${MON3[dt.getUTCMonth()]}`;
+  };
+  const cycleLabel = `${fmtCycleDay(cycle.start)} – ${fmtCycleDay(cycle.end)}${
+    cycle.start === currentCycle.start ? " · now" : ""
+  }`;
 
   const gridShare = consumed > 0 ? Math.min(100, (imported / consumed) * 100) : null;
-
-  let busiest: { kw: number; time: string; date?: string } | null = null;
-  for (const r of costSeries) {
-    if (r.house_kw != null && (busiest === null || r.house_kw > busiest.kw)) {
-      busiest = { kw: r.house_kw, time: r.local_time, date: r.local_date };
-    }
-  }
 
   const rangeLabel =
     range === "day" ? (date === today ? "Today" : date) : `${win.start} → ${win.end}`;
@@ -632,9 +700,7 @@ export default async function Page({
               <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
                 Where your power is going · now
               </div>
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
-                big number = right now · small = today so far
-              </div>
+              <TodayCostToggle costToday={todayCost.net} />
             </div>
 
             <div className="flex flex-wrap items-start gap-x-2 gap-y-8">
@@ -724,9 +790,7 @@ export default async function Page({
               <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
                 This billing period · Lumo cycle
               </div>
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
-                projected · actual so far · your share
-              </div>
+              <CycleNav label={cycleLabel} prevHref={prevHref} nextHref={nextHref} />
             </div>
             <BillingCard bill={bill} tariff={tariff} />
           </section>
@@ -747,9 +811,9 @@ export default async function Page({
           <>
           {/* One merged chart: Tesla, grid (signed), and home load excl. car */}
           <section className="px-6 sm:px-12 py-10">
-            <div className="flex items-center gap-x-6 gap-y-2 mb-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted flex-wrap">
-              {range === "day" ? (
-                <>
+            {range === "day" ? (
+              <>
+                <div className="flex items-center gap-x-6 gap-y-2 mb-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted flex-wrap">
                   <span className="flex items-center gap-2">
                     <span className="inline-block w-3 h-0.5" style={{ background: C.charge }} /> Tesla charging
                   </span>
@@ -769,52 +833,21 @@ export default async function Page({
                   <span className="flex items-center gap-2 opacity-70">
                     <span className="inline-block w-3 h-2" style={{ background: C.solar, opacity: 0.4 }} /> Solar
                   </span>
-                </>
-              ) : (
-                <>
-                  <span className="flex items-center gap-2">
-                    <span className="inline-block w-3 h-2" style={{ background: C.self }} /> Self · solar+battery
-                  </span>
-                  <span className="flex items-center gap-2">
-                    <span className="inline-block w-3 h-2" style={{ background: C.grid }} /> Grid
-                  </span>
-                  <span className="flex items-center gap-2">
-                    <span className="inline-block w-3 h-0.5" style={{ background: C.charge }} /> Tesla charging
-                  </span>
-                </>
-              )}
-              <span className="ml-auto normal-case tracking-normal text-muted">
-                {range === "day" ? `${rangeLabel} · kW` : `${rangeLabel} · kWh/day`}
-              </span>
-            </div>
-            {range === "day" ? (
-              <LiveChartDay
-                series={daySeries}
-                tariff={tariff}
-                sessions={sessions}
-                teslaSamples={teslaSamples}
-              />
+                  <span className="ml-auto normal-case tracking-normal text-muted">{rangeLabel} · kW</span>
+                </div>
+                <LiveChartDay series={daySeries} tariff={tariff} sessions={sessions} teslaSamples={teslaSamples} />
+                {sessions.length === 0 && teslaSamples.length === 0 && (
+                  <p className="mt-4 text-xs text-muted max-w-2xl">
+                    No Tesla charging recorded for this day, so the red line sits at zero.
+                  </p>
+                )}
+              </>
             ) : (
-              <GridRelianceChartRange daily={daily} />
+              <RangeChart daily={daily} />
             )}
-            {range === "day" && sessions.length === 0 && teslaSamples.length === 0 && (
-              <p className="mt-4 text-xs text-muted max-w-2xl">
-                No Tesla charging recorded for this day, so the red line sits at zero.
-              </p>
-            )}
-            {range !== "day" && (
-              <div className="mt-6">
-                <PowerChartRange daily={daily} />
-              </div>
-            )}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-8 mt-8">
+            <div className="grid grid-cols-3 gap-x-8 mt-8">
               <Stat label="Grid-powered" value={pct(gridShare)} sub="of consumption" />
               <Stat label="Peak-window grid" value={kwh(cost.peakKwh)} sub={`kWh @ $${tariff.peakRate.toFixed(3)}`} />
-              <Stat
-                label="Busiest moment"
-                value={busiest ? `${kw(busiest.kw)} kW` : "—"}
-                sub={busiest ? (range === "day" ? `at ${busiest.time}` : `${busiest.date} ${busiest.time}`) : undefined}
-              />
               <Stat label="Tesla charged" value={`${kwh(homeChargeKwh)} kWh`} sub="at home, this period" />
             </div>
           </section>

@@ -684,6 +684,126 @@ export function GridRelianceChartRange({ daily }: { daily: DailyTotal[] }) {
   );
 }
 
+/** Range view as lines (default): one line per series across the days. */
+export function RangeLineChart({ daily }: { daily: DailyTotal[] }) {
+  const W = 920;
+  const H = 240;
+  const padL = 10;
+  const padR = 10;
+  const padT = 18;
+  const padB = 28;
+  const n = daily.length;
+  const { svgRef, hoverX, bind } = useChartHover(W);
+  if (n === 0) return <p className="text-muted text-sm">No data in this range.</p>;
+
+  const series = [
+    { key: "consumedKwh" as const, label: "Consumed", color: C.house },
+    { key: "generatedKwh" as const, label: "Generated", color: C.solar },
+    { key: "gridImportKwh" as const, label: "Grid import", color: C.grid },
+    { key: "homeChargeKwh" as const, label: "Tesla", color: C.charge },
+  ];
+  const ymax = Math.max(1, ...daily.flatMap((d) => series.map((s) => d[s.key]))) * 1.15;
+  const bw = (W - padL - padR) / n;
+  const xCenter = (i: number) => (n === 1 ? W / 2 : padL + i * bw + bw / 2);
+  const y = (v: number) => H - padB - (v / ymax) * (H - padT - padB);
+
+  const path = (key: (typeof series)[number]["key"]) =>
+    daily.map((d, i) => `${i === 0 ? "M" : "L"} ${xCenter(i)} ${y(d[key])}`).join(" ");
+
+  const nearestIdx =
+    hoverX == null ? null : Math.min(n - 1, Math.max(0, Math.round((hoverX - padL) / bw - 0.5)));
+  const nearest = nearestIdx == null ? null : daily[nearestIdx];
+
+  return (
+    <div className="relative">
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Energy by day" {...bind}>
+        {[0, 0.5, 1].map((f) => (
+          <line key={f} x1={padL} x2={W - padR} y1={y(ymax * f)} y2={y(ymax * f)} stroke="#1f1f1f" strokeWidth={1} />
+        ))}
+        {[0, 0.5, 1].map((f) => (
+          <text key={`l${f}`} x={padL} y={y(ymax * f) - 4} fill="#737373" fontSize={10} fontFamily="var(--font-geist-mono)">
+            {Math.round(ymax * f)} kWh
+          </text>
+        ))}
+        {series.map((s) => (
+          <path key={s.key} d={path(s.key)} fill="none" stroke={s.color} strokeWidth={1.75} strokeLinejoin="round" />
+        ))}
+        {nearest && nearestIdx != null && (
+          <>
+            <line x1={xCenter(nearestIdx)} x2={xCenter(nearestIdx)} y1={padT} y2={y(0)} stroke="#737373" strokeWidth={1} strokeDasharray="2 3" />
+            {series.map((s) => (
+              <circle key={s.key} cx={xCenter(nearestIdx)} cy={y(nearest[s.key])} r={3} fill={s.color} />
+            ))}
+          </>
+        )}
+        <DayLabels dates={daily.map((d) => d.date)} x={xCenter} H={H} padB={padB} />
+      </svg>
+      {nearest && nearestIdx != null && (
+        <Tooltip leftPct={(xCenter(nearestIdx) / W) * 100}>
+          <div className="text-foreground mb-1">{nearest.date}</div>
+          {series.map((s) => (
+            <TipRow key={s.key} color={s.color} label={s.label} value={`${fmt2(nearest[s.key])} kWh`} />
+          ))}
+        </Tooltip>
+      )}
+    </div>
+  );
+}
+
+/** Range chart with a Line (default) / Bar view toggle. Pure client state, so
+ * switching is instant and never navigates or scrolls the page. */
+export function RangeChart({ daily }: { daily: DailyTotal[] }) {
+  const [mode, setMode] = useState<"line" | "bar">("line");
+  const legend =
+    mode === "line"
+      ? [
+          { c: C.house, t: "Consumed" },
+          { c: C.solar, t: "Generated" },
+          { c: C.grid, t: "Grid import" },
+          { c: C.charge, t: "Tesla" },
+        ]
+      : [
+          { c: C.self, t: "Self · solar+battery" },
+          { c: C.grid, t: "Grid" },
+          { c: C.charge, t: "Tesla charging" },
+        ];
+  const tab = (m: "line" | "bar", label: string) => (
+    <button
+      type="button"
+      onClick={() => setMode(m)}
+      className={`px-2.5 py-1 border transition-colors ${
+        mode === m ? "border-foreground text-foreground" : "border-rule text-muted hover:text-foreground"
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center gap-x-5 gap-y-2 font-mono text-[10px] uppercase tracking-[0.22em] text-muted flex-wrap">
+        <div className="flex items-center gap-1">
+          {tab("line", "Line")}
+          {tab("bar", "Bar")}
+        </div>
+        {legend.map((l) => (
+          <span key={l.t} className="flex items-center gap-2">
+            <span className="inline-block w-3 h-0.5" style={{ background: l.c }} /> {l.t}
+          </span>
+        ))}
+        <span className="ml-auto normal-case tracking-normal text-muted">kWh/day</span>
+      </div>
+      {mode === "line" ? (
+        <RangeLineChart daily={daily} />
+      ) : (
+        <div className="flex flex-col gap-6">
+          <GridRelianceChartRange daily={daily} />
+          <PowerChartRange daily={daily} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function minutesOfDayLocal(localTime: string): number {
   const [hh, mm] = localTime.split(":").map(Number);
   return hh * 60 + mm;

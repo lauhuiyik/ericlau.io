@@ -4,20 +4,23 @@ import {
   type DailyTotal,
   type DateRange,
   computeCost,
-  computeTeslaCost,
+  computeBillSplit,
+  currentBillingCycle,
+  type BillSplit,
   chargedKwhFromSamples,
-  teslaCoverageGapMin,
   getChargeSessionsForDate,
   getTeslaStateForDate,
   getTeslaStateInRange,
   getLatestTeslaState,
   getDailyTotals,
+  getMeterDailyTotals,
   getHomeChargeKwhByDate,
   getLatest,
   getReadingsForDate,
   getReadingsInRange,
   getSourceFreshness,
   getTariff,
+  type Tariff,
   isFutureLocalDate,
   melbNow,
   rangeWindow,
@@ -27,7 +30,7 @@ import { AutoRefresh } from "./auto-refresh";
 import { FlowDiagram } from "./flow-diagram";
 import { getWeatherNow, checkSolarAgainstSky } from "@/lib/weather";
 import { RangePicker } from "./range-picker";
-import { GridRelianceChartRange, LiveChartDay, PowerChartRange, ShareBar, type ShareSlice } from "./charts";
+import { GridRelianceChartRange, LiveChartDay, PowerChartRange } from "./charts";
 import { C } from "@/lib/colors";
 
 export const dynamic = "force-dynamic";
@@ -158,54 +161,6 @@ function ArrayBox({
   );
 }
 
-/** Horizontal stacked bar showing how a total splits, with a labelled legend. */
-function FlowBar({
-  title,
-  total,
-  parts,
-  note,
-}: {
-  title: string;
-  total: number;
-  parts: { label: string; value: number; color: string }[];
-  note?: string;
-}) {
-  const shown = parts.filter((p) => p.value > 0);
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-baseline justify-between gap-4">
-        <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">{title}</div>
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
-          {total.toFixed(1)} kWh
-        </div>
-      </div>
-      <div className="flex h-2.5 w-full overflow-hidden bg-rule">
-        {shown.map((p) => (
-          <div
-            key={p.label}
-            style={{ width: `${total > 0 ? (p.value / total) * 100 : 0}%`, background: p.color }}
-            title={`${p.label}: ${p.value.toFixed(1)} kWh`}
-          />
-        ))}
-      </div>
-      <div className="flex flex-col gap-1.5">
-        {shown.map((p) => (
-          <div key={p.label} className="flex items-baseline justify-between gap-3 text-sm">
-            <span className="flex items-center gap-2 text-muted">
-              <span className="inline-block w-2 h-2 shrink-0" style={{ background: p.color }} />
-              {p.label}
-            </span>
-            <span className="text-foreground/90 shrink-0 font-mono text-xs">
-              {p.value.toFixed(1)} kWh · {total > 0 ? Math.round((p.value / total) * 100) : 0}%
-            </span>
-          </div>
-        ))}
-      </div>
-      {note && <p className="text-xs text-muted">{note}</p>}
-    </div>
-  );
-}
-
 /** One term in the energy-balance strip: a live kW figure, the running total
  * for the period beneath it, and an optional breakdown line. */
 function BalanceTerm({
@@ -249,6 +204,106 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
       <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">{label}</div>
       <div className="text-2xl font-medium tracking-[-0.01em]">{value}</div>
       {sub && <div className="text-xs text-muted">{sub}</div>}
+    </div>
+  );
+}
+
+/** "This billing period" — the rehauled billing view. Cycle-based (18th→17th),
+ * grounded in the meter, with the car split out as the bill-payer's own so the
+ * rest divides among housemates. */
+function BillingCard({ bill, tariff }: { bill: BillSplit; tariff: Tariff }) {
+  const b = bill;
+  if (b.daysCovered === 0) {
+    return (
+      <p className="text-sm text-muted max-w-2xl">
+        No meter reads for this cycle yet ({b.cycle.start} → {b.cycle.end}). Powercor lands about a
+        day behind, so the first figures appear tomorrow.
+      </p>
+    );
+  }
+  const pctThrough = Math.round((b.daysCovered / b.cycle.lengthDays) * 100);
+  return (
+    <div className="flex flex-col gap-8">
+      <div className="flex flex-col sm:flex-row sm:items-end gap-8 sm:gap-14">
+        <div className="flex flex-col gap-1">
+          <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+            Projected bill
+          </div>
+          <div className="text-5xl sm:text-6xl font-semibold tracking-[-0.02em]">
+            {money(b.projectedNet)}
+          </div>
+          <div className="text-sm text-muted">whole cycle · {b.cycle.start} → {b.cycle.end}</div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+            Cost so far
+          </div>
+          <div className="text-3xl font-semibold tracking-[-0.01em]">{money(b.soFar.net)}</div>
+          <div className="text-sm text-muted">
+            {b.daysCovered} of {b.cycle.lengthDays} days metered · {pctThrough}%
+          </div>
+        </div>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-x-14 gap-y-8">
+        <div className="flex flex-col gap-2 font-mono text-[11px] sm:text-xs">
+          <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted">
+            Cost so far, itemised
+          </div>
+          <CostLine
+            label={`Peak · ${kwh(b.soFar.peakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
+            value={money(b.soFar.peakKwh * tariff.peakRate)}
+            color={C.grid}
+          />
+          <CostLine
+            label={`Off-peak · ${kwh(b.soFar.offPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
+            value={money(b.soFar.offPeakKwh * tariff.offPeakRate)}
+            color={C.grid}
+          />
+          <CostLine label={`Supply · ${b.soFar.days} days`} value={money(b.soFar.supply)} />
+          <CostLine
+            label={`Export credit · ${kwh(b.soFar.exportKwh)} kWh`}
+            value={`−${money(b.soFar.exportCredit)}`}
+            color={C.export}
+          />
+          <div className="mt-1 flex justify-between border-t border-rule pt-2">
+            <span className="uppercase tracking-[0.18em] text-muted">Net so far</span>
+            <span className="text-foreground">{money(b.soFar.net)}</span>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2 font-mono text-[11px] sm:text-xs">
+          <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted">
+            Your share · projected
+          </div>
+          <CostLine
+            label={`Tesla — yours · ${kwh(b.tesla.kwh)} kWh charged`}
+            value={money(b.tesla.projectedGridCost)}
+            color={C.charge}
+          />
+          <CostLine label="House — shared" value={money(b.houseProjected)} color={C.house} />
+          <CostLine label={`÷ ${b.housemates} housemates`} value={money(b.perHousemate)} />
+          <div className="mt-1 flex justify-between border-t border-rule pt-2">
+            <span className="uppercase tracking-[0.18em] text-muted">You pay</span>
+            <span className="text-base text-foreground">{money(b.yourShare)}</span>
+          </div>
+          <p className="mt-1 text-[10px] normal-case leading-relaxed tracking-normal text-muted/80">
+            Your car&apos;s grid charging is yours alone; the rest splits {b.housemates} ways.{" "}
+            {kwh(b.tesla.freeKwh)} kWh of charging came free from solar / battery.
+          </p>
+        </div>
+      </div>
+
+      <p className="max-w-3xl text-xs text-muted">
+        Projected linearly from {b.daysCovered} day{b.daysCovered === 1 ? "" : "s"} of billing-grade
+        meter data (to {b.lastMeterDate}) across the {b.cycle.lengthDays}-day cycle — it tightens as
+        the month fills in. The car&apos;s grid share is attributed from the house meter over each
+        charging window
+        {b.tesla.measured
+          ? ""
+          : " (no overlapping readings, so counted as grid — the cautious assumption)"}
+        .
+      </p>
     </div>
   );
 }
@@ -324,8 +379,11 @@ export default async function Page({
   // own derived numbers with each other, which is how a stuck 4.5 kW reading
   // survived a full arithmetic audit and was only caught by someone noticing
   // solar after dark. Sunlight is the one input our code can't fake.
-  const weather = isLiveToday ? await getWeatherNow() : null;
-  const freshness = isLiveToday ? await getSourceFreshness(env.DB) : null;
+  // The live flow, balance and array boxes always describe "right now" and no
+  // longer hide when the range picker (which only scopes the chart + stats
+  // below) is on week/month — so this "now" data is always fetched.
+  const weather = await getWeatherNow();
+  const freshness = await getSourceFreshness(env.DB);
   const tariff = await getTariff(env.ENERGY_KV);
 
   const daySeries = range === "day" ? await getReadingsForDate(env.DB, date) : [];
@@ -333,10 +391,6 @@ export default async function Page({
   // Live Fleet API samples are the real source for any day it was connected;
   // `sessions` (the Tessie CSV import) only covers history to 2026-07-10.
   const teslaSamples = range === "day" ? await getTeslaStateForDate(env.DB, date) : [];
-  // The week and month views need their own samples: without these the car's
-  // cost silently vanished from every range except a single day.
-  const teslaRangeSamples =
-    range === "day" ? teslaSamples : await getTeslaStateInRange(env.DB, win.start, win.end);
   // Fetched for every range, including a single day. The day view used to read
   // its totals off one row's stored counters, which breaks in two ways: that
   // row may have missed the Growatt merge (excluding array #1 from consumption
@@ -348,43 +402,25 @@ export default async function Page({
   const costSeries =
     range === "day" ? daySeries : await getReadingsInRange(env.DB, win.start, win.end);
 
-  const hasData = isLiveToday
-    ? latestGlobal != null
-    : range === "day"
-      ? daySeries.length > 0 || sessions.length > 0
-      : daily.length > 0;
+  // The page now always leads with the live "now" view, so having any latest
+  // reading is enough to render; the chart and stats below handle their own
+  // empty range inline.
+  const hasData = latestGlobal != null;
+  const hasRangeData =
+    range === "day" ? daySeries.length > 0 || sessions.length > 0 : daily.length > 0;
 
-  const generated = daily.reduce((s, d) => s + d.generatedKwh, 0);
   const consumed = daily.reduce((s, d) => s + d.consumedKwh, 0);
   const imported = daily.reduce((s, d) => s + d.gridImportKwh, 0);
   // Live Fleet API samples are authoritative. The Tessie CSV import is
   // reference-only history (to 2026-07-10) and is used solely for dates the
   // Fleet API never covered — never combined with live data.
   const liveChargedKwh = chargedKwhFromSamples(teslaSamples);
-  // Surfaced rather than silently reporting a low number as if it were complete.
-  const teslaGapMin = range === "day" ? teslaCoverageGapMin(teslaSamples) : 0;
   const homeChargeKwh =
     range === "day"
       ? teslaSamples.length > 0
         ? liveChargedKwh
         : sessions.reduce((s, c) => s + (c.energy_added_kwh ?? 0), 0)
       : daily.reduce((s, d) => s + d.homeChargeKwh, 0);
-
-  // Anker's own flow accounting for the selected day, taken from the last
-  // reading that carries it (these are cumulative-since-midnight totals).
-  const flowRow = [...costSeries].reverse().find((r) => r.home_usage_kwh_today != null) ?? null;
-  const flow = flowRow
-    ? {
-        solarToHome: flowRow.solar_to_home_kwh_today ?? 0,
-        solarToBattery: flowRow.solar_to_battery_kwh_today ?? 0,
-        solarToGrid: flowRow.grid_export_kwh_today ?? 0,
-        batteryToHome: flowRow.battery_to_home_kwh_today ?? 0,
-        gridToHome: flowRow.grid_to_home_kwh_today ?? 0,
-        ankerHome: flowRow.home_usage_kwh_today ?? 0,
-        solarTotal: flowRow.solar_new_kwh_today ?? 0,
-        growattToday: flowRow.solar_old_kwh_today,
-      }
-    : null;
 
   // ---- Energy balance ------------------------------------------------------
   // What the property USES has to equal what SUPPLIES it:
@@ -424,72 +460,32 @@ export default async function Page({
 
   const cost = computeCost(costSeries, tariff);
 
-  // What the car cost. NOT an addition to the bill: the car is part of the house
-  // load, so its energy is already inside the metered import that computeCost
-  // charges for. This attributes a share of that same cost to the car.
-  const teslaCost = computeTeslaCost(costSeries, teslaRangeSamples, sessions, tariff);
+  // The balance strip is always "right now + today", independent of the
+  // range picker below (which only scopes the chart and the stats under it).
+  const todayReadings = await getReadingsForDate(env.DB, today);
+  const todayTeslaSamples = await getTeslaStateForDate(env.DB, today);
+  const todayDaily = (await getDailyTotals(env.DB, today, today))[0] ?? null;
+  const todayCost = computeCost(todayReadings, tariff);
+  const todayGenerated = todayDaily?.generatedKwh ?? 0;
+  const todayConsumed = todayDaily?.consumedKwh ?? 0;
+  const todayCharge = chargedKwhFromSamples(todayTeslaSamples);
+  const todayFlowRow =
+    [...todayReadings].reverse().find((r) => r.home_usage_kwh_today != null) ?? null;
+  const todayFlow = todayFlowRow
+    ? {
+        solarToBattery: todayFlowRow.solar_to_battery_kwh_today ?? 0,
+      }
+    : null;
 
-  // Round once, then derive the totals from the rounded parts, so the car's
-  // peak + off-peak lines visibly add up to its total on screen. Deriving the
-  // total from full precision instead leaves a cent unaccounted for ($0.50 +
-  // $1.46 displayed against a $1.97 total), which reads like an error.
-  const r1 = (n: number) => Math.round(n * 10) / 10;
-  const r2 = (n: number) => Math.round(n * 100) / 100;
-  const carPeakKwh = r1(teslaCost.gridPeakKwh);
-  const carOffPeakKwh = r1(teslaCost.gridOffPeakKwh);
-  const carPeakCost = r2(teslaCost.gridPeakCost);
-  const carOffPeakCost = r2(teslaCost.gridOffPeakCost);
-  const carTotalCost = r2(carPeakCost + carOffPeakCost);
-  const carTotalKwh = r1(teslaCost.kwh);
-  const carSelfKwh = r1(carTotalKwh - carPeakKwh - carOffPeakKwh);
-  const carFullGridCost = r2(teslaCost.fullGridCost);
-  const carSaved = r2(carFullGridCost - carTotalCost);
-
-  // Share of what the home actually consumed, grid split by tariff. Anker
-  // meters grid_to_home as one figure, so the peak/off-peak split is applied
-  // in the same ratio as the day's metered import rather than separately
-  // measured — a small part of that import charged the battery, not the house.
-  const gridImportTotal = cost.peakKwh + cost.offPeakKwh;
-  const gridPeakShare = gridImportTotal > 0 ? cost.peakKwh / gridImportTotal : 0;
-  const gridToHome = flow?.gridToHome ?? 0;
-  const shareSlices: ShareSlice[] = [
-    { label: "Solar", kwh: flow?.solarToHome ?? 0, color: C.solar, note: "straight from the panels" },
-    { label: "Battery", kwh: flow?.batteryToHome ?? 0, color: C.battery, note: "stored earlier, mostly from solar" },
-    {
-      label: "Grid · peak",
-      kwh: gridToHome * gridPeakShare,
-      color: C.grid,
-      note: `${money(tariff.peakRate)}/kWh · ${tariff.peakStartHour}:00–${tariff.peakEndHour}:00`,
-    },
-    {
-      label: "Grid · off-peak",
-      kwh: gridToHome * (1 - gridPeakShare),
-      color: "#a16207",
-      note: `${money(tariff.offPeakRate)}/kWh · all other hours`,
-    },
-  ];
-
-  // Second bar: where the power WENT, rather than where it came from. Keeping
-  // the two dimensions in separate bars matters — putting the car alongside
-  // "Solar"/"Grid" would mix destination with source and the percentages would
-  // no longer mean anything.
-  const destSlices: ShareSlice[] = [
-    {
-      label: "Home",
-      kwh: Math.max(0, consumed - homeChargeKwh),
-      color: C.house,
-      note: "everything but the car",
-    },
-    {
-      label: "Tesla",
-      kwh: homeChargeKwh,
-      color: C.charge,
-      note:
-        teslaCost.kwh > 0
-          ? `${money(teslaCost.gridCost)} of grid energy · ${kwh(teslaCost.selfKwh)} kWh free from solar/battery`
-          : "no charging this period",
-    },
-  ];
+  // "This billing period" — always the current Lumo cycle (18th→17th), grounded
+  // in the meter, with the car's grid cost split out as the bill-payer's own.
+  const HOUSEMATES = 4;
+  const cycle = currentBillingCycle(today);
+  const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, today, tariff);
+  const billLastDate = meterDaily.length ? meterDaily[meterDaily.length - 1].date : today;
+  const cycleReadings = await getReadingsInRange(env.DB, cycle.start, billLastDate);
+  const cycleTeslaSamples = await getTeslaStateInRange(env.DB, cycle.start, billLastDate);
+  const bill = computeBillSplit(today, meterDaily, cycleReadings, cycleTeslaSamples, tariff, HOUSEMATES);
 
   const gridShare = consumed > 0 ? Math.min(100, (imported / consumed) * 100) : null;
 
@@ -564,20 +560,15 @@ export default async function Page({
             <SpecRow label="Grid" value={SYSTEM.grid} sub="Lumo · time-of-use" />
           </div>
         </details>
-        {isLiveToday && (
-          <p className="mt-3 font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
-            {hasData ? (
-              <>
-                Updated {latestGlobal!.local_time} · sources {latestGlobal!.sources || "—"} · now {nowTime}
-              </>
-            ) : (
-              <>Waiting for the first reading… · now {nowTime}</>
-            )}
-          </p>
-        )}
-        <div className="mt-8">
-          <RangePicker range={range} date={date} today={today} />
-        </div>
+        <p className="mt-3 font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
+          {hasData ? (
+            <>
+              Updated {latestGlobal!.local_time} · sources {latestGlobal!.sources || "—"} · now {nowTime}
+            </>
+          ) : (
+            <>Waiting for the first reading… · now {nowTime}</>
+          )}
+        </p>
       </section>
 
       {!hasData ? (
@@ -611,12 +602,12 @@ export default async function Page({
           )}
 
           {/* Live flow first: the at-a-glance "where is power moving" view.
-              Only meaningful for right now, so it's hidden on past dates. */}
-          {isLiveToday && latestGlobal && (
+              Always "right now", never scoped by the range picker below. */}
+          {latestGlobal && (
             <section className="px-6 sm:px-12 pb-4">
               <div className="flex items-baseline justify-between gap-4 mb-2 flex-wrap">
                 <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                  Live flow · pulses show direction, speed shows power
+                  Live flow · now · pulses show direction, speed shows power
                 </div>
               </div>
               <div className="max-w-5xl">
@@ -634,22 +625,23 @@ export default async function Page({
             </section>
           )}
 
-          {/* The balance: what's being used, and what's supplying it */}
+          {/* The balance: what's being used, and what's supplying it. Always the
+              live "now + today" view — the range picker below does not touch it. */}
           <section className="px-6 sm:px-12 pb-10">
             <div className="flex items-baseline justify-between gap-4 mb-8 flex-wrap">
               <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                Where your power is going · {isLiveToday ? "now" : rangeLabel}
+                Where your power is going · now
               </div>
               <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
-                big number = right now · small = {rangeLabel.toLowerCase()}
+                big number = right now · small = today so far
               </div>
             </div>
 
             <div className="flex flex-wrap items-start gap-x-2 gap-y-8">
               <BalanceTerm
                 label="Home"
-                nowKw={isLiveToday ? balNow.homeExclTesla : null}
-                todayKwh={Math.max(0, consumed - homeChargeKwh)}
+                nowKw={balNow.homeExclTesla}
+                todayKwh={Math.max(0, todayConsumed - todayCharge)}
                 detail="excludes the car"
                 color={C.house}
               />
@@ -657,8 +649,8 @@ export default async function Page({
                 <Op>+</Op>
                 <BalanceTerm
                   label="Tesla"
-                  nowKw={isLiveToday ? balNow.tesla : null}
-                  todayKwh={homeChargeKwh}
+                  nowKw={balNow.tesla}
+                  todayKwh={todayCharge}
                   detail="charged at home"
                   color={C.charge}
                 />
@@ -667,10 +659,10 @@ export default async function Page({
                 <Op>=</Op>
                 <BalanceTerm
                   label="Solar"
-                  nowKw={isLiveToday ? balNow.solar : null}
-                  todayKwh={generated}
+                  nowKw={balNow.solar}
+                  todayKwh={todayGenerated}
                   detail={
-                    isLiveToday && latestGlobal
+                    latestGlobal
                       ? `new ${kw(latestGlobal.solar_new_kw)} + old ${kw(latestGlobal.solar_old_kw)}`
                       : undefined
                   }
@@ -681,17 +673,17 @@ export default async function Page({
                 <Op>+</Op>
                 <BalanceTerm
                   label="Battery"
-                  nowKw={isLiveToday ? balNow.battery : null}
+                  nowKw={balNow.battery}
                   todayKwh={
                     (latestGlobal?.battery_discharge_kwh_today ?? 0) -
                     (latestGlobal?.battery_charge_kwh_today ?? 0)
                   }
                   detail={[
                     latestGlobal?.battery_soc != null ? `${Math.round(latestGlobal.battery_soc)}% charged` : null,
-                    flow
-                      ? `${flow.solarToBattery.toFixed(1)} solar / ${Math.max(
+                    todayFlow
+                      ? `${todayFlow.solarToBattery.toFixed(1)} solar / ${Math.max(
                           0,
-                          (latestGlobal?.battery_charge_kwh_today ?? 0) - flow.solarToBattery,
+                          (latestGlobal?.battery_charge_kwh_today ?? 0) - todayFlow.solarToBattery,
                         ).toFixed(1)} grid in`
                       : null,
                   ]
@@ -704,11 +696,11 @@ export default async function Page({
                 <Op>+</Op>
                 <BalanceTerm
                   label="Grid"
-                  nowKw={isLiveToday ? balNow.grid : null}
-                  todayKwh={cost.importKwh - cost.exportKwh}
-                  detail={`peak ${kwh(cost.peakKwh)} ${money(
-                    cost.peakKwh * tariff.peakRate,
-                  )} · off-pk ${kwh(cost.offPeakKwh)} ${money(cost.offPeakKwh * tariff.offPeakRate)}`}
+                  nowKw={balNow.grid}
+                  todayKwh={todayCost.importKwh - todayCost.exportKwh}
+                  detail={`peak ${kwh(todayCost.peakKwh)} ${money(
+                    todayCost.peakKwh * tariff.peakRate,
+                  )} · off-pk ${kwh(todayCost.offPeakKwh)} ${money(todayCost.offPeakKwh * tariff.offPeakRate)}`}
                   color={balNow.grid < 0 ? C.export : C.grid}
                 />
               </div>
@@ -719,16 +711,42 @@ export default async function Page({
               solar first, then the battery, and the grid covers whatever is left. Battery and grid
               go <span className="text-foreground">negative</span>{" "}
               when they&apos;re absorbing rather than supplying (battery charging, solar
-              exporting), so both sides always balance.
-              {isLiveToday && (
-                <>{" "}Tesla figures are live from the Fleet API, sampled every 5 minutes; the car
-                stops reporting while asleep, so its power reads zero rather than stale.</>
-              )}
+              exporting), so both sides always balance. Tesla figures are live from the Fleet API,
+              sampled every 5 minutes; the car stops reporting while asleep, so its power reads zero
+              rather than stale.
             </p>
           </section>
 
-          {/* One merged chart: Tesla, grid (signed), and home load excl. car */}
+          {/* Billing: the current Lumo cycle (18th→17th), split for housemates.
+              Cycle-based, so it ignores the range picker too. */}
           <section className="border-t border-rule px-6 sm:px-12 py-10">
+            <div className="flex items-baseline justify-between gap-4 mb-8 flex-wrap">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+                This billing period · Lumo cycle
+              </div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
+                projected · actual so far · your share
+              </div>
+            </div>
+            <BillingCard bill={bill} tariff={tariff} />
+          </section>
+
+          {/* Range picker scopes everything BELOW it — the chart and stats. */}
+          <section className="border-t border-rule px-6 sm:px-12 pt-8 pb-2">
+            <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted mb-4">
+              History · pick a timescale for the chart and stats below
+            </div>
+            <RangePicker range={range} date={date} today={today} />
+          </section>
+
+          {!hasRangeData ? (
+            <section className="px-6 sm:px-12 py-16">
+              <p className="text-muted">No readings for this {range === "day" ? "day" : range} yet.</p>
+            </section>
+          ) : (
+          <>
+          {/* One merged chart: Tesla, grid (signed), and home load excl. car */}
+          <section className="px-6 sm:px-12 py-10">
             <div className="flex items-center gap-x-6 gap-y-2 mb-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted flex-wrap">
               {range === "day" ? (
                 <>
@@ -801,254 +819,11 @@ export default async function Page({
             </div>
           </section>
 
-          {/* Totals for the selected period, each with its own breakdown */}
-          <section className="border-t border-rule px-6 sm:px-12 py-2">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-8 divide-rule">
-              <Stat
-                label="Generated"
-                value={kwh(generated)}
-                sub={`kWh · new ${kwh(latestGlobal?.solar_new_kwh_today)} + old ${kwh(
-                  latestGlobal?.solar_old_kwh_today,
-                )}`}
-              />
-              <Stat
-                label="Consumed"
-                value={kwh(consumed)}
-                sub={
-                  flow
-                    ? // Anker's flow accounting covers only what Anker can see, so these
-                      // three summed to 35.9 against a 45.4 headline — array #1's 9.5 kWh
-                      // was simply missing and the figures looked wrong. It's listed
-                      // separately because Anker can't tell us how much of it went to the
-                      // house versus the grid.
-                      `kWh · solar ${flow.solarToHome.toFixed(1)} · battery ${flow.batteryToHome.toFixed(
-                        1,
-                      )} · grid ${flow.gridToHome.toFixed(1)}${
-                        flow.growattToday ? ` · array 1 ${flow.growattToday.toFixed(1)}` : ""
-                      }`
-                    : `kWh · ${rangeLabel}`
-                }
-              />
-              <Stat
-                label="Imported"
-                value={kwh(cost.importKwh)}
-                sub={`kWh · peak ${kwh(cost.peakKwh)} ${money(
-                  cost.peakKwh * tariff.peakRate,
-                )} · off-pk ${kwh(cost.offPeakKwh)} ${money(cost.offPeakKwh * tariff.offPeakRate)}`}
-              />
-              <Stat
-                label="Exported"
-                value={kwh(cost.exportKwh)}
-                sub={`kWh · earned ${money(cost.exportCredit)} @ ${money(tariff.feedIn)}/kWh`}
-              />
-              <Stat
-                label="Tesla charged"
-                value={kwh(homeChargeKwh)}
-                sub={
-                  homeChargeKwh > 0
-                    ? `kWh · cost ${money(carTotalCost)} (peak ${money(
-                        carPeakCost,
-                      )} · off-pk ${money(carOffPeakCost)})`
-                    : "kWh at home"
-                }
-              />
-            </div>
-            {homeChargeKwh > 0 && (
-              <p className="pb-5 text-xs text-muted max-w-3xl">
-                Car cost counts only the grid-supplied share, apportioned from the house meter
-                over each stretch of charging — see the cost breakdown below for the full working,
-                including what it would have cost drawn entirely from the grid.
-              </p>
-            )}
-          </section>
-
-          {/* Share of consumption, with the grid split by tariff */}
-          <section className="border-t border-rule px-6 sm:px-12 py-10">
-            <div className="flex items-baseline justify-between gap-4 mb-6 flex-wrap">
-              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                Power use · {rangeLabel}
-              </div>
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
-                hover a band for its exact share
-              </div>
-            </div>
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted mb-3">
-              Where it came from
-            </div>
-            <ShareBar slices={shareSlices} />
-            <p className="mt-6 text-xs text-muted max-w-3xl">
-              Where the power your home actually used came from. The grid portion is split by
-              tariff using the same peak/off-peak ratio as the day&apos;s metered import — a small
-              part of that import charged the battery rather than running the house, so the split is
-              proportional rather than separately metered.
-            </p>
-
-            {homeChargeKwh > 0 && (
-              <div className="mt-10">
-                <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted mb-3">
-                  Where it went
-                </div>
-                <ShareBar slices={destSlices} />
-                <p className="mt-6 text-xs text-muted max-w-3xl">
-                  The car&apos;s share of everything the property consumed. This is a different cut
-                  of the same energy as the bar above — that one splits it by source, this one by
-                  where it ended up.
-                </p>
-              </div>
-            )}
-          </section>
-
-          {/* What it costs, and how that number is built */}
-          <section className="border-t border-rule px-6 sm:px-12 py-10">
-            <div className="flex items-baseline justify-between gap-4 mb-6 flex-wrap">
-              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                Cost · {rangeLabel}
-              </div>
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
-                {cost.days} day{cost.days === 1 ? "" : "s"} · Lumo time-of-use
-              </div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row sm:items-end gap-8 sm:gap-12">
-              <div className="flex flex-col gap-1">
-                <div className="text-5xl sm:text-6xl font-semibold tracking-[-0.02em]">
-                  {money(cost.net)}
-                </div>
-                <div className="text-sm text-muted">net cost for this period</div>
-              </div>
-
-              <div className="flex-1 flex flex-col gap-2 font-mono text-[11px] sm:text-xs">
-                <CostLine
-                  label={`Peak · ${kwh(cost.peakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
-                  value={money(cost.peakKwh * tariff.peakRate)}
-                  color={C.grid}
-                />
-                <CostLine
-                  label={`Off-peak · ${kwh(cost.offPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
-                  value={money(cost.offPeakKwh * tariff.offPeakRate)}
-                  color={C.grid}
-                />
-                <CostLine
-                  label={`Supply · ${cost.days} × $${tariff.supplyPerDay.toFixed(5)}/day`}
-                  value={money(cost.supply)}
-                />
-                <CostLine
-                  label={`Export credit · ${kwh(cost.exportKwh)} kWh @ $${tariff.feedIn.toFixed(3)}`}
-                  value={`−${money(cost.exportCredit)}`}
-                  color={C.export}
-                />
-                <div className="border-t border-rule mt-1 pt-2 flex justify-between">
-                  <span className="text-muted uppercase tracking-[0.18em]">Net</span>
-                  <span className="text-foreground">{money(cost.net)}</span>
-                </div>
-
-                {teslaCost.kwh > 0 && (
-                  <div className="mt-5 pt-4 border-t border-rule flex flex-col gap-2">
-                    <div className="text-muted uppercase tracking-[0.18em] text-[10px]">
-                      Of which the car — already inside the peak / off-peak lines above
-                    </div>
-                    <CostLine
-                      label={`Car · peak · ${kwh(carPeakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
-                      value={money(carPeakCost)}
-                      color={C.charge}
-                    />
-                    <CostLine
-                      label={`Car · off-peak · ${kwh(carOffPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
-                      value={money(carOffPeakCost)}
-                      color={C.charge}
-                    />
-                    <div className="border-t border-rule mt-1 pt-2 flex justify-between">
-                      <span className="text-muted uppercase tracking-[0.18em]">Car total</span>
-                      <span className="text-foreground">{money(carTotalCost)}</span>
-                    </div>
-                    {carSelfKwh > 0.05 && (
-                      <CostLine
-                        label={`Free from solar / battery · ${kwh(carSelfKwh)} kWh`}
-                        value={`saved ${money(carSaved)}`}
-                        color={C.self}
-                      />
-                    )}
-                    <CostLine
-                      label={`If it had all come from the grid · ${kwh(carTotalKwh)} kWh`}
-                      value={money(carFullGridCost)}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {teslaGapMin >= 60 && (
-              <p className="mt-6 text-xs" style={{ color: C.warn }}>
-                The car went {Math.floor(teslaGapMin / 60)}h{teslaGapMin % 60 ? ` ${teslaGapMin % 60}m` : ""}{" "}
-                without reporting, so charging in that window isn&apos;t counted here — Tesla can run a
-                scheduled charge without coming online for polling. House consumption, grid import and
-                cost are unaffected: Anker meters the whole house including the charger.
-              </p>
-            )}
-            {teslaCost.kwh > 0 && (
-              <p className="mt-6 text-xs text-muted max-w-3xl">
-                The car&apos;s cost is a <span className="text-foreground">share of the net above,
-                not an addition to it</span> — the car is part of the house load, so its energy is
-                already in the metered import. Splitting solar-vs-grid is apportioned rather than
-                measured: Anker meters the whole house as one figure and can&apos;t see the car, so
-                for each stretch of charging the grid&apos;s share of total house draw over that same
-                window is applied to it.
-                {!teslaCost.measured &&
-                  " No meter readings overlapped this charging, so it's all counted as grid-supplied — the cautious assumption."}
-              </p>
-            )}
-
-            {cost.hasGaps && (
-              <p className="mt-6 text-xs text-muted max-w-2xl">
-                Some of this period had gaps between readings. Total kWh is still exact (it comes
-                from the meter’s own cumulative counter), but for those stretches the peak vs
-                off-peak split is apportioned by elapsed time rather than measured directly.
-              </p>
-            )}
-          </section>
-
-          {/* Where power actually came from / where solar actually went.
-              Straight from Anker's own flow accounting, not derived here. */}
-          {flow && flow.ankerHome > 0 && (
-            <section className="border-t border-rule px-6 sm:px-12 py-10">
-              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted mb-8">
-                Energy flow · {rangeLabel}
-              </div>
-              <div className="grid sm:grid-cols-2 gap-10 sm:gap-16 max-w-4xl">
-                <FlowBar
-                  title="Where home power came from"
-                  total={flow.ankerHome}
-                  parts={[
-                    { label: "Own solar", value: flow.solarToHome, color: C.solar },
-                    { label: "Battery", value: flow.batteryToHome, color: C.battery },
-                    { label: "Grid", value: flow.gridToHome, color: C.grid },
-                  ]}
-                  note={
-                    flow.growattToday == null
-                      ? "Anker's own whole-home figure. It can't see the Growatt array, so on days that array reports, actual consumption is higher than this."
-                      : undefined
-                  }
-                />
-                <FlowBar
-                  title="Where the solar went"
-                  total={flow.solarTotal}
-                  parts={[
-                    { label: "Straight to home", value: flow.solarToHome, color: C.solar },
-                    { label: "Into battery", value: flow.solarToBattery, color: C.battery },
-                    { label: "Exported", value: flow.solarToGrid, color: C.export },
-                  ]}
-                  note={`Self-consumed ${
-                    flow.solarTotal > 0
-                      ? Math.round(((flow.solarToHome + flow.solarToBattery) / flow.solarTotal) * 100)
-                      : 0
-                  }% (home + battery) rather than exported at the ${money(tariff.feedIn)}/kWh feed-in rate.`}
-                />
-              </div>
-            </section>
+          </>
           )}
 
           {/* Two solar arrays, side by side, each with its own live output */}
-          {isLiveToday && latestGlobal && (
+          {latestGlobal && (
             <section className="border-t border-rule px-6 sm:px-12 py-10">
               <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted mb-6">
                 Solar arrays · generating right now

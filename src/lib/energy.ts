@@ -178,6 +178,42 @@ export function isFutureLocalDate(date: string, today: string): boolean {
   return date > today;
 }
 
+/**
+ * The Lumo billing cycle that `today` falls in. Bills run from the 18th of one
+ * month to the 17th of the next (the "next read" date on the invoice), so the
+ * dashboard's "this billing period" always matches what the retailer will bill.
+ */
+export function currentBillingCycle(
+  today: string,
+  anchorDay = 18,
+): { start: string; end: string; lengthDays: number } {
+  const [y, m, d] = today.split("-").map(Number);
+  let sy = y;
+  let sm = m;
+  if (d < anchorDay) {
+    sm -= 1;
+    if (sm < 1) {
+      sm = 12;
+      sy -= 1;
+    }
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const start = `${sy}-${pad(sm)}-${pad(anchorDay)}`;
+  let ny = sy;
+  let nm = sm + 1;
+  if (nm > 12) {
+    nm = 1;
+    ny += 1;
+  }
+  const end = shiftDate(`${ny}-${pad(nm)}-${pad(anchorDay)}`, -1); // day before next anchor
+  const lengthDays =
+    Math.round(
+      (new Date(end + "T00:00:00Z").getTime() - new Date(start + "T00:00:00Z").getTime()) /
+        86_400_000,
+    ) + 1;
+  return { start, end, lengthDays };
+}
+
 export async function getReadingsForDate(db: D1Database, date: string): Promise<Reading[]> {
   return getReadingsInRange(db, date, date);
 }
@@ -444,6 +480,72 @@ export async function reconcileMeterVsReadings(
       exportDiffKwh: ce - m.exportKwh,
     };
   });
+}
+
+export type BillSplit = {
+  cycle: { start: string; end: string; lengthDays: number };
+  daysCovered: number; // days of the cycle the meter has data for
+  lastMeterDate: string | null;
+  soFar: CostBreakdown; // billing-grade cost for the covered days
+  projectedNet: number; // linear projection to the full cycle
+  tesla: { kwh: number; freeKwh: number; gridCost: number; projectedGridCost: number; measured: boolean };
+  houseSoFar: number; // net minus the car's grid cost
+  houseProjected: number;
+  housemates: number;
+  perHousemate: number; // projected house cost ÷ housemates
+  yourShare: number; // your housemate share + all of your car
+};
+
+/**
+ * The monthly bill, split for housemates. Everything is grounded in the meter
+ * (billing-grade) for cost; the car's grid-supplied share is attributed with
+ * computeTeslaCost and treated as the bill-payer's alone, so the rest divides
+ * cleanly N ways. Projection is linear: the covered days' rate extended across
+ * the whole cycle — rough early in a cycle, tightening as it fills in.
+ *
+ * `cycleReadings`/`cycleTeslaSamples` should span the same covered window as
+ * `meterDaily` so the car cost lines up with the metered cost it's a share of.
+ */
+export function computeBillSplit(
+  today: string,
+  meterDaily: MeterDailyTotal[],
+  cycleReadings: Reading[],
+  cycleTeslaSamples: TeslaSample[],
+  t: Tariff,
+  housemates = 4,
+): BillSplit {
+  const cycle = currentBillingCycle(today);
+  const soFar = meterCost(meterDaily, t);
+  const daysCovered = meterDaily.length;
+  const lastMeterDate = daysCovered > 0 ? meterDaily[daysCovered - 1].date : null;
+  const factor = daysCovered > 0 ? cycle.lengthDays / daysCovered : 0;
+
+  const tc = computeTeslaCost(cycleReadings, cycleTeslaSamples, [], t);
+  const teslaGrid = tc.gridCost;
+  const projectedNet = soFar.net * factor;
+  const houseSoFar = Math.max(0, soFar.net - teslaGrid);
+  const houseProjected = houseSoFar * factor;
+  const perHousemate = houseProjected / housemates;
+
+  return {
+    cycle,
+    daysCovered,
+    lastMeterDate,
+    soFar,
+    projectedNet,
+    tesla: {
+      kwh: tc.kwh,
+      freeKwh: tc.selfKwh,
+      gridCost: teslaGrid,
+      projectedGridCost: teslaGrid * factor,
+      measured: tc.measured,
+    },
+    houseSoFar,
+    houseProjected,
+    housemates,
+    perHousemate,
+    yourShare: perHousemate + teslaGrid * factor,
+  };
 }
 
 /**

@@ -84,3 +84,40 @@ CREATE INDEX IF NOT EXISTS idx_tesla_charges_local_date ON tesla_charges (local_
 -- Daily totals look up the last non-null value per column per date, which is an
 -- ordered scan within one date. The local_date-only index leaves that as a sort.
 CREATE INDEX IF NOT EXISTS idx_readings_date_ts ON readings (local_date, ts DESC);
+
+
+-- ---------------------------------------------------------------------------
+-- Powercor smart-meter data — the BILLING-GRADE source of truth.
+--
+-- `readings` above is derived in real time from the Anker/Growatt CT clamps;
+-- it's live but slightly under-reads grid import (~1% on clean days, more on
+-- days the collector missed part of). The tables below are the revenue meter
+-- the bill is actually calculated from, imported from the myEnergy portal CSV
+-- exports (NMI 62038089177, meter DZ114328). 30-minute resolution, ~1 day in
+-- arrears — so it can't drive the live view, but it's exact for reconciliation.
+--
+-- Streams map to the NEM12 registers / myEnergy tariff_description:
+--   import  = 'consumption' = register E1 (grid draw, what you're billed for)
+--   export  = 'generation'  = register B1 (solar feed-in / FIT credit)
+CREATE TABLE IF NOT EXISTS meter_intervals (
+  local_date     TEXT NOT NULL,   -- 'YYYY-MM-DD' (Australia/Melbourne)
+  interval_start TEXT NOT NULL,   -- 'HH:MM' local, start of the 30-min block
+  stream         TEXT NOT NULL,   -- 'import' | 'export'
+  kwh            REAL NOT NULL,
+  quality        TEXT,            -- 'Actual' | 'Estimated' | 'Substituted' ...
+  PRIMARY KEY (local_date, interval_start, stream)
+);
+CREATE INDEX IF NOT EXISTS idx_meter_intervals_date ON meter_intervals (local_date);
+
+-- Billed period totals straight from the myEnergy 'basic' export — the exact
+-- quantities that appear on the Lumo bill (Peak / Off Peak / Solar). Kept
+-- alongside the intervals so a bill can be reconciled against it directly
+-- without re-deriving the peak window. Cycle runs the 18th → 17th.
+CREATE TABLE IF NOT EXISTS meter_billing_periods (
+  from_date   TEXT NOT NULL,      -- 'YYYY-MM-DD' inclusive
+  to_date     TEXT NOT NULL,      -- 'YYYY-MM-DD' inclusive
+  peak_kwh    REAL,               -- billed Peak import
+  offpeak_kwh REAL,               -- billed Off Peak import
+  solar_kwh   REAL,               -- billed Solar export (feed-in)
+  PRIMARY KEY (from_date, to_date)
+);

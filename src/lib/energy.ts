@@ -290,6 +290,162 @@ export async function getDailyTotals(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Powercor smart meter — the BILLING-GRADE source of truth (see schema.sql).
+//
+// getDailyTotals above is the live estimate derived from the Anker/Growatt CT
+// clamps; these read the revenue meter the bill is actually calculated from,
+// imported from the myEnergy CSV exports (30-min, ~1 day in arrears). Validated
+// 2026-08 over 17 complete days: export matches the clamps to 0.4% and import to
+// ~1%; use these whenever a figure has to match the bill exactly.
+
+export type MeterDailyTotal = {
+  date: string;
+  importKwh: number;
+  importPeakKwh: number;
+  importOffPeakKwh: number;
+  exportKwh: number;
+  /** false if any interval that day was estimated/substituted rather than metered. */
+  actual: boolean;
+};
+
+/**
+ * Daily import/export totals from the meter, with import split by the tariff's
+ * peak window. Peak is matched on the interval's start hour, so this assumes a
+ * non-wrapping window (peakStartHour < peakEndHour), which the Lumo ToU plan is.
+ */
+export async function getMeterDailyTotals(
+  db: D1Database,
+  start: string,
+  end: string,
+  t: Tariff = DEFAULT_TARIFF,
+): Promise<MeterDailyTotal[]> {
+  const res = await db
+    .prepare(
+      `SELECT local_date,
+              SUM(CASE WHEN stream='import' THEN kwh ELSE 0 END) imp,
+              SUM(CASE WHEN stream='import'
+                        AND CAST(substr(interval_start,1,2) AS INTEGER) >= ?
+                        AND CAST(substr(interval_start,1,2) AS INTEGER) <  ?
+                       THEN kwh ELSE 0 END) peak,
+              SUM(CASE WHEN stream='export' THEN kwh ELSE 0 END) exp,
+              MIN(CASE WHEN quality='Actual' THEN 1 ELSE 0 END) all_actual
+       FROM meter_intervals
+       WHERE local_date BETWEEN ? AND ?
+       GROUP BY local_date
+       ORDER BY local_date ASC`,
+    )
+    .bind(t.peakStartHour, t.peakEndHour, start, end)
+    .all<{ local_date: string; imp: number; peak: number; exp: number; all_actual: number }>();
+  return (res.results ?? []).map((r) => ({
+    date: r.local_date,
+    importKwh: r.imp,
+    importPeakKwh: r.peak,
+    importOffPeakKwh: r.imp - r.peak,
+    exportKwh: r.exp,
+    actual: r.all_actual === 1,
+  }));
+}
+
+/** Price meter daily totals at the tariff. Mirrors computeCost's shape, but the
+ *  peak/off-peak split is exact (metered per interval), never apportioned. */
+export function meterCost(daily: MeterDailyTotal[], t: Tariff): CostBreakdown {
+  const peakKwh = daily.reduce((s, d) => s + d.importPeakKwh, 0);
+  const offPeakKwh = daily.reduce((s, d) => s + d.importOffPeakKwh, 0);
+  const importKwh = peakKwh + offPeakKwh;
+  const exportKwh = daily.reduce((s, d) => s + d.exportKwh, 0);
+  const importCost = peakKwh * t.peakRate + offPeakKwh * t.offPeakRate;
+  const exportCredit = exportKwh * t.feedIn;
+  const supply = t.supplyPerDay * daily.length;
+  return {
+    importCost,
+    exportCredit,
+    supply,
+    net: importCost + supply - exportCredit,
+    peakKwh,
+    offPeakKwh,
+    importKwh,
+    exportKwh,
+    days: daily.length,
+    hasGaps: false, // metered per interval — no apportioning
+  };
+}
+
+export type MeterBillingPeriod = {
+  fromDate: string;
+  toDate: string;
+  peakKwh: number;
+  offPeakKwh: number;
+  solarKwh: number;
+  importKwh: number;
+};
+
+/** Billed period totals exactly as they appear on the bill (18th → 17th cycle),
+ *  newest first. */
+export async function getMeterBillingPeriods(db: D1Database): Promise<MeterBillingPeriod[]> {
+  const res = await db
+    .prepare(
+      `SELECT from_date, to_date, peak_kwh, offpeak_kwh, solar_kwh
+       FROM meter_billing_periods ORDER BY from_date DESC`,
+    )
+    .all<{
+      from_date: string;
+      to_date: string;
+      peak_kwh: number | null;
+      offpeak_kwh: number | null;
+      solar_kwh: number | null;
+    }>();
+  return (res.results ?? []).map((r) => ({
+    fromDate: r.from_date,
+    toDate: r.to_date,
+    peakKwh: r.peak_kwh ?? 0,
+    offPeakKwh: r.offpeak_kwh ?? 0,
+    solarKwh: r.solar_kwh ?? 0,
+    importKwh: (r.peak_kwh ?? 0) + (r.offpeak_kwh ?? 0),
+  }));
+}
+
+export type MeterReconcileRow = {
+  date: string;
+  meterImportKwh: number;
+  clampImportKwh: number;
+  importDiffKwh: number;
+  meterExportKwh: number;
+  clampExportKwh: number;
+  exportDiffKwh: number;
+};
+
+/**
+ * Per-day meter-vs-clamp comparison over a range — the accuracy check for the CT
+ * clamps. Positive diff = the clamps read HIGHER than the meter. Only dates the
+ * meter covers are returned; a clamp value of 0 means no reading that day.
+ */
+export async function reconcileMeterVsReadings(
+  db: D1Database,
+  start: string,
+  end: string,
+): Promise<MeterReconcileRow[]> {
+  const [meter, clamp] = await Promise.all([
+    getMeterDailyTotals(db, start, end),
+    getDailyTotals(db, start, end),
+  ]);
+  const clampByDate = new Map(clamp.map((c) => [c.date, c]));
+  return meter.map((m) => {
+    const c = clampByDate.get(m.date);
+    const ci = c?.gridImportKwh ?? 0;
+    const ce = c?.gridExportKwh ?? 0;
+    return {
+      date: m.date,
+      meterImportKwh: m.importKwh,
+      clampImportKwh: ci,
+      importDiffKwh: ci - m.importKwh,
+      meterExportKwh: m.exportKwh,
+      clampExportKwh: ce,
+      exportDiffKwh: ce - m.exportKwh,
+    };
+  });
+}
+
 /**
  * Home-charging kWh per date, live Fleet API data taking precedence.
  *

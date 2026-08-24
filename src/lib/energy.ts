@@ -206,12 +206,61 @@ export function currentBillingCycle(
     ny += 1;
   }
   const end = shiftDate(`${ny}-${pad(nm)}-${pad(anchorDay)}`, -1); // day before next anchor
-  const lengthDays =
+  const lengthDays = daysInclusive(start, end);
+  return { start, end, lengthDays };
+}
+
+/** Inclusive day count between two 'YYYY-MM-DD' dates. */
+export function daysInclusive(start: string, end: string): number {
+  return (
     Math.round(
       (new Date(end + "T00:00:00Z").getTime() - new Date(start + "T00:00:00Z").getTime()) /
         86_400_000,
-    ) + 1;
-  return { start, end, lengthDays };
+    ) + 1
+  );
+}
+
+export type Cycle = { start: string; end: string; lengthDays: number; billed: boolean };
+
+/**
+ * The list of billing cycles, oldest→newest, for the cycle navigator.
+ *
+ * Lumo's read dates are NOT a rigid 18th→17th — they drift a day or two (a bill
+ * ran 32 days, the next 29), which put a day's usage in the wrong cycle when the
+ * dashboard assumed a fixed anchor. So past cycles use the ACTUAL invoice
+ * boundaries recorded in meter_billing_periods; cycles after the last invoice
+ * fall back to an estimated 18→17 rolling forward, until they cover `today`.
+ */
+export function buildCycleList(
+  billedPeriods: { fromDate: string; toDate: string }[],
+  today: string,
+): Cycle[] {
+  const sorted = [...billedPeriods].sort((a, b) => a.fromDate.localeCompare(b.fromDate));
+  const cycles: Cycle[] = sorted.map((p) => ({
+    start: p.fromDate,
+    end: p.toDate,
+    lengthDays: daysInclusive(p.fromDate, p.toDate),
+    billed: true,
+  }));
+
+  // Estimated tail: continue from the day after the last invoice, in ~monthly
+  // steps, until the current date is covered.
+  let start = cycles.length ? shiftDate(cycles[cycles.length - 1].end, 1) : currentBillingCycle(today).start;
+  for (let guard = 0; start <= today && guard < 24; guard++) {
+    const [y, m, d] = start.split("-").map(Number);
+    let ny = y;
+    let nm = m + 1;
+    if (nm > 12) {
+      nm = 1;
+      ny += 1;
+    }
+    const pad = (n: number) => String(n).padStart(2, "0");
+    // one calendar month on, minus a day — clamps naturally via shiftDate math
+    const end = shiftDate(`${ny}-${pad(nm)}-${pad(d)}`, -1);
+    cycles.push({ start, end, lengthDays: daysInclusive(start, end), billed: false });
+    start = shiftDate(end, 1);
+  }
+  return cycles;
 }
 
 export async function getReadingsForDate(db: D1Database, date: string): Promise<Reading[]> {

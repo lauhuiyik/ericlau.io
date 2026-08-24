@@ -5,7 +5,8 @@ import {
   type DateRange,
   computeCost,
   computeBillSplit,
-  currentBillingCycle,
+  buildCycleList,
+  getMeterBillingPeriods,
   getTeslaCycleGridCost,
   type BillSplit,
   chargedKwhFromSamples,
@@ -24,7 +25,6 @@ import {
   isFutureLocalDate,
   melbNow,
   rangeWindow,
-  shiftDate,
   type SourceFreshness,
 } from "@/lib/energy";
 import { AutoRefresh } from "./auto-refresh";
@@ -532,35 +532,31 @@ export default async function Page({
       }
     : null;
 
-  // "This billing period" — a Lumo cycle (18th→17th). Defaults to the current
-  // cycle; ?cycle=YYYY-MM-DD picks a historic one. Grounded in the meter, with
-  // the car's grid cost split out as the bill-payer's own.
+  // "This billing period" — snaps to the ACTUAL Lumo invoice boundaries (from
+  // meter_billing_periods), since the read dates drift off a rigid 18th→17th.
+  // Cycles after the last invoice are estimated. ?cycle=YYYY-MM-DD picks one.
   const HOUSEMATES = 4;
-  const currentCycle = currentBillingCycle(today);
-  const firstMeterDate =
-    (await env.DB.prepare("SELECT MIN(local_date) d FROM meter_intervals").first<{
-      d: string | null;
-    }>())?.d ?? currentCycle.start;
-  const earliestStart = currentBillingCycle(firstMeterDate).start;
-  const wantStart = sp.cycle && DATE_RE.test(sp.cycle) ? sp.cycle : currentCycle.start;
-  const clampedStart =
-    wantStart < earliestStart ? earliestStart : wantStart > currentCycle.start ? currentCycle.start : wantStart;
-  const cycle = currentBillingCycle(clampedStart);
+  const billedPeriods = await getMeterBillingPeriods(env.DB);
+  const cycleList = buildCycleList(billedPeriods, today);
+  const defaultIdx = cycleList.length - 1;
+  const foundIdx = sp.cycle ? cycleList.findIndex((c) => c.start === sp.cycle) : -1;
+  const selIdx = foundIdx >= 0 ? foundIdx : defaultIdx;
+  const sel = cycleList[selIdx];
+  const cycle = { start: sel.start, end: sel.end, lengthDays: sel.lengthDays };
   const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, cycle.end, tariff);
   const teslaCycle = await getTeslaCycleGridCost(env.DB, cycle.start, cycle.end, tariff);
   const bill = computeBillSplit(cycle, meterDaily, teslaCycle, tariff, HOUSEMATES);
 
   const mkCycleHref = (c: string) => `?range=${range}&date=${date}&cycle=${c}`;
-  const prevHref = cycle.start > earliestStart ? mkCycleHref(currentBillingCycle(shiftDate(cycle.start, -1)).start) : null;
-  const nextHref = cycle.start < currentCycle.start ? mkCycleHref(currentBillingCycle(shiftDate(cycle.end, 1)).start) : null;
+  const prevHref = selIdx > 0 ? mkCycleHref(cycleList[selIdx - 1].start) : null;
+  const nextHref = selIdx < cycleList.length - 1 ? mkCycleHref(cycleList[selIdx + 1].start) : null;
   const MON3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const fmtCycleDay = (iso: string) => {
     const dt = new Date(`${iso}T00:00:00Z`);
     return `${dt.getUTCDate()} ${MON3[dt.getUTCMonth()]}`;
   };
-  const cycleLabel = `${fmtCycleDay(cycle.start)} – ${fmtCycleDay(cycle.end)}${
-    cycle.start === currentCycle.start ? " · now" : ""
-  }`;
+  const cycleTag = sel.billed ? " · billed" : selIdx === defaultIdx ? " · now" : " · est";
+  const cycleLabel = `${fmtCycleDay(cycle.start)} – ${fmtCycleDay(cycle.end)}${cycleTag}`;
 
   const gridShare = consumed > 0 ? Math.min(100, (imported / consumed) * 100) : null;
 

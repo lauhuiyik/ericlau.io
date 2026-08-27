@@ -11,11 +11,14 @@ import { C } from "@/lib/colors";
  * array, the battery, the grid and the house, so it can't show the original
  * Growatt array or the car.
  *
+ * Two layouts share one renderer: a wide left→right strip on desktop, and a
+ * compact radial (sources across the top, loads across the bottom) on mobile,
+ * so a 375px screen doesn't shrink the wide frame down to unreadable text. CSS
+ * picks one per breakpoint — both are in the DOM, no JS needed.
+ *
  * Deliberately only draws what is actually measured. Per-sample the APIs report
- * an aggregate kW per source, NOT how it was routed (Anker splits
- * solar-to-home / solar-to-battery only in daily totals). So each spoke carries
- * one signed magnitude and its direction comes from that sign — no invented
- * "solar is charging the battery" line, which would be a guess.
+ * an aggregate kW per source, NOT how it was routed, so each spoke carries one
+ * signed magnitude and its direction comes from that sign.
  */
 
 export type FlowInputs = {
@@ -36,27 +39,47 @@ export type FlowInputs = {
   teslaState: string | null;
 };
 
-const VB_W = 1000;
-const VB_H = 320;
+type Pt = { x: number; y: number };
+type Box = { w: number; h: number };
+type Hub = Pt & Box;
+type Layout = {
+  vb: Box;
+  box: Box;
+  hub: Hub;
+  solar: Pt;
+  grid: Pt;
+  battery: Pt;
+  home: Pt;
+  tesla: Pt;
+  compact: boolean;
+};
 
-/**
- * Left-to-right layout: the three things that can SUPPLY power on the left, the
- * combined total in the middle, and the two things that CONSUME it on the right.
- * Reading order matches the physics, and a wide-and-short frame keeps this a
- * glanceable strip rather than a full screen of diagram.
- *
- * Splitting the load side matters because Anker meters the house as one figure
- * with the car buried inside it — home consumption on its own is only visible by
- * subtracting the car.
- */
-const HUB = { x: 500, y: 158, w: 160, h: 78 };
-const BOX = { w: 168, h: 72 };
-const NODES = {
+// Wide strip for desktop: supply on the left, total in the middle, loads right.
+const WIDE: Layout = {
+  vb: { w: 1000, h: 320 },
+  box: { w: 168, h: 72 },
+  hub: { x: 500, y: 158, w: 160, h: 78 },
   solar: { x: 90, y: 52 },
   grid: { x: 90, y: 158 },
   battery: { x: 90, y: 264 },
   home: { x: 910, y: 104 },
   tesla: { x: 910, y: 216 },
+  compact: false,
+};
+
+// Radial for mobile: three sources across the top, total in the centre, two
+// loads across the bottom — a near-square frame that fills a phone width at
+// roughly 1:1, so the text stays legible.
+const RADIAL: Layout = {
+  vb: { w: 384, h: 470 },
+  box: { w: 118, h: 66 },
+  hub: { x: 192, y: 235, w: 150, h: 72 },
+  solar: { x: 66, y: 55 },
+  grid: { x: 192, y: 55 },
+  battery: { x: 318, y: 55 },
+  home: { x: 112, y: 415 },
+  tesla: { x: 272, y: 415 },
+  compact: true,
 };
 
 /** A spoke is "live" below this, in kW — under ~50 W is noise, not flow. */
@@ -64,11 +87,7 @@ const IDLE_KW = 0.05;
 
 const fmtKw = (n: number) => (Math.abs(n) < IDLE_KW ? "0.0" : Math.abs(n).toFixed(1));
 
-/**
- * Pulse period for a given magnitude. Faster = more power, which is the whole
- * point of the animation, but clamped at both ends: a trickle still has to
- * visibly move, and 15 kW mustn't strobe.
- */
+/** Pulse period for a given magnitude. Faster = more power. */
 function pulseSeconds(kw: number): number {
   const frac = Math.min(1, Math.abs(kw) / 9);
   return 2.3 - 1.65 * frac; // 2.3s idle-ish -> 0.65s flat out
@@ -79,22 +98,24 @@ function pulseWidth(kw: number): number {
   return 2 + Math.min(1, Math.abs(kw) / 9) * 3.5;
 }
 
-function Spoke({
-  d,
-  kw,
-  color,
-  /** True when the flow runs from the outer node toward the hub. */
-  toHub,
-}: {
-  d: string;
-  kw: number;
-  color: string;
-  toHub: boolean;
-}) {
+/** Path from a node's edge to the hub's edge, along the line between centres,
+ * trimmed by each box's half-extent (plus a gap) so a pulse never sits under
+ * text. Works for any layout and either flow direction. */
+function spokePath(n: Pt, box: Box, hub: Hub, gap = 6): string {
+  const dx = hub.x - n.x;
+  const dy = hub.y - n.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  const nHalf = Math.abs(ux) * (box.w / 2) + Math.abs(uy) * (box.h / 2) + gap;
+  const hHalf = Math.abs(ux) * (hub.w / 2) + Math.abs(uy) * (hub.h / 2) + gap;
+  return `M ${n.x + ux * nHalf} ${n.y + uy * nHalf} L ${hub.x - ux * hHalf} ${hub.y - uy * hHalf}`;
+}
+
+function Spoke({ d, kw, color, toHub }: { d: string; kw: number; color: string; toHub: boolean }) {
   const live = Math.abs(kw) >= IDLE_KW;
   return (
     <g>
-      {/* Static rail, always visible so the topology is readable when idle. */}
       <path d={d} fill="none" stroke="currentColor" strokeOpacity={0.14} strokeWidth={2} />
       {live && (
         <path
@@ -116,56 +137,40 @@ function Spoke({
 function Node({
   x,
   y,
-  w = BOX.w,
-  h = BOX.h,
+  w,
+  h,
   label,
   value,
   unit,
   sub,
   color,
   dim = false,
-}: {
-  x: number;
-  y: number;
-  w?: number;
-  h?: number;
-  label: string;
-  value: string;
-  unit: string;
-  sub?: string;
-  color?: string;
-  dim?: boolean;
-}) {
+}: Pt &
+  Box & {
+    label: string;
+    value: string;
+    unit: string;
+    sub?: string;
+    color?: string;
+    dim?: boolean;
+  }) {
   return (
     <g>
-      <rect
-        x={x - w / 2}
-        y={y - h / 2}
-        width={w}
-        height={h}
-        fill="none"
-        stroke="currentColor"
-        strokeOpacity={0.22}
-      />
+      <rect x={x - w / 2} y={y - h / 2} width={w} height={h} fill="none" stroke="currentColor" strokeOpacity={0.22} />
       <text
         x={x}
-        y={y - h / 2 + 19}
+        y={y - h / 2 + 18}
         textAnchor="middle"
         className="font-mono"
         fontSize={9.5}
-        letterSpacing="2.2"
+        letterSpacing="2"
         fill="currentColor"
         opacity={0.55}
       >
         {label.toUpperCase()}
       </text>
       <text x={x} y={y + 8} textAnchor="middle" fill="currentColor">
-        <tspan
-          fontSize={26}
-          fontWeight={550}
-          fill={dim ? "currentColor" : (color ?? "currentColor")}
-          opacity={dim ? 0.45 : 1}
-        >
+        <tspan fontSize={26} fontWeight={550} fill={dim ? "currentColor" : (color ?? "currentColor")} opacity={dim ? 0.45 : 1}>
           {value}
         </tspan>
         <tspan fontSize={12} opacity={0.5} dx={4}>
@@ -173,14 +178,7 @@ function Node({
         </tspan>
       </text>
       {sub && (
-        <text
-          x={x}
-          y={y + h / 2 - 11}
-          textAnchor="middle"
-          fontSize={10.5}
-          fill="currentColor"
-          opacity={0.5}
-        >
+        <text x={x} y={y + h / 2 - 10} textAnchor="middle" fontSize={10} fill="currentColor" opacity={0.5}>
           {sub}
         </text>
       )}
@@ -188,139 +186,111 @@ function Node({
   );
 }
 
-export function FlowDiagram({
-  solarNewKw,
-  solarOldKw,
-  batteryKw,
-  batterySoc,
-  gridKw,
-  houseKw,
-  teslaKw,
-  teslaState,
-}: FlowInputs) {
+function FlowSvg({ inputs, L }: { inputs: FlowInputs; L: Layout }) {
+  const { solarNewKw, solarOldKw, batteryKw, batterySoc, gridKw, houseKw, teslaKw, teslaState } = inputs;
   const solarKw = (solarNewKw ?? 0) + (solarOldKw ?? 0);
   const houseExclTesla = Math.max(0, houseKw - teslaKw);
-
-  // Spoke endpoints: from each node's inner edge to the hub, with a small gap so
-  // a pulse never sits under the text. Supply spokes run left -> hub, load
-  // spokes are defined node -> hub too (so `toHub: false` reverses them) which
-  // keeps every path's geometry consistent.
-  const gap = 6;
-  const srcX = NODES.solar.x + BOX.w / 2 + gap;
-  const hubL = HUB.x - HUB.w / 2 - gap;
-  const loadX = NODES.home.x - BOX.w / 2 - gap;
-  const hubR = HUB.x + HUB.w / 2 + gap;
-
-  const solarToHub = `M ${srcX} ${NODES.solar.y} L ${hubL} ${HUB.y}`;
-  const gridToHub = `M ${srcX} ${NODES.grid.y} L ${hubL} ${HUB.y}`;
-  const batteryToHub = `M ${srcX} ${NODES.battery.y} L ${hubL} ${HUB.y}`;
-  const homeToHub = `M ${loadX} ${NODES.home.y} L ${hubR} ${HUB.y}`;
-  const teslaToHub = `M ${loadX} ${NODES.tesla.y} L ${hubR} ${HUB.y}`;
-
   const exporting = gridKw < -IDLE_KW;
   const charging = batteryKw < -IDLE_KW;
 
-  const solarSub =
-    solarOldKw == null
+  const solarSub = L.compact
+    ? `${fmtKw(solarNewKw ?? 0)} · ${solarOldKw == null ? "off" : fmtKw(solarOldKw)}`
+    : solarOldKw == null
       ? `array 2 ${fmtKw(solarNewKw ?? 0)} · array 1 not reporting`
       : `array 2 ${fmtKw(solarNewKw ?? 0)} · array 1 ${fmtKw(solarOldKw)}`;
 
+  return (
+    <svg
+      viewBox={`0 0 ${L.vb.w} ${L.vb.h}`}
+      className="w-full h-auto text-foreground"
+      role="img"
+      aria-label={
+        `Live energy flow. Solar ${fmtKw(solarKw)} kW. ` +
+        `Grid ${exporting ? "exporting" : "importing"} ${fmtKw(gridKw)} kW. ` +
+        `Battery ${charging ? "charging" : "discharging"} ${fmtKw(batteryKw)} kW at ${batterySoc ?? "unknown"}%. ` +
+        `Total load ${fmtKw(houseKw)} kW, of which home ${fmtKw(houseExclTesla)} kW and car ${fmtKw(teslaKw)} kW.`
+      }
+    >
+      <g data-flow-pulse>
+        <Spoke d={spokePath(L.solar, L.box, L.hub)} kw={solarKw} color={C.solar} toHub />
+        <Spoke d={spokePath(L.grid, L.box, L.hub)} kw={gridKw} color={exporting ? C.export : C.grid} toHub={!exporting} />
+        <Spoke d={spokePath(L.battery, L.box, L.hub)} kw={batteryKw} color={C.battery} toHub={!charging} />
+        <Spoke d={spokePath(L.home, L.box, L.hub)} kw={houseExclTesla} color={C.house} toHub={false} />
+        <Spoke d={spokePath(L.tesla, L.box, L.hub)} kw={teslaKw} color={C.charge} toHub={false} />
+      </g>
+
+      <Node
+        {...L.solar}
+        {...L.box}
+        label="Solar"
+        value={solarKw < IDLE_KW ? "Standby" : fmtKw(solarKw)}
+        unit={solarKw < IDLE_KW ? "" : "kW"}
+        sub={solarSub}
+        color={C.solar}
+        dim={solarKw < IDLE_KW}
+      />
+      <Node
+        {...L.grid}
+        {...L.box}
+        label="Grid"
+        value={fmtKw(gridKw)}
+        unit="kW"
+        sub={exporting ? "exporting" : gridKw > IDLE_KW ? "importing" : "idle"}
+        color={exporting ? C.export : C.grid}
+        dim={Math.abs(gridKw) < IDLE_KW}
+      />
+      <Node
+        {...L.battery}
+        {...L.box}
+        label="Battery"
+        value={fmtKw(batteryKw)}
+        unit="kW"
+        sub={`${batterySoc == null ? "—" : Math.round(batterySoc)}% · ${charging ? "charging" : batteryKw > IDLE_KW ? "discharging" : "idle"}`}
+        color={C.battery}
+        dim={Math.abs(batteryKw) < IDLE_KW}
+      />
+      <Node
+        {...L.tesla}
+        {...L.box}
+        label="Tesla"
+        value={fmtKw(teslaKw)}
+        unit="kW"
+        sub={teslaKw >= IDLE_KW ? "charging" : (teslaState?.toLowerCase() ?? "not charging")}
+        color={C.charge}
+        dim={teslaKw < IDLE_KW}
+      />
+      <Node
+        {...L.home}
+        {...L.box}
+        label="Home use"
+        value={fmtKw(houseExclTesla)}
+        unit="kW"
+        sub={L.compact ? "excl. car" : "everything but the car"}
+        color={C.house}
+        dim={houseExclTesla < IDLE_KW}
+      />
+      <Node {...L.hub} label="Total load" value={fmtKw(houseKw)} unit="kW" sub="home + car" />
+    </svg>
+  );
+}
+
+export function FlowDiagram(inputs: FlowInputs) {
   return (
     <div className="w-full">
       <style>{`
         @keyframes flowToHub   { from { stroke-dashoffset: 44 } to { stroke-dashoffset: 0 } }
         @keyframes flowFromHub { from { stroke-dashoffset: 0 } to { stroke-dashoffset: 44 } }
-        /* Respect users who don't want motion: the rails and every number stay,
-           only the travelling pulse stops. */
         @media (prefers-reduced-motion: reduce) {
           [data-flow-pulse] path { animation: none !important }
         }
       `}</style>
-      <svg
-        viewBox={`0 0 ${VB_W} ${VB_H}`}
-        className="w-full h-auto text-foreground"
-        role="img"
-        aria-label={
-          `Live energy flow. Solar ${fmtKw(solarKw)} kW. ` +
-          `Grid ${exporting ? "exporting" : "importing"} ${fmtKw(gridKw)} kW. ` +
-          `Battery ${charging ? "charging" : "discharging"} ${fmtKw(batteryKw)} kW at ${batterySoc ?? "unknown"}%. ` +
-          `Total load ${fmtKw(houseKw)} kW, of which home ${fmtKw(houseExclTesla)} kW ` +
-          `and car ${fmtKw(teslaKw)} kW.`
-        }
-      >
-        <g data-flow-pulse>
-          {/* Solar can only ever supply, so this spoke is one-directional. */}
-          <Spoke d={solarToHub} kw={solarKw} color={C.solar} toHub />
-          <Spoke
-            d={gridToHub}
-            kw={gridKw}
-            color={exporting ? C.export : C.grid}
-            toHub={!exporting}
-          />
-          <Spoke d={batteryToHub} kw={batteryKw} color={C.battery} toHub={!charging} />
-          {/* Loads only ever draw, so flow runs away from the hub. */}
-          <Spoke d={homeToHub} kw={houseExclTesla} color={C.house} toHub={false} />
-          <Spoke d={teslaToHub} kw={teslaKw} color={C.charge} toHub={false} />
-        </g>
-
-        <Node
-          {...NODES.solar}
-          label="Solar"
-          value={solarKw < IDLE_KW ? "Standby" : fmtKw(solarKw)}
-          unit={solarKw < IDLE_KW ? "" : "kW"}
-          sub={solarSub}
-          color={C.solar}
-          dim={solarKw < IDLE_KW}
-        />
-        <Node
-          {...NODES.grid}
-          label="Grid"
-          value={fmtKw(gridKw)}
-          unit="kW"
-          sub={exporting ? "exporting" : gridKw > IDLE_KW ? "importing" : "idle"}
-          color={exporting ? C.export : C.grid}
-          dim={Math.abs(gridKw) < IDLE_KW}
-        />
-        <Node
-          {...NODES.battery}
-          label="Battery"
-          value={fmtKw(batteryKw)}
-          unit="kW"
-          sub={`${batterySoc == null ? "—" : Math.round(batterySoc)}% · ${
-            charging ? "charging" : batteryKw > IDLE_KW ? "discharging" : "idle"
-          }`}
-          color={C.battery}
-          dim={Math.abs(batteryKw) < IDLE_KW}
-        />
-        <Node
-          {...NODES.tesla}
-          label="Tesla"
-          value={fmtKw(teslaKw)}
-          unit="kW"
-          sub={teslaKw >= IDLE_KW ? "charging at home" : (teslaState?.toLowerCase() ?? "not charging")}
-          color={C.charge}
-          dim={teslaKw < IDLE_KW}
-        />
-        <Node
-          {...NODES.home}
-          label="Home use"
-          value={fmtKw(houseExclTesla)}
-          unit="kW"
-          sub="everything but the car"
-          color={C.house}
-          dim={houseExclTesla < IDLE_KW}
-        />
-        <Node
-          x={HUB.x}
-          y={HUB.y}
-          w={HUB.w}
-          h={HUB.h}
-          label="Total load"
-          value={fmtKw(houseKw)}
-          unit="kW"
-          sub="home + car"
-        />
-      </svg>
+      {/* Wide strip on desktop, compact radial on phones. */}
+      <div className="hidden sm:block">
+        <FlowSvg inputs={inputs} L={WIDE} />
+      </div>
+      <div className="sm:hidden mx-auto max-w-[22rem]">
+        <FlowSvg inputs={inputs} L={RADIAL} />
+      </div>
     </div>
   );
 }

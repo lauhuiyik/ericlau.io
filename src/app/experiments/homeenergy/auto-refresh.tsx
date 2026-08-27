@@ -67,7 +67,7 @@ export function AutoRefresh({
     ago == null ? "live" : ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ${ago % 60}s ago`;
 
   return (
-    <div className="flex items-center gap-3 font-mono text-[10px] uppercase tracking-[0.18em] text-muted">
+    <div className="flex items-center gap-2 sm:gap-3 whitespace-nowrap font-mono text-[10px] uppercase tracking-[0.1em] sm:tracking-[0.18em] text-muted">
       <span className="flex items-center gap-1.5">
         <span
           className="inline-block w-1.5 h-1.5 rounded-full"

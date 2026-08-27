@@ -193,18 +193,21 @@ function BalanceTerm({
   );
 }
 
-/** The +, −, = glyphs separating balance terms. */
+/** The +, −, = glyphs separating balance terms — desktop equation only; on
+ * mobile the terms sit in a plain grid, so the operators would just be noise. */
 function Op({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-2xl text-muted/50 font-light select-none pt-5 shrink-0">{children}</div>
+    <div className="hidden sm:block text-2xl text-muted/50 font-light select-none pt-5 shrink-0">
+      {children}
+    </div>
   );
 }
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="flex flex-col gap-1.5 py-5">
-      <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">{label}</div>
-      <div className="text-2xl font-medium tracking-[-0.01em]">{value}</div>
+      <div className="font-mono text-[10px] uppercase tracking-[0.18em] sm:tracking-[0.22em] text-muted">{label}</div>
+      <div className="text-xl sm:text-2xl font-medium tracking-[-0.01em]">{value}</div>
       {sub && <div className="text-xs text-muted">{sub}</div>}
     </div>
   );
@@ -573,14 +576,14 @@ export default async function Page({
 
   return (
     <div className="flex flex-1 flex-col">
-      <header className="flex items-center justify-between px-6 py-6 sm:px-12">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-6 py-5 sm:px-12 sm:py-6">
         <Link
           href="/"
-          className="font-mono text-xs uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors"
+          className="whitespace-nowrap font-mono text-[11px] sm:text-xs uppercase tracking-[0.12em] sm:tracking-[0.18em] text-muted hover:text-foreground transition-colors"
         >
           ← Eric Lau
         </Link>
-        <div className="flex items-center gap-6 font-mono text-xs uppercase tracking-[0.18em] text-muted">
+        <div className="flex items-center gap-3 sm:gap-6 whitespace-nowrap font-mono text-[11px] sm:text-xs uppercase tracking-[0.12em] sm:tracking-[0.18em] text-muted">
           {isLiveToday && <AutoRefresh seconds={10} currentTs={latestGlobal?.ts ?? null} />}
           <Link href="/experiments/homeenergy/settings" className="hover:text-foreground transition-colors">
             Settings
@@ -699,7 +702,7 @@ export default async function Page({
               <TodayCostToggle costToday={todayCost.net} />
             </div>
 
-            <div className="flex flex-wrap items-start gap-x-2 gap-y-8">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:flex sm:flex-wrap sm:items-start sm:gap-x-2 sm:gap-y-8">
               <BalanceTerm
                 label="Home"
                 nowKw={balNow.homeExclTesla}
@@ -779,18 +782,6 @@ export default async function Page({
             </p>
           </section>
 
-          {/* Billing: the current Lumo cycle (18th→17th), split for housemates.
-              Cycle-based, so it ignores the range picker too. */}
-          <section className="border-t border-rule px-6 sm:px-12 py-10">
-            <div className="flex items-baseline justify-between gap-4 mb-8 flex-wrap">
-              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                This billing period · Lumo cycle
-              </div>
-              <CycleNav label={cycleLabel} prevHref={prevHref} nextHref={nextHref} />
-            </div>
-            <BillingCard bill={bill} tariff={tariff} />
-          </section>
-
           {/* Range picker scopes everything BELOW it — the chart and stats. */}
           <section className="border-t border-rule px-6 sm:px-12 pt-8 pb-2">
             <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted mb-4">
@@ -841,7 +832,7 @@ export default async function Page({
             ) : (
               <RangeChart daily={daily} />
             )}
-            <div className="grid grid-cols-3 gap-x-8 mt-8">
+            <div className="grid grid-cols-3 gap-x-4 sm:gap-x-8 mt-8">
               <Stat label="Grid-powered" value={pct(gridShare)} sub="of consumption" />
               <Stat label="Peak-window grid" value={kwh(cost.peakKwh)} sub={`kWh @ $${tariff.peakRate.toFixed(3)}`} />
               <Stat label="Tesla charged" value={`${kwh(homeChargeKwh)} kWh`} sub="at home, this period" />
@@ -850,6 +841,18 @@ export default async function Page({
 
           </>
           )}
+
+          {/* Billing below the usage charts: the current Lumo cycle (18th→17th),
+              split for housemates. Cycle-based, so the range picker doesn't touch it. */}
+          <section className="border-t border-rule px-6 sm:px-12 py-10">
+            <div className="flex items-baseline justify-between gap-4 mb-8 flex-wrap">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+                This billing period · Lumo cycle
+              </div>
+              <CycleNav label={cycleLabel} prevHref={prevHref} nextHref={nextHref} />
+            </div>
+            <BillingCard bill={bill} tariff={tariff} />
+          </section>
 
           {/* Two solar arrays, side by side, each with its own live output */}
           {latestGlobal && (

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>Japan 2026 🐤</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐤</text></svg>">
+<meta name="theme-color" content="#f7f5f2">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="inner">
+    <h1>Japan 2026 🐤</h1>
+    <div class="sub">7–20 August · Tokyo &amp; Osaka</div>
+    <div class="flights">
+      <span><b>In:</b> Fri 7 Aug · QF79 · Narita 19:00</span>
+      <span><b>Out:</b> Thu 20 Aug · QF80 · Narita 20:25</span>
+    </div>
+    <div class="tabs">
+      <button data-view="hotel">By hotel</button>
+      <button data-view="day">By day</button>
+      <button data-view="near">Near me</button>
+    </div>
+  </div>
+</header>
+
+<div class="controls">
+  <input id="search" type="search" placeholder="Search spots…">
+  <div class="mealchips">
+    <span class="chip" data-meal="breakfast">Breakfast</span>
+    <span class="chip" data-meal="lunch">Lunch</span>
+    <span class="chip" data-meal="dinner">Dinner</span>
+    <span class="chip" data-meal="snack">Snack</span>
+  </div>
+  <label class="toggle"><input id="hidechecked" type="checkbox"> Hide ticked</label>
+  <button id="meganToggle" class="megan-toggle" type="button">🛍 Megan mode</button>
+  <span class="progress" id="progress"></span>
+</div>
+
+<div class="layout">
+  <section class="sheet" id="sheet">
+    <div class="sheet-handle" id="sheetHandle">
+      <span class="bar"></span>
+      <span class="lbl" id="sheetLbl">▴ Slide up for list</span>
+    </div>
+    <main id="main" class="listpane"></main>
+  </section>
+  <aside class="mappane" id="mappane">
+    <div class="mapbar">
+      <div class="mapfocus">
+        <button data-focus="all">All</button>
+        <button data-focus="tokyo">Tokyo</button>
+        <button data-focus="osaka">Osaka</button>
+        <button id="locateBtn" class="locate">📍 Me</button>
+        <button id="toiletBtn" class="locate toilet hidden">🚻 Toilet</button>
+      </div>
+      <div class="maplegend">
+        <span><i class="lg-hotel">🏨</i>Hotel</span>
+        <span><i style="background:#b26a00"></i>Breakfast</span>
+        <span><i style="background:#1666c4"></i>Lunch</span>
+        <span><i style="background:#7b3fb5"></i>Dinner</span>
+        <span><i style="background:#c2366b"></i>Snack</span>
+        <span><i style="background:#3a7a4f"></i>Anytime</span>
+      </div>
+    </div>
+    <div id="map"></div>
+  </aside>
+</div>
+
+<footer>
+  Private trip page · data is a guide — verify hours before you go.<br>
+  Tap “Navigate” to open Google Maps · tick boxes to mark places done (saved on this device).
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

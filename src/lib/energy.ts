@@ -40,15 +40,28 @@ export type Tariff = {
   peakEndHour: number; // 0–24, local
 };
 
-// Seeded from Eric's Lumo "Time of Use v2 FIT Solar" bill (fixed until 30 Sep 2026).
+// Seeded from Eric's Lumo bill (rates fixed until 30 Sep 2026). The plan moved
+// from "Time of Use v2" to "v3" on 2026-07-20: same rates, but the peak window
+// shifted from 3pm–9pm to 4pm–9pm, and v3 adds a "Smart Rate" band (11am–4pm)
+// priced identically to off-peak — so it needs no separate rate here, only the
+// peak-start shift, which is applied per-date via peakStartForDate().
 export const DEFAULT_TARIFF: Tariff = {
   peakRate: 0.308,
   offPeakRate: 0.18678,
   supplyPerDay: 1.00034,
   feedIn: 0.033,
-  peakStartHour: 15,
+  peakStartHour: 16, // v3 (4pm); v2 (3pm) applies before V3_PEAK_FROM
   peakEndHour: 21,
 };
+
+/** ToU v3 took effect on this date — peak window moved 3pm → 4pm. */
+export const V3_PEAK_FROM = "2026-07-20";
+
+/** Peak-window start hour in force on `date`: v2's 3pm before the v3 switch,
+ * otherwise the tariff's current value (v3's 4pm). */
+export function peakStartForDate(date: string, t: Tariff): number {
+  return date < V3_PEAK_FROM ? 15 : t.peakStartHour;
+}
 
 export const TARIFF_KV_KEY = "tariff";
 
@@ -398,6 +411,7 @@ export type MeterDailyTotal = {
  * Daily import/export totals from the meter, with import split by the tariff's
  * peak window. Peak is matched on the interval's start hour, so this assumes a
  * non-wrapping window (peakStartHour < peakEndHour), which the Lumo ToU plan is.
+ * The peak-start hour is date-aware (v2 3pm before the v3 switch, 4pm after).
  */
 export async function getMeterDailyTotals(
   db: D1Database,
@@ -410,7 +424,7 @@ export async function getMeterDailyTotals(
       `SELECT local_date,
               SUM(CASE WHEN stream='import' THEN kwh ELSE 0 END) imp,
               SUM(CASE WHEN stream='import'
-                        AND CAST(substr(interval_start,1,2) AS INTEGER) >= ?
+                        AND CAST(substr(interval_start,1,2) AS INTEGER) >= (CASE WHEN local_date < ? THEN 15 ELSE ? END)
                         AND CAST(substr(interval_start,1,2) AS INTEGER) <  ?
                        THEN kwh ELSE 0 END) peak,
               SUM(CASE WHEN stream='export' THEN kwh ELSE 0 END) exp,
@@ -420,7 +434,7 @@ export async function getMeterDailyTotals(
        GROUP BY local_date
        ORDER BY local_date ASC`,
     )
-    .bind(t.peakStartHour, t.peakEndHour, start, end)
+    .bind(V3_PEAK_FROM, t.peakStartHour, t.peakEndHour, start, end)
     .all<{ local_date: string; imp: number; peak: number; exp: number; all_actual: number }>();
   return (res.results ?? []).map((r) => ({
     date: r.local_date,
@@ -635,7 +649,8 @@ export async function getTeslaCycleGridCost(
   for (const [key, ck] of car) {
     kwh += ck;
     const hour = Number(key.slice(11, 13));
-    const peak = hour >= t.peakStartHour && hour < t.peakEndHour;
+    const peakStart = peakStartForDate(key.slice(0, 10), t); // date-aware (v2 3pm / v3 4pm)
+    const peak = hour >= peakStart && hour < t.peakEndHour;
     const gi = imp.get(key);
     if (gi == null) hadMeterGap = true;
     const grid = gi == null ? ck : Math.min(ck, gi);

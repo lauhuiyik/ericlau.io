@@ -121,3 +121,51 @@ CREATE TABLE IF NOT EXISTS meter_billing_periods (
   solar_kwh   REAL,               -- billed Solar export (feed-in)
   PRIMARY KEY (from_date, to_date)
 );
+
+
+-- ---------------------------------------------------------------------------
+-- GAS — Lumo "Lumo Value", tariff zone "AGL North". MIRN 5330779554,
+-- meter 9724XJ-000:1. Same retailer and account family as the electricity above.
+--
+-- IMPORTANT: unlike electricity there is NO interval data for gas. The meter is
+-- read roughly every two months and the invoice states consumption is
+-- "apportioned evenly over number of days", so any daily / seasonal figure is
+-- DERIVED from a bi-monthly read, never measured. Don't build time-of-day
+-- analysis on it.
+--
+-- Rates (incl GST, fixed until 30 Sep 2026):
+--   Summer $0.02838/MJ   applies 1 Oct - 31 May
+--   Winter $0.03542/MJ   applies 1 Jun - 30 Sep
+--   Supply $1.012/day    year-round, both seasons
+-- Only "Step1" ever appears on the invoices — the declining-block step 2 is
+-- never reached, even at 3,799 MJ in a 57-day winter period. Treat as flat.
+-- Billed MJ = base usage (m3) x heating value x pressure factor (1.0272);
+-- heating value drifts per period (37.74 - 38.66 observed).
+
+-- One row per meter read, straight from the myEnergy gas CSV export.
+CREATE TABLE IF NOT EXISTS gas_billing_periods (
+  from_date TEXT NOT NULL,
+  to_date   TEXT NOT NULL,
+  days      INTEGER,
+  mj        REAL,
+  season    TEXT,              -- label on the read; the invoice may still split
+                               -- a period across the 1 Jun / 1 Oct boundary
+  PRIMARY KEY (from_date, to_date)
+);
+
+-- One row per charged segment on an actual invoice. A single bill can carry two
+-- segments when the period straddles a season change, so this is finer-grained
+-- than gas_billing_periods and is the source of truth for rates actually paid.
+CREATE TABLE IF NOT EXISTS gas_bill_segments (
+  invoice        TEXT NOT NULL,
+  from_date      TEXT NOT NULL,
+  to_date        TEXT NOT NULL,
+  days           INTEGER,
+  season         TEXT,
+  mj             REAL,
+  rate_per_mj    REAL,
+  energy_cost    REAL,
+  supply_per_day REAL,
+  supply_cost    REAL,
+  PRIMARY KEY (invoice, from_date, to_date)
+);

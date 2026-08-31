@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { bandRanges } from "@/lib/energy";
 import type { ChargeSession, DailyTotal, Reading, Tariff, TeslaSample } from "@/lib/energy";
 import { C } from "@/lib/colors";
 
@@ -341,13 +342,9 @@ export function LiveChartDay({
     };
   });
 
-  const peakBands: [number, number][] =
-    tariff.peakStartHour <= tariff.peakEndHour
-      ? [[tariff.peakStartHour * 60, tariff.peakEndHour * 60]]
-      : [
-          [tariff.peakStartHour * 60, 1440],
-          [0, tariff.peakEndHour * 60],
-        ];
+  // Shaded price windows. Off-peak is the unshaded residual, so it needs no band.
+  const peakBands = bandRanges("peak", tariff);
+  const shoulderBands = bandRanges("shoulder", tariff);
 
   const nearest =
     hoverMin == null || pts.length === 0
@@ -368,9 +365,20 @@ export function LiveChartDay({
         aria-label="Live power: Tesla charging, grid, and home consumption"
         {...bind}
       >
+        {shoulderBands.map(([s, e], i) => (
+          <rect
+            key={`sh-${i}`}
+            x={x(s)}
+            y={padT}
+            width={Math.max(0, x(e) - x(s))}
+            height={H - padB - padT}
+            fill={C.export}
+            fillOpacity={0.05}
+          />
+        ))}
         {peakBands.map(([s, e], i) => (
           <rect
-            key={i}
+            key={`pk-${i}`}
             x={x(s)}
             y={padT}
             width={Math.max(0, x(e) - x(s))}
@@ -379,6 +387,19 @@ export function LiveChartDay({
             fillOpacity={0.06}
           />
         ))}
+        {shoulderBands.length > 0 && (
+          <text
+            x={x((shoulderBands[0][0] + shoulderBands[0][1]) / 2)}
+            y={padT + 11}
+            fill={C.export}
+            fillOpacity={0.55}
+            fontSize={9}
+            textAnchor="middle"
+            fontFamily="var(--font-geist-mono)"
+          >
+            SHOULDER
+          </text>
+        )}
         {peakBands.length > 0 && (
           <text
             x={x((peakBands[0][0] + peakBands[0][1]) / 2)}

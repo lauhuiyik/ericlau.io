@@ -4,8 +4,11 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { DEFAULT_TARIFF, type Tariff } from "@/lib/energy";
 
+/** Only the numeric rates are editable here. */
+type RateKey = "peakRate" | "shoulderRate" | "offPeakRate" | "supplyPerDay" | "feedIn";
+
 type Field = {
-  key: keyof Tariff;
+  key: RateKey;
   label: string;
   unit: string;
   step: number;
@@ -14,12 +17,13 @@ type Field = {
 
 const FIELDS: Field[] = [
   { key: "peakRate", label: "Peak rate", unit: "$/kWh", step: 0.0001 },
+  { key: "shoulderRate", label: "Shoulder rate", unit: "$/kWh", step: 0.0001 },
   { key: "offPeakRate", label: "Off-peak rate", unit: "$/kWh", step: 0.0001 },
-  { key: "peakStartHour", label: "Peak starts", unit: "h (0–24)", step: 1, hint: "24-hour clock" },
-  { key: "peakEndHour", label: "Peak ends", unit: "h (0–24)", step: 1 },
   { key: "supplyPerDay", label: "Daily supply charge", unit: "$/day", step: 0.0001 },
   { key: "feedIn", label: "Feed-in tariff", unit: "$/kWh", step: 0.001 },
 ];
+
+const hh = (h: number) => `${String(h % 24).padStart(2, "0")}:00`;
 
 export function SettingsForm() {
   const router = useRouter();
@@ -60,7 +64,7 @@ export function SettingsForm() {
     }
   }
 
-  const set = (k: keyof Tariff, v: string) =>
+  const set = (k: RateKey, v: string) =>
     setTariff((t) => ({ ...t, [k]: v === "" ? 0 : Number(v) }));
 
   return (
@@ -84,7 +88,30 @@ export function SettingsForm() {
         ))}
       </div>
 
-      <div className="mt-12 flex items-center gap-6">
+      <div className="mt-12 border-t border-rule pt-8">
+        <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
+          {tariff.label} · price windows
+        </div>
+        <div className="mt-3 flex flex-col gap-1 font-mono text-xs text-muted">
+          {tariff.windows.map((w, i) => (
+            <div key={i}>
+              <span className="text-foreground">{w.band === "peak" ? "Peak" : "Shoulder"}</span>{" "}
+              {hh(w.startHour)}–{hh(w.endHour)}, every day
+            </div>
+          ))}
+          <div>
+            <span className="text-foreground">Off-peak</span> all remaining hours
+          </div>
+        </div>
+        <p className="mt-4 max-w-xl text-xs text-muted">
+          Windows aren’t editable here. They belong to the plan, and plans are recorded as dated
+          eras in <span className="font-mono">lib/energy.ts</span> so that past bills keep the
+          rates they were actually charged at. Rates edited above apply to the CURRENT plan only —
+          history is never repriced.
+        </p>
+      </div>
+
+      <div className="mt-10 flex items-center gap-6">
         <button
           type="submit"
           disabled={status === "saving"}

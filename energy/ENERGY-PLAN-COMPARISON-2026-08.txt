@@ -1,0 +1,194 @@
+================================================================================
+FILED INTO THE REPO 2026-08-31. Read the notes below BEFORE trusting a figure
+in this document — three things in it are known to be wrong or unresolved.
+================================================================================
+
+A. THE DASHBOARD IS THE SOURCE OF TRUTH FOR CONSUMPTION, NOT THIS FILE.
+   Every usage figure here was copied out of the home-energy dashboard in an
+   earlier session, so where they disagree the dashboard/meter wins:
+     - annual export: this file says 10,551 kWh; the meter says 10,554 kWh
+     - annual gas: this file says ~11,850 MJ; ENERGY-PLAN-SHOPPING-CONTEXT.txt
+       derives ~13,250 MJ from the full 7-period meter read history
+   The hourly import array IS correct and reproduces the $2,381 Lumo baseline
+   to the cent through the dashboard's own cost engine.
+
+B. THE 1st EMERALD BAND WINDOWS ARE UNRESOLVED. The rates are not in doubt —
+   the EPAS and fact sheet 1ST787449MR agree exactly. The WINDOWS have two
+   conflicting sources:
+     - this file (attributed to the fact sheet): shoulder 7am-4pm and 9pm-10pm,
+       off-peak 10pm-7am   -> models $2,406/yr
+     - 1stenergy.com.au/tou-timings, VIC residential tab: shoulder/solar-soak
+       11am-4pm, off-peak 9pm-11am   -> models $2,509/yr
+   This file's own headline of $2,509 was produced with the WEBSITE windows,
+   not the fact-sheet windows it quotes, so it is internally inconsistent.
+   The dashboard currently prices 1st Emerald on the FACT-SHEET windows
+   (see TARIFF_ERAS in src/lib/energy.ts). The first 1st Energy invoice will
+   settle it; correct EMERALD_WINDOWS_* there if it disagrees.
+
+C. "KIERAN" throughout this document is a stray from another session. The
+   account holder is Hui Yik Lau (EPAS account 543520).
+
+D. NOT CAPTURED HERE: on this house's export volume the feed-in drop from
+   3.30c to 0.50c costs ~$296/yr, which is why 1st Emerald models ABOVE the
+   $2,381 Lumo baseline under either window reading. The switch is still a
+   large win against the Lumo VDO ($3,273) that the account would otherwise
+   have rolled onto from 1 Oct 2026 — that, not the old fixed plan, is the
+   right comparison.
+
+================================================================================
+ORIGINAL DOCUMENT AS RECEIVED FOLLOWS
+================================================================================
+
+ENERGY PLAN COMPARISON — SESSION HANDOFF CONTEXT
+==================================================
+Last updated: 31 August 2026
+
+PROPERTY & METER DETAILS
+-------------------------
+Address: 36 Australis Drive, Williams Landing VIC 3027
+Electricity NMI: 62038089177 (Powercor distribution zone)
+Gas MIRN: 5330779554 (AusNet Central)
+Solar: 12.76kW system, 10kWh battery, 5kW export limit
+EV charger: 22kW (Tesla), mostly charges daytime from solar, occasionally overnight
+
+USAGE DATA
+----------
+Annual electricity import: 11,862 kWh
+Annual electricity export: 10,551 kWh
+Annual gas consumption: ~11,850 MJ
+
+Hourly import array (hour 0-23):
+[722, 614, 460, 435, 558, 1509, 1439, 854, 449, 218, 114, 156, 97, 96, 112, 83, 103, 169, 231, 240, 484, 953, 947, 819]
+
+Hourly export array (hour 0-23):
+[0, 0, 0, 0, 0, 0, 0, 4, 210, 670, 1124, 1423, 1656, 1703, 1547, 1211, 704, 257, 38, 3, 1, 0, 0, 0]
+
+Import by EV time bands:
+- Overnight 12am-6am: 4,298 kWh (36.2%)
+- Peak 4-9pm: 1,227 kWh (10.3%)
+- Daytime 11am-4pm: 544 kWh (4.6%)
+- Other: 5,793 kWh (48.8%)
+
+Monthly gas daily MJ averages:
+{Jan:4.62, Feb:5.63, Mar:18.81, Apr:22.98, May:43.83, Jun:47.83, Jul:67.84, Aug:59.33, Sep:41.47, Oct:35.20, Nov:23.79, Dec:15.75}
+Max daily: 67.84 MJ (all under 100 MJ block1 limit)
+
+CURRENT SITUATION
+-----------------
+Previous retailer: Lumo Energy (Value market offer, expired 30 Sep 2026)
+If no action taken: moves to Lumo VDO (Victorian Default Offer) from 1 Oct 2026
+VDO rates (from ESC, incl GST): Peak 41.669c, Off-Peak 22.490c, Smart Rate 17.259c, Supply 138.050c/day, FIT 1.0c
+VDO combined cost: Elec $3,273 + Gas $886 = $4,159/yr
+
+WHAT KIERAN HAS SIGNED UP FOR
+-------------------------------
+1. ELECTRICITY — 1st Energy Emerald TOU (SIGNED 31/08/2026)
+   Fact sheet: 1ST787449MR (released 27 Aug 2026)
+   EPAS agreement confirmed, account #543520
+   Rates (all GST-inclusive):
+   - Supply: 104.83 c/day
+   - Peak (4-9pm): 31.57 c/kWh
+   - Off-Peak (10pm-7am): 17.05 c/kWh
+   - Shoulder (7am-4pm, 9pm-10pm): 13.09 c/kWh
+   - FIT: 0.50 c/kWh (GST-free)
+   - No contract term, no exit fees, open contract
+   Modelled annual cost: $2,509/yr
+   Cross-checked: EPAS rates match fact sheet rates match model — exact.
+
+2. GAS — GloBird BOOST (RECOMMENDED, not yet signed)
+   Fact sheet: GLO785306MR (released 15 Aug 2026)
+   Rates (all GST-inclusive per fact sheet):
+   - Supply: 93.50 c/day
+   - Usage: 2.33 c/MJ (first 100 MJ/day), 2.24 c/MJ (remaining)
+   - No contract term, $22 connection/disconnection fee, no exit fees
+   Modelled annual cost: $617/yr (fact-sheet verified)
+
+   Combined: $2,509 + $617 = $3,126/yr
+   Saving vs VDO: $4,159 - $3,126 = $1,033/yr
+
+KEY TECHNICAL DISCOVERIES
+--------------------------
+1. VEC API GST INCONSISTENCY:
+   - Electricity rates from Victorian Energy Compare API are EXCLUDING GST
+   - Gas rates are MIXED: Lumo gas is GST-inclusive, GloBird gas is GST-exclusive
+   - GST correction formula for electricity: True_cost = (VEC_exGST_cost + FIT_credit) × 1.1 - FIT_credit
+   - FIT credits are GST-free for non-GST-registered households
+   - GloBird BOOST gas: VEC showed $561 (ex-GST), actual is $617 (incl GST)
+   - Proof: 93.50/1.1 = 85.00c supply, 2.33/1.1 = 2.1182c usage — clean division
+   - Other non-Lumo gas plans (CovaU $540, Tango $571, Dodo $620) may also need +10% GST correction but unverified
+
+2. EV PLAN ANALYSIS (completed):
+   - OVO EV Plan (OVO733541MR): Peak 3-9pm 45.79c, Off-peak 25.48c, Overnight 12am-6am 4.50c, Supply 112.20c/day, FIT 1.0c
+   - Modelled at $2,691/yr — $182 MORE than 1st Emerald ($2,509)
+   - Only 36% of import is overnight; higher peak/off-peak rates on remaining 64% wipe out overnight savings
+   - Conclusion: EV plans don't work for solar+battery homes that charge daytime. Standard TOU is cheaper.
+   - Also evaluated: AGL Night Saver EV (rates unavailable for Powercor), Powershop EV Night (SA only), Amber Electric ($300/yr subscription, wholesale risk)
+
+GST-CORRECTED ELECTRICITY COSTS (all incl GST, annual)
+-------------------------------------------------------
+Flow Power: $2,295 (wholesale risk, 2c FIT)
+1st Emerald: $2,509 ← SIGNED UP
+GloBird BOOST TOU: $2,575 (0c FIT)
+GloBird Combo: $2,584 (0c FIT)
+1st Opal: $2,606
+EA Seniors: $2,612
+Sumo: $2,664
+EA Rate Fix: $2,676
+OVO EV: $2,691
+CovaU: $2,862
+Lumo Plus: $2,902
+Lumo VDO: $3,273
+
+GAS COSTS (annual, GST status noted)
+--------------------------------------
+CovaU: $540 (VEC, may need GST correction → ~$594)
+GloBird Combo: $535 (VEC, may need GST correction → ~$589)
+GloBird BOOST: $617 (FACT-SHEET VERIFIED, incl GST)
+Tango: $571 (VEC, may need GST correction → ~$628)
+Dodo: $620 (VEC, may need GST correction → ~$682)
+Lumo current: $801
+1st Ruby: $858
+VDO Gas: $886
+
+BUNDLE TOP 10 (corrected)
+---------------------------
+1. Flow Power + GloBird BOOST gas: $2,912 (−$1,247 vs VDO) — wholesale risk
+2. 1st Emerald + CovaU gas: $3,049 (−$1,110) — $79 gas exit fee, $100 loyalty credit
+3. 1st Emerald + GloBird BOOST gas: $3,126 (−$1,033) ← RECOMMENDED
+4. 1st Emerald + Tango gas: $3,080 (−$1,079) — DD only, $75 exit
+5. GloBird BOOST + GloBird Combo gas: $3,110 (−$1,049) — one retailer, 0c FIT
+6. 1st Emerald + Dodo gas: $3,129 (−$1,030) — zero strings
+7. GloBird BOOST + GloBird BOOST gas: $3,192 (−$967) — one login, 0c FIT
+8. Lumo Plus + GloBird BOOST gas: $3,519 (−$640) — stay w/ Lumo elec
+9. 1st Emerald + 1st Ruby gas: $3,367 (−$792) — gas $241 more than GloBird
+10. Lumo VDO + Lumo VDO gas: $4,159 — baseline (do nothing)
+
+PUBLISHED ARTIFACT
+-------------------
+Full HTML report: https://claude.ai/code/artifact/d29b7069-06e0-4311-afc0-0686fe6e8770
+File on disk: /root/energy-comparison.html (~1060 lines)
+Sections: Hero summary cards, Electricity table, Gas table, EV plan analysis (in methodology), Bundle vs Split table with 10 combos, Trap cards, Methodology
+Fonts: DM Sans + JetBrains Mono (Google Fonts), dark/light theme support
+
+DATA FILES
+-----------
+/root/elec_top_plans.json — Top 10 electricity plans from VEC (all ex-GST)
+/root/energy-comparison.html — The main report artifact
+
+UPLOADED FILES (in /root/.claude/uploads/e89e174c-9b49-5883-abd2-efb41801f8cd/)
+- Victorian_Energy_Fact_Sheet_GLO785306MR_Gas.pdf — GloBird BOOST gas fact sheet
+- 1st_Energy_EPAS_1_31082026_543520_62038089177_5460035.pdf — Signed 1st Energy Emerald agreement
+- Earlier uploads: Lumo contract photos (gas current/new, elec current/new)
+
+REMAINING ACTIONS FOR KIERAN
+------------------------------
+1. Sign up for GloBird BOOST gas (GLO785306MR) — not yet done
+2. Cancel/let Lumo expire (auto-handled by retailer transfer)
+3. Done — no further optimisation needed unless usage profile changes significantly
+
+CAVEATS & NOTES
+-----------------
+- CovaU, Tango, Dodo, GloBird Combo gas costs are from VEC without fact-sheet verification. If they follow GloBird BOOST's pattern (VEC serving ex-GST), their true costs would be ~10% higher.
+- Gas model uses ~11,850 MJ/yr from full 7-period meter data. VEC estimates use ~15,600 MJ/yr (heavier winter weighting). Actual usage likely closer to lower figure.
+- Lumo Plus market offer rates sourced from WATTever: Peak 37.08c, Shoulder 20.02c, Off-Peak 15.36c, Supply 122.87c/day, FIT 1.0c (all incl GST).
+- 1st Energy Emerald is an open contract — can leave anytime with no exit fees.

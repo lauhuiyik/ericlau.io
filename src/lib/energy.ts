@@ -31,64 +31,261 @@ export type Reading = {
   sources: string | null;
 };
 
+export type BandName = "peak" | "shoulder" | "offPeak";
+
+/**
+ * A priced window inside the day, [startHour, endHour) in local time. Windows
+ * may wrap past midnight (start > end). Anything no window covers is off-peak —
+ * off-peak is the residual, never listed, which is how every retailer on this
+ * meter has actually defined it. Windows must not overlap; where they do, peak
+ * wins.
+ */
+export type TariffWindow = { band: "peak" | "shoulder"; startHour: number; endHour: number };
+
 export type Tariff = {
-  peakRate: number; // $/kWh during the peak window
-  offPeakRate: number; // $/kWh all other times
+  /** Retailer + plan, so any figure on the page can be traced back to its rates. */
+  label: string;
+  peakRate: number; // $/kWh inside a peak window
+  shoulderRate: number; // $/kWh inside a shoulder window
+  offPeakRate: number; // $/kWh everywhere else
   supplyPerDay: number; // $/day fixed supply charge
   feedIn: number; // $/kWh exported
-  peakStartHour: number; // 0–24, local
-  peakEndHour: number; // 0–24, local
+  windows: TariffWindow[];
 };
 
-// Seeded from Eric's Lumo bill (rates fixed until 30 Sep 2026). The plan moved
-// from "Time of Use v2" to "v3" on 2026-07-20: same rates, but the peak window
-// shifted from 3pm–9pm to 4pm–9pm, and v3 adds a "Smart Rate" band (11am–4pm)
-// priced identically to off-peak — so it needs no separate rate here, only the
-// peak-start shift, which is applied per-date via peakStartForDate().
-export const DEFAULT_TARIFF: Tariff = {
+// ---------------------------------------------------------------------------
+// TARIFF ERAS
+//
+// Rates are DATE-EFFECTIVE, not a single global setting. The house has been on
+// three plans and the dashboard has to reprice each day at whatever was in force
+// on that day — otherwise switching retailers silently rewrites two years of
+// history and the reconciliation against real invoices stops matching.
+//
+// Add a new era here when the plan changes; never edit an old one.
+// ---------------------------------------------------------------------------
+
+/** Lumo "Time of Use v2" — peak 3pm-9pm, every day. */
+const LUMO_TOU_V2: Tariff = {
+  label: "Lumo Time of Use v2",
   peakRate: 0.308,
+  shoulderRate: 0.18678, // no shoulder band on this plan: priced as off-peak
   offPeakRate: 0.18678,
   supplyPerDay: 1.00034,
   feedIn: 0.033,
-  peakStartHour: 16, // v3 (4pm); v2 (3pm) applies before V3_PEAK_FROM
-  peakEndHour: 21,
+  windows: [{ band: "peak", startHour: 15, endHour: 21 }],
 };
 
-/** ToU v3 took effect on this date — peak window moved 3pm → 4pm. */
+/**
+ * Lumo "Time of Use v3 FIT Solar" from 2026-07-20 — same rates as v2, but the
+ * peak window moved 3pm -> 4pm. v3 also introduced a "Smart Rate" band at
+ * 11am-4pm which it priced IDENTICALLY to off-peak, so it is modelled as a
+ * shoulder window at the off-peak rate: structurally present, worth $0. That
+ * band is what 1st Energy later prices separately.
+ */
+const LUMO_TOU_V3: Tariff = {
+  label: "Lumo Time of Use v3 FIT Solar",
+  peakRate: 0.308,
+  shoulderRate: 0.18678,
+  offPeakRate: 0.18678,
+  supplyPerDay: 1.00034,
+  feedIn: 0.033,
+  windows: [
+    { band: "peak", startHour: 16, endHour: 21 },
+    { band: "shoulder", startHour: 11, endHour: 16 },
+  ],
+};
+
+/**
+ * 1st Energy "1st Emerald" TOU, signed 2026-08-31 (EPAS account 543520, fact
+ * sheet 1ST787449MR). Rates are GST-inclusive as printed; the feed-in is GST-free.
+ *
+ * !! UNRESOLVED: the band WINDOWS have two conflicting sources. The rates
+ * themselves are not in doubt — EPAS and fact sheet agree exactly.
+ *
+ *   FACTSHEET (used here): shoulder 7am-4pm and 9pm-10pm, off-peak 10pm-7am.
+ *   WEBSITE (1stenergy.com.au/tou-timings, VIC residential): shoulder/solar-soak
+ *   11am-4pm, off-peak 9pm-11am.
+ *
+ * On this house's measured 12 months the two differ by ~$103/yr ($2,406 vs
+ * $2,509), because the fact-sheet reading puts the big 7-9am and 9-10pm import
+ * blocks in the CHEAP shoulder band rather than off-peak. Swap
+ * EMERALD_WINDOWS_WEBSITE in below if the first 1st Energy invoice disagrees.
+ */
+const EMERALD_WINDOWS_FACTSHEET: TariffWindow[] = [
+  { band: "peak", startHour: 16, endHour: 21 },
+  { band: "shoulder", startHour: 7, endHour: 16 },
+  { band: "shoulder", startHour: 21, endHour: 22 },
+];
+
+/** The retailer's public timings page. Kept so the alternative is one edit away. */
+export const EMERALD_WINDOWS_WEBSITE: TariffWindow[] = [
+  { band: "peak", startHour: 16, endHour: 21 },
+  { band: "shoulder", startHour: 11, endHour: 16 },
+];
+
+const FIRST_EMERALD: Tariff = {
+  label: "1st Energy 1st Emerald",
+  peakRate: 0.3157,
+  shoulderRate: 0.1309,
+  offPeakRate: 0.1705,
+  supplyPerDay: 1.0483,
+  feedIn: 0.005,
+  windows: EMERALD_WINDOWS_FACTSHEET,
+};
+
+/**
+ * When 1st Emerald starts pricing. This is the EPAS "Agreement Start Date"; the
+ * actual retailer transfer may complete a little later, in which case the first
+ * 1st Energy invoice will show the true start and this should be corrected to it.
+ * Days before this date keep their Lumo rates, permanently.
+ */
+export const FIRST_ENERGY_FROM = "2026-08-31";
+
+/** ToU v3 took effect on this date — peak window moved 3pm -> 4pm. */
 export const V3_PEAK_FROM = "2026-07-20";
 
-/** Peak-window start hour in force on `date`: v2's 3pm before the v3 switch,
- * otherwise the tariff's current value (v3's 4pm). */
-export function peakStartForDate(date: string, t: Tariff): number {
-  return date < V3_PEAK_FROM ? 15 : t.peakStartHour;
-}
+export type TariffEra = { from: string; tariff: Tariff };
+
+/** Oldest first. The last era whose `from` is <= a date is the one in force. */
+export const TARIFF_ERAS: TariffEra[] = [
+  { from: "0000-01-01", tariff: LUMO_TOU_V2 },
+  { from: V3_PEAK_FROM, tariff: LUMO_TOU_V3 },
+  { from: FIRST_ENERGY_FROM, tariff: FIRST_EMERALD },
+];
+
+/** The plan currently in force (the newest era) — what the settings form edits. */
+export const DEFAULT_TARIFF: Tariff = TARIFF_ERAS[TARIFF_ERAS.length - 1].tariff;
 
 export const TARIFF_KV_KEY = "tariff";
 
-export function normalizeTariff(input: Partial<Tariff> | null | undefined): Tariff {
-  const t = { ...DEFAULT_TARIFF, ...(input ?? {}) };
-  const clampNum = (v: unknown, fallback: number) =>
-    typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : fallback;
-  const clampHour = (v: unknown, fallback: number) =>
-    typeof v === "number" && Number.isFinite(v) ? Math.min(24, Math.max(0, Math.round(v))) : fallback;
-  return {
-    peakRate: clampNum(t.peakRate, DEFAULT_TARIFF.peakRate),
-    offPeakRate: clampNum(t.offPeakRate, DEFAULT_TARIFF.offPeakRate),
-    supplyPerDay: clampNum(t.supplyPerDay, DEFAULT_TARIFF.supplyPerDay),
-    feedIn: clampNum(t.feedIn, DEFAULT_TARIFF.feedIn),
-    peakStartHour: clampHour(t.peakStartHour, DEFAULT_TARIFF.peakStartHour),
-    peakEndHour: clampHour(t.peakEndHour, DEFAULT_TARIFF.peakEndHour),
+/**
+ * A function giving the tariff in force on any local date.
+ *
+ * `override` (from KV, set via the settings form) applies ONLY to the current
+ * era. Historical days are always priced at the rates they were actually billed
+ * at, so fiddling with the settings form can never rewrite a past bill.
+ */
+export type TariffAt = (date: string) => Tariff;
+
+export function tariffResolver(override?: Tariff | null): TariffAt {
+  const current = TARIFF_ERAS[TARIFF_ERAS.length - 1];
+  return (date: string) => {
+    let chosen = TARIFF_ERAS[0];
+    for (const era of TARIFF_ERAS) if (era.from <= date) chosen = era;
+    return chosen === current && override ? override : chosen.tariff;
   };
 }
 
+/** Convenience for callers that only need one date's rates. */
+export function tariffForDate(date: string, override?: Tariff | null): Tariff {
+  return tariffResolver(override)(date);
+}
+
+/** Every distinct plan that priced any day in [start, end], oldest first. */
+export function tariffLabelsInRange(start: string, end: string, at: TariffAt): string[] {
+  const labels: string[] = [];
+  for (const era of TARIFF_ERAS) {
+    if (era.from > end) continue;
+    const label = at(era.from < start ? start : era.from).label;
+    if (!labels.includes(label)) labels.push(label);
+  }
+  return labels;
+}
+
+function clampNum(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
+function clampHour(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.min(24, Math.max(0, Math.round(v))) : fallback;
+}
+
+/**
+ * Coerce whatever is in KV into a usable current-era tariff.
+ *
+ * Tolerates the OLD two-band shape ({peakRate, offPeakRate, peakStartHour,
+ * peakEndHour}) that KV may still hold from before the 1st Energy switch, so a
+ * stale value degrades to sensible windows instead of throwing.
+ */
+export function normalizeTariff(input: Partial<Tariff> | null | undefined): Tariff {
+  const raw = (input ?? {}) as Partial<Tariff> & {
+    peakStartHour?: number;
+    peakEndHour?: number;
+  };
+  const base = DEFAULT_TARIFF;
+
+  let windows: TariffWindow[];
+  if (Array.isArray(raw.windows) && raw.windows.length > 0) {
+    windows = raw.windows
+      .filter((w) => w && (w.band === "peak" || w.band === "shoulder"))
+      .map((w) => ({
+        band: w.band,
+        startHour: clampHour(w.startHour, 0),
+        endHour: clampHour(w.endHour, 0),
+      }))
+      .filter((w) => w.startHour !== w.endHour);
+    if (windows.length === 0) windows = base.windows;
+  } else if (typeof raw.peakStartHour === "number" && typeof raw.peakEndHour === "number") {
+    // legacy two-band value
+    windows = [
+      {
+        band: "peak",
+        startHour: clampHour(raw.peakStartHour, 16),
+        endHour: clampHour(raw.peakEndHour, 21),
+      },
+    ];
+  } else {
+    windows = base.windows;
+  }
+
+  return {
+    label: typeof raw.label === "string" && raw.label ? raw.label : base.label,
+    peakRate: clampNum(raw.peakRate, base.peakRate),
+    shoulderRate: clampNum(raw.shoulderRate, base.shoulderRate),
+    offPeakRate: clampNum(raw.offPeakRate, base.offPeakRate),
+    supplyPerDay: clampNum(raw.supplyPerDay, base.supplyPerDay),
+    feedIn: clampNum(raw.feedIn, base.feedIn),
+    windows,
+  };
+}
+
+/** The CURRENT plan's rates, with any KV override applied. */
 export async function getTariff(kv: KVNamespace): Promise<Tariff> {
   try {
-    const raw = await kv.get(TARIFF_KV_KEY);
-    if (raw) return normalizeTariff(JSON.parse(raw) as Partial<Tariff>);
+    const rawValue = await kv.get(TARIFF_KV_KEY);
+    if (rawValue) return normalizeTariff(JSON.parse(rawValue) as Partial<Tariff>);
   } catch {
     // fall through to defaults
   }
   return DEFAULT_TARIFF;
+}
+
+/**
+ * The date-aware pricer the cost functions take. Reads the current-era override
+ * from KV once, then prices every date at whatever plan was in force that day.
+ */
+export async function getTariffAt(kv: KVNamespace): Promise<TariffAt> {
+  return tariffResolver(await getTariff(kv));
+}
+
+/** Which band `hour` (0-23) falls in under `t`. Peak wins any overlap. */
+export function bandForHour(hour: number, t: Tariff): BandName {
+  for (const band of ["peak", "shoulder"] as const) {
+    for (const w of t.windows) {
+      if (w.band !== band) continue;
+      const inside =
+        w.startHour <= w.endHour
+          ? hour >= w.startHour && hour < w.endHour
+          : hour >= w.startHour || hour < w.endHour;
+      if (inside) return band;
+    }
+  }
+  return "offPeak";
+}
+
+/** The $/kWh a band is charged at. */
+export function rateFor(band: BandName, t: Tariff): number {
+  return band === "peak" ? t.peakRate : band === "shoulder" ? t.shoulderRate : t.offPeakRate;
 }
 
 const MELB = "Australia/Melbourne";
@@ -118,11 +315,13 @@ export function melbFromTs(ts: number): { date: string; time: string } {
   return melbNow(new Date(ts * 1000));
 }
 
+/** The band a local 'HH:MM' falls in. */
+export function bandForTime(localTime: string, t: Tariff): BandName {
+  return bandForHour(Number(localTime.slice(0, 2)), t);
+}
+
 export function isPeak(localTime: string, t: Tariff): boolean {
-  const h = Number(localTime.slice(0, 2));
-  // Handle windows that wrap past midnight (e.g. 22–6) as well as normal ones.
-  if (t.peakStartHour <= t.peakEndHour) return h >= t.peakStartHour && h < t.peakEndHour;
-  return h >= t.peakStartHour || h < t.peakEndHour;
+  return bandForTime(localTime, t) === "peak";
 }
 
 export async function getLatest(db: D1Database): Promise<Reading | null> {
@@ -401,6 +600,7 @@ export type MeterDailyTotal = {
   date: string;
   importKwh: number;
   importPeakKwh: number;
+  importShoulderKwh: number;
   importOffPeakKwh: number;
   exportKwh: number;
   /** false if any interval that day was estimated/substituted rather than metered. */
@@ -408,62 +608,115 @@ export type MeterDailyTotal = {
 };
 
 /**
- * Daily import/export totals from the meter, with import split by the tariff's
- * peak window. Peak is matched on the interval's start hour, so this assumes a
- * non-wrapping window (peakStartHour < peakEndHour), which the Lumo ToU plan is.
- * The peak-start hour is date-aware (v2 3pm before the v3 switch, 4pm after).
+ * Daily import/export totals from the meter, with import split across the price
+ * bands in force ON THAT DATE.
+ *
+ * The bucketing used to be a SQL CASE on the interval's start hour, which could
+ * only express one peak window with a hardcoded date pivot. Three bands, two
+ * shoulder blocks and an open-ended list of plan eras don't fit in that shape,
+ * so the intervals come back raw and are bucketed here instead. Ranges are
+ * billing cycles (~1,500 import rows), so the extra rows are cheap.
+ *
+ * Each interval is assigned whole to the band its START hour falls in — that is
+ * how the retailer bills a 30-minute block, and every window boundary in every
+ * plan so far lands on the hour, so no interval ever straddles two bands.
  */
 export async function getMeterDailyTotals(
   db: D1Database,
   start: string,
   end: string,
-  t: Tariff = DEFAULT_TARIFF,
+  at: TariffAt = tariffResolver(),
 ): Promise<MeterDailyTotal[]> {
   const res = await db
     .prepare(
-      `SELECT local_date,
-              SUM(CASE WHEN stream='import' THEN kwh ELSE 0 END) imp,
-              SUM(CASE WHEN stream='import'
-                        AND CAST(substr(interval_start,1,2) AS INTEGER) >= (CASE WHEN local_date < ? THEN 15 ELSE ? END)
-                        AND CAST(substr(interval_start,1,2) AS INTEGER) <  ?
-                       THEN kwh ELSE 0 END) peak,
-              SUM(CASE WHEN stream='export' THEN kwh ELSE 0 END) exp,
-              MIN(CASE WHEN quality='Actual' THEN 1 ELSE 0 END) all_actual
+      `SELECT local_date, interval_start, stream, kwh, quality
        FROM meter_intervals
        WHERE local_date BETWEEN ? AND ?
-       GROUP BY local_date
-       ORDER BY local_date ASC`,
+       ORDER BY local_date ASC, interval_start ASC`,
     )
-    .bind(V3_PEAK_FROM, t.peakStartHour, t.peakEndHour, start, end)
-    .all<{ local_date: string; imp: number; peak: number; exp: number; all_actual: number }>();
-  return (res.results ?? []).map((r) => ({
-    date: r.local_date,
-    importKwh: r.imp,
-    importPeakKwh: r.peak,
-    importOffPeakKwh: r.imp - r.peak,
-    exportKwh: r.exp,
-    actual: r.all_actual === 1,
-  }));
+    .bind(start, end)
+    .all<{
+      local_date: string;
+      interval_start: string;
+      stream: string;
+      kwh: number;
+      quality: string | null;
+    }>();
+
+  const byDate = new Map<string, MeterDailyTotal>();
+  for (const r of res.results ?? []) {
+    let d = byDate.get(r.local_date);
+    if (!d) {
+      d = {
+        date: r.local_date,
+        importKwh: 0,
+        importPeakKwh: 0,
+        importShoulderKwh: 0,
+        importOffPeakKwh: 0,
+        exportKwh: 0,
+        actual: true,
+      };
+      byDate.set(r.local_date, d);
+    }
+    if (r.quality !== "Actual") d.actual = false;
+    if (r.stream === "export") {
+      d.exportKwh += r.kwh;
+      continue;
+    }
+    if (r.stream !== "import") continue;
+    d.importKwh += r.kwh;
+    const band = bandForTime(r.interval_start, at(r.local_date));
+    if (band === "peak") d.importPeakKwh += r.kwh;
+    else if (band === "shoulder") d.importShoulderKwh += r.kwh;
+    else d.importOffPeakKwh += r.kwh;
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
-/** Price meter daily totals at the tariff. Mirrors computeCost's shape, but the
- *  peak/off-peak split is exact (metered per interval), never apportioned. */
-export function meterCost(daily: MeterDailyTotal[], t: Tariff): CostBreakdown {
-  const peakKwh = daily.reduce((s, d) => s + d.importPeakKwh, 0);
-  const offPeakKwh = daily.reduce((s, d) => s + d.importOffPeakKwh, 0);
-  const importKwh = peakKwh + offPeakKwh;
-  const exportKwh = daily.reduce((s, d) => s + d.exportKwh, 0);
-  const importCost = peakKwh * t.peakRate + offPeakKwh * t.offPeakRate;
-  const exportCredit = exportKwh * t.feedIn;
-  const supply = t.supplyPerDay * daily.length;
+/**
+ * Price meter daily totals. Mirrors computeCost's shape, but the band split is
+ * exact (metered per interval), never apportioned.
+ *
+ * Priced per DAY at that day's plan, so a cycle straddling a retailer switch
+ * bills each side at its own rates instead of applying today's plan backwards.
+ */
+export function meterCost(daily: MeterDailyTotal[], at: TariffAt): CostBreakdown {
+  let peakKwh = 0;
+  let shoulderKwh = 0;
+  let offPeakKwh = 0;
+  let exportKwh = 0;
+  let peakCost = 0;
+  let shoulderCost = 0;
+  let offPeakCost = 0;
+  let exportCredit = 0;
+  let supply = 0;
+
+  for (const d of daily) {
+    const t = at(d.date);
+    peakKwh += d.importPeakKwh;
+    shoulderKwh += d.importShoulderKwh;
+    offPeakKwh += d.importOffPeakKwh;
+    exportKwh += d.exportKwh;
+    peakCost += d.importPeakKwh * t.peakRate;
+    shoulderCost += d.importShoulderKwh * t.shoulderRate;
+    offPeakCost += d.importOffPeakKwh * t.offPeakRate;
+    exportCredit += d.exportKwh * t.feedIn;
+    supply += t.supplyPerDay;
+  }
+
+  const importCost = peakCost + shoulderCost + offPeakCost;
   return {
     importCost,
     exportCredit,
     supply,
     net: importCost + supply - exportCredit,
     peakKwh,
+    shoulderKwh,
     offPeakKwh,
-    importKwh,
+    peakCost,
+    shoulderCost,
+    offPeakCost,
+    importKwh: peakKwh + shoulderKwh + offPeakKwh,
     exportKwh,
     days: daily.length,
     hasGaps: false, // metered per interval — no apportioning
@@ -549,8 +802,10 @@ export type TeslaCycleCost = {
   kwh: number; // total charged at home over the window
   freeKwh: number; // covered by solar/battery (grid wasn't importing)
   gridPeakKwh: number;
+  gridShoulderKwh: number;
   gridOffPeakKwh: number;
   gridPeakCost: number;
+  gridShoulderCost: number;
   gridOffPeakCost: number;
   gridCost: number; // gridPeakCost + gridOffPeakCost — what the car added to the bill
   fullGridCost: number; // what it would cost if every kWh were grid-charged
@@ -577,7 +832,7 @@ export async function getTeslaCycleGridCost(
   db: D1Database,
   start: string,
   end: string,
-  t: Tariff,
+  at: TariffAt,
 ): Promise<TeslaCycleCost> {
   // meter grid import per 30-min interval, keyed "YYYY-MM-DD HH:MM"
   const meter = await db
@@ -638,41 +893,48 @@ export async function getTeslaCycleGridCost(
     last = r.e;
   }
 
-  // attribute each interval
+  // attribute each interval, at the rates in force on that interval's own date
   let kwh = 0;
   let freeKwh = 0;
   let gridPeakKwh = 0;
+  let gridShoulderKwh = 0;
   let gridOffPeakKwh = 0;
-  let fullPeakKwh = 0;
-  let fullOffPeakKwh = 0;
+  let gridPeakCost = 0;
+  let gridShoulderCost = 0;
+  let gridOffPeakCost = 0;
+  let fullGridCost = 0;
   let hadMeterGap = false;
   for (const [key, ck] of car) {
     kwh += ck;
-    const hour = Number(key.slice(11, 13));
-    const peakStart = peakStartForDate(key.slice(0, 10), t); // date-aware (v2 3pm / v3 4pm)
-    const peak = hour >= peakStart && hour < t.peakEndHour;
+    const date = key.slice(0, 10);
+    const t = at(date);
+    const band = bandForTime(key.slice(11), t);
+    const rate = rateFor(band, t);
     const gi = imp.get(key);
     if (gi == null) hadMeterGap = true;
     const grid = gi == null ? ck : Math.min(ck, gi);
     freeKwh += ck - grid;
-    if (peak) {
+    fullGridCost += ck * rate;
+    if (band === "peak") {
       gridPeakKwh += grid;
-      fullPeakKwh += ck;
+      gridPeakCost += grid * rate;
+    } else if (band === "shoulder") {
+      gridShoulderKwh += grid;
+      gridShoulderCost += grid * rate;
     } else {
       gridOffPeakKwh += grid;
-      fullOffPeakKwh += ck;
+      gridOffPeakCost += grid * rate;
     }
   }
-  const gridPeakCost = gridPeakKwh * t.peakRate;
-  const gridOffPeakCost = gridOffPeakKwh * t.offPeakRate;
-  const gridCost = gridPeakCost + gridOffPeakCost;
-  const fullGridCost = fullPeakKwh * t.peakRate + fullOffPeakKwh * t.offPeakRate;
+  const gridCost = gridPeakCost + gridShoulderCost + gridOffPeakCost;
   return {
     kwh,
     freeKwh,
     gridPeakKwh,
+    gridShoulderKwh,
     gridOffPeakKwh,
     gridPeakCost,
+    gridShoulderCost,
     gridOffPeakCost,
     gridCost,
     fullGridCost,
@@ -708,10 +970,10 @@ export function computeBillSplit(
   cycle: { start: string; end: string; lengthDays: number },
   meterDaily: MeterDailyTotal[],
   tesla: TeslaCycleCost,
-  t: Tariff,
+  at: TariffAt,
   housemates = 4,
 ): BillSplit {
-  const soFar = meterCost(meterDaily, t);
+  const soFar = meterCost(meterDaily, at);
   const daysCovered = meterDaily.length;
   const lastMeterDate = daysCovered > 0 ? meterDaily[daysCovered - 1].date : null;
   const complete = daysCovered >= cycle.lengthDays;
@@ -973,14 +1235,17 @@ export type TeslaCost = {
   /** Total charged at home over the period. */
   kwh: number;
   peakKwh: number;
+  shoulderKwh: number;
   offPeakKwh: number;
   /** Portion the grid actually supplied, apportioned from the meter. */
   gridKwh: number;
   /** Grid-supplied portion split by tariff window. These two are what you
    *  actually pay for, and their costs sum to `gridCost` exactly. */
   gridPeakKwh: number;
+  gridShoulderKwh: number;
   gridOffPeakKwh: number;
   gridPeakCost: number;
+  gridShoulderCost: number;
   gridOffPeakCost: number;
   /** Portion covered by solar or the battery, so it cost nothing to import. */
   selfKwh: number;
@@ -1015,7 +1280,7 @@ export function computeTeslaCost(
   readings: Reading[],
   samples: TeslaSample[],
   sessions: ChargeSession[],
-  t: Tariff,
+  at: TariffAt,
 ): TeslaCost {
   // Live samples give ~1-minute increments. For dates the Fleet API never
   // covered, fall back to the imported Tessie sessions, treating each whole
@@ -1051,18 +1316,28 @@ export function computeTeslaCost(
 
   let kwh = 0;
   let peakKwh = 0;
+  let shoulderKwh = 0;
   let offPeakKwh = 0;
   let gridPeakKwh = 0;
+  let gridShoulderKwh = 0;
   let gridOffPeakKwh = 0;
+  let gridPeakCost = 0;
+  let gridShoulderCost = 0;
+  let gridOffPeakCost = 0;
+  let fullGridCost = 0;
   let anyOverlap = false;
 
   for (const d of deltas) {
     const to = Math.max(d.toMin, d.fromMin + 1);
-    const frac = peakFraction(d.fromMin, to, t);
+    const t = at(d.date); // rates as they were on the day of this charge
+    const f = bandFractions(d.fromMin, to, t);
 
     kwh += d.kwh;
-    peakKwh += d.kwh * frac;
-    offPeakKwh += d.kwh * (1 - frac);
+    peakKwh += d.kwh * f.peak;
+    shoulderKwh += d.kwh * f.shoulder;
+    offPeakKwh += d.kwh * f.offPeak;
+    fullGridCost +=
+      d.kwh * (f.peak * t.peakRate + f.shoulder * t.shoulderRate + f.offPeak * t.offPeakRate);
 
     // Grid's share of house draw across this window.
     const dayRows = byDate.get(d.date) ?? [];
@@ -1078,26 +1353,31 @@ export function computeTeslaCost(
       // the grid, so assume the worst rather than quietly reporting it as free.
       gridShare = 1;
     }
-    gridPeakKwh += d.kwh * gridShare * frac;
-    gridOffPeakKwh += d.kwh * gridShare * (1 - frac);
+    const g = d.kwh * gridShare;
+    gridPeakKwh += g * f.peak;
+    gridShoulderKwh += g * f.shoulder;
+    gridOffPeakKwh += g * f.offPeak;
+    // Costs accumulate alongside the kWh at the same rates, so the band lines
+    // always sum to the total even across a plan change mid-period.
+    gridPeakCost += g * f.peak * t.peakRate;
+    gridShoulderCost += g * f.shoulder * t.shoulderRate;
+    gridOffPeakCost += g * f.offPeak * t.offPeakRate;
   }
 
-  // Costs are derived from the kWh buckets rather than accumulated separately,
-  // so the peak and off-peak lines always add up to the total exactly.
-  const gridPeakCost = gridPeakKwh * t.peakRate;
-  const gridOffPeakCost = gridOffPeakKwh * t.offPeakRate;
-  const gridCost = gridPeakCost + gridOffPeakCost;
-  const fullGridCost = peakKwh * t.peakRate + offPeakKwh * t.offPeakRate;
-  const gridKwh = gridPeakKwh + gridOffPeakKwh;
+  const gridCost = gridPeakCost + gridShoulderCost + gridOffPeakCost;
+  const gridKwh = gridPeakKwh + gridShoulderKwh + gridOffPeakKwh;
 
   return {
     kwh,
     peakKwh,
+    shoulderKwh,
     offPeakKwh,
     gridKwh,
     gridPeakKwh,
+    gridShoulderKwh,
     gridOffPeakKwh,
     gridPeakCost,
+    gridShoulderCost,
     gridOffPeakCost,
     selfKwh: Math.max(0, kwh - gridKwh),
     gridCost,
@@ -1164,34 +1444,63 @@ export function minutesOfDay(localTime: string): number {
   return hh * 60 + mm;
 }
 
-/** Fraction of the window [startMin,endMin) that falls inside the peak price
- * window. Used to apportion a block of grid import across peak/off-peak when
- * the block spans a tariff boundary (or a gap in readings). */
-function peakFraction(startMin: number, endMin: number, t: Tariff): number {
+/** The clock ranges (minutes from midnight) a band occupies, for chart shading.
+ *  Off-peak is the residual and is deliberately not returned. */
+export function bandRanges(band: "peak" | "shoulder", t: Tariff): [number, number][] {
+  return t.windows.filter((w) => w.band === band).flatMap(windowRanges);
+}
+
+/** How a window's minutes divide across the three bands. Sums to 1. */
+export type BandSplit = { peak: number; shoulder: number; offPeak: number };
+
+const overlapMin = (a: [number, number], b: [number, number]) =>
+  Math.max(0, Math.min(a[1], b[1]) - Math.max(a[0], b[0]));
+
+/** The clock ranges a window covers, splitting one that wraps past midnight. */
+function windowRanges(w: TariffWindow): [number, number][] {
+  return w.startHour <= w.endHour
+    ? [[w.startHour * 60, w.endHour * 60]]
+    : [
+        [w.startHour * 60, 1440],
+        [0, w.endHour * 60],
+      ];
+}
+
+/**
+ * Fraction of [startMin,endMin) falling in each price band. Used to apportion a
+ * block of grid import when it straddles a tariff boundary (or a gap in
+ * readings). Peak minutes are counted first and subtracted from shoulder, so
+ * overlapping windows can never double-count.
+ */
+export function bandFractions(startMin: number, endMin: number, t: Tariff): BandSplit {
   const total = endMin - startMin;
-  if (total <= 0) return isPeak(minToTimeString(startMin), t) ? 1 : 0;
-  const bands: [number, number][] =
-    t.peakStartHour <= t.peakEndHour
-      ? [[t.peakStartHour * 60, t.peakEndHour * 60]]
-      : [
-          [t.peakStartHour * 60, 1440],
-          [0, t.peakEndHour * 60],
-        ];
-  let peak = 0;
-  for (const [bs, be] of bands) {
-    const lo = Math.max(startMin, bs);
-    const hi = Math.min(endMin, be);
-    if (hi > lo) peak += hi - lo;
+  if (total <= 0) {
+    const b = bandForHour(Math.floor((((startMin % 1440) + 1440) % 1440) / 60), t);
+    return { peak: b === "peak" ? 1 : 0, shoulder: b === "shoulder" ? 1 : 0, offPeak: b === "offPeak" ? 1 : 0 };
   }
-  return peak / total;
-}
+  const span: [number, number] = [startMin, endMin];
+  const peakRanges = t.windows.filter((w) => w.band === "peak").flatMap(windowRanges);
+  const shoulderRanges = t.windows.filter((w) => w.band === "shoulder").flatMap(windowRanges);
 
-function minToTimeString(min: number): string {
-  const h = Math.floor(min / 60) % 24;
-  const m = Math.round(min % 60);
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
+  let peak = 0;
+  for (const r of peakRanges) peak += overlapMin(span, r);
 
+  let shoulder = 0;
+  for (const r of shoulderRanges) {
+    let mins = overlapMin(span, r);
+    // strip any minutes this shoulder range shares with a peak range
+    for (const pr of peakRanges) mins -= overlapMin([Math.max(span[0], r[0]), Math.min(span[1], r[1])], pr);
+    shoulder += Math.max(0, mins);
+  }
+
+  peak = Math.min(peak, total);
+  shoulder = Math.min(shoulder, total - peak);
+  return {
+    peak: peak / total,
+    shoulder: shoulder / total,
+    offPeak: Math.max(0, (total - peak - shoulder) / total),
+  };
+}
 
 export type CostBreakdown = {
   importCost: number;
@@ -1199,7 +1508,14 @@ export type CostBreakdown = {
   supply: number;
   net: number;
   peakKwh: number;
+  shoulderKwh: number;
   offPeakKwh: number;
+  /** Cost per band, accumulated at each day's own rates — so these stay correct
+   *  across a cycle that straddles a plan change, where kWh x today's rate
+   *  would not. Always prefer these over multiplying volumes by a rate. */
+  peakCost: number;
+  shoulderCost: number;
+  offPeakCost: number;
   importKwh: number;
   exportKwh: number;
   days: number;
@@ -1220,11 +1536,12 @@ export type CostBreakdown = {
  * at midnight — treating a multi-day series as one sequence would discard
  * each day's opening block and mis-handle the reset.
  *
- * Each block is split across peak/off-peak in proportion to the time it
- * covers, so a block straddling 15:00 (or spanning a collector outage) is
- * priced sensibly instead of being dumped entirely into one rate.
+ * Each block is split across the price bands in proportion to the time it
+ * covers, so a block straddling a band boundary (or spanning a collector
+ * outage) is priced sensibly instead of being dumped entirely into one rate.
+ * Bands and rates come from whatever plan was in force on that day.
  */
-export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
+export function computeCost(readings: Reading[], at: TariffAt): CostBreakdown {
   const byDate = new Map<string, Reading[]>();
   for (const r of readings) {
     const arr = byDate.get(r.local_date);
@@ -1233,12 +1550,33 @@ export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
   }
 
   let peakKwh = 0;
+  let shoulderKwh = 0;
   let offPeakKwh = 0;
+  let peakCost = 0;
+  let shoulderCost = 0;
+  let offPeakCost = 0;
   let importKwh = 0;
   let exportKwh = 0;
+  let exportCredit = 0;
+  let supply = 0;
   let hasGaps = false;
 
-  for (const rows of byDate.values()) {
+  for (const [date, rows] of byDate) {
+    const t = at(date);
+    supply += t.supplyPerDay;
+
+    /** Bucket one block of import into the bands the window covers. */
+    const price = (deltaKwh: number, fromMin: number, toMin: number) => {
+      const f = bandFractions(fromMin, toMin, t);
+      peakKwh += deltaKwh * f.peak;
+      shoulderKwh += deltaKwh * f.shoulder;
+      offPeakKwh += deltaKwh * f.offPeak;
+      peakCost += deltaKwh * f.peak * t.peakRate;
+      shoulderCost += deltaKwh * f.shoulder * t.shoulderRate;
+      offPeakCost += deltaKwh * f.offPeak * t.offPeakRate;
+      importKwh += deltaKwh;
+    };
+
     const impAll = rows
       .filter((r) => r.grid_import_kwh_today != null)
       .sort((a, b) => a.ts - b.ts);
@@ -1265,10 +1603,7 @@ export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
       const firstKwh = first.grid_import_kwh_today ?? 0;
       const firstMin = minutesOfDay(first.local_time);
       if (firstKwh > 0) {
-        const frac = peakFraction(0, firstMin, t);
-        peakKwh += firstKwh * frac;
-        offPeakKwh += firstKwh * (1 - frac);
-        importKwh += firstKwh;
+        price(firstKwh, 0, firstMin);
         if (firstMin > 20) hasGaps = true;
       }
       // deltas between consecutive readings
@@ -1281,10 +1616,7 @@ export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
         const b = minutesOfDay(imp[i].local_time);
         if (b - a > 20) hasGaps = true;
         if (delta === 0) continue;
-        const frac = peakFraction(a, b, t);
-        peakKwh += delta * frac;
-        offPeakKwh += delta * (1 - frac);
-        importKwh += delta;
+        price(delta, a, b);
       }
     }
 
@@ -1294,22 +1626,24 @@ export function computeCost(readings: Reading[], t: Tariff): CostBreakdown {
     let maxExp = 0;
     for (const r of dayRows) maxExp = Math.max(maxExp, r.grid_export_kwh_today ?? 0);
     exportKwh += maxExp;
+    exportCredit += maxExp * t.feedIn;
   }
 
-  const importCost = peakKwh * t.peakRate + offPeakKwh * t.offPeakRate;
-  const exportCredit = exportKwh * t.feedIn;
-  const days = byDate.size;
-  const supply = t.supplyPerDay * days; // one supply charge PER DAY in range
+  const importCost = peakCost + shoulderCost + offPeakCost;
   return {
     importCost,
     exportCredit,
     supply,
     net: importCost + supply - exportCredit,
     peakKwh,
+    shoulderKwh,
     offPeakKwh,
+    peakCost,
+    shoulderCost,
+    offPeakCost,
     importKwh,
     exportKwh,
-    days,
+    days: byDate.size,
     hasGaps,
   };
 }

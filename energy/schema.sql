@@ -113,6 +113,13 @@ CREATE INDEX IF NOT EXISTS idx_meter_intervals_date ON meter_intervals (local_da
 -- quantities that appear on the Lumo bill (Peak / Off Peak / Solar). Kept
 -- alongside the intervals so a bill can be reconciled against it directly
 -- without re-deriving the peak window. Cycle runs the 18th → 17th.
+--
+-- NOTE (2026-08-31): these two columns are Lumo's TWO-band billing view. The
+-- account moved to 1st Energy "1st Emerald" on 2026-08-31, which bills THREE
+-- bands (Peak / Shoulder / Off Peak). Whether the myEnergy basic export starts
+-- reporting a shoulder column is unknown, so the dashboard derives the shoulder
+-- split from meter_intervals rather than from here. Rows already in this table
+-- stay valid: they are historical Lumo bills and are never repriced.
 CREATE TABLE IF NOT EXISTS meter_billing_periods (
   from_date   TEXT NOT NULL,      -- 'YYYY-MM-DD' inclusive
   to_date     TEXT NOT NULL,      -- 'YYYY-MM-DD' inclusive
@@ -121,6 +128,23 @@ CREATE TABLE IF NOT EXISTS meter_billing_periods (
   solar_kwh   REAL,               -- billed Solar export (feed-in)
   PRIMARY KEY (from_date, to_date)
 );
+
+
+-- ---------------------------------------------------------------------------
+-- RETAILER / TARIFF HISTORY (electricity)
+--
+-- Rates are NOT stored in the database — they live as dated eras in
+-- src/lib/energy.ts (TARIFF_ERAS), because every figure has to be repriced at
+-- whatever plan was in force on that day:
+--
+--   ...  -> 2026-07-19   Lumo "Time of Use v2"        peak 3pm-9pm
+--   2026-07-20 -> 08-30  Lumo "Time of Use v3"        peak 4pm-9pm, smart rate
+--                                                     11am-4pm priced as off-peak
+--   2026-08-31 -> ...    1st Energy "1st Emerald"     3 bands, FIT 3.3c -> 0.5c
+--
+-- The KV-backed settings form overrides the CURRENT era only, so editing rates
+-- can never rewrite a past bill.
+-- ---------------------------------------------------------------------------
 
 
 -- ---------------------------------------------------------------------------

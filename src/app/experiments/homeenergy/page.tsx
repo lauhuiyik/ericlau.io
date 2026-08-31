@@ -20,8 +20,8 @@ import {
   getReadingsForDate,
   getReadingsInRange,
   getSourceFreshness,
-  getTariff,
-  type Tariff,
+  getTariffAt,
+  tariffLabelsInRange,
   isFutureLocalDate,
   melbNow,
   rangeWindow,
@@ -216,7 +216,7 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 /** "This billing period" — the rehauled billing view. Cycle-based (18th→17th),
  * grounded in the meter, with the car split out as the bill-payer's own so the
  * rest divides among housemates. */
-function BillingCard({ bill, tariff }: { bill: BillSplit; tariff: Tariff }) {
+function BillingCard({ bill, plans }: { bill: BillSplit; plans: string[] }) {
   const b = bill;
   if (b.daysCovered === 0) {
     return (
@@ -263,14 +263,28 @@ function BillingCard({ bill, tariff }: { bill: BillSplit; tariff: Tariff }) {
           <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted">
             {b.complete ? "Bill, itemised" : "Cost so far, itemised"}
           </div>
+          {/* Named because a cycle can straddle a retailer switch, in which case
+              each day was priced at whichever plan was in force that day. */}
+          <div className="mb-2 text-[10px] normal-case tracking-normal text-muted">
+            {plans.join(" → ")}
+          </div>
+          {/* Costs come off the breakdown, never kWh x a rate: a cycle can span
+              a retailer switch, and each day was priced at its own plan. */}
           <CostLine
-            label={`Peak · ${kwh(b.soFar.peakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
-            value={money(b.soFar.peakKwh * tariff.peakRate)}
+            label={`Peak · ${kwh(b.soFar.peakKwh)} kWh`}
+            value={money(b.soFar.peakCost)}
             color={C.grid}
           />
+          {b.soFar.shoulderKwh > 0.005 && (
+            <CostLine
+              label={`Shoulder · ${kwh(b.soFar.shoulderKwh)} kWh`}
+              value={money(b.soFar.shoulderCost)}
+              color={C.grid}
+            />
+          )}
           <CostLine
-            label={`Off-peak · ${kwh(b.soFar.offPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
-            value={money(b.soFar.offPeakKwh * tariff.offPeakRate)}
+            label={`Off-peak · ${kwh(b.soFar.offPeakKwh)} kWh`}
+            value={money(b.soFar.offPeakCost)}
             color={C.grid}
           />
           <CostLine label={`Supply · ${b.soFar.days} days`} value={money(b.soFar.supply)} />
@@ -336,12 +350,19 @@ function BillingCard({ bill, tariff }: { bill: BillSplit; tariff: Tariff }) {
         </div>
         <div className="flex flex-col gap-1.5 font-mono text-[11px] text-muted">
           <CostLine
-            label={`Peak · ${kwh(car.gridPeakKwh)} kWh @ $${tariff.peakRate.toFixed(3)}`}
+            label={`Peak · ${kwh(car.gridPeakKwh)} kWh`}
             value={money(car.gridPeakCost)}
             color={C.charge}
           />
+          {car.gridShoulderKwh > 0.005 && (
+            <CostLine
+              label={`Shoulder · ${kwh(car.gridShoulderKwh)} kWh`}
+              value={money(car.gridShoulderCost)}
+              color={C.charge}
+            />
+          )}
           <CostLine
-            label={`Off-peak · ${kwh(car.gridOffPeakKwh)} kWh @ $${tariff.offPeakRate.toFixed(5)}`}
+            label={`Off-peak · ${kwh(car.gridOffPeakKwh)} kWh`}
             value={money(car.gridOffPeakCost)}
             color={C.charge}
           />
@@ -442,7 +463,10 @@ export default async function Page({
   // below) is on week/month — so this "now" data is always fetched.
   const weather = await getWeatherNow();
   const freshness = await getSourceFreshness(env.DB);
-  const tariff = await getTariff(env.ENERGY_KV);
+  // Prices any given date at whatever plan was in force on that date, so
+  // switching retailers never reprices history — see TARIFF_ERAS in
+  // lib/energy.ts. Picks up the current-plan rate override from KV.
+  const tariffAt = await getTariffAt(env.ENERGY_KV);
 
   const daySeries = range === "day" ? await getReadingsForDate(env.DB, date) : [];
   const sessions = range === "day" ? await getChargeSessionsForDate(env.DB, date) : [];
@@ -516,14 +540,14 @@ export default async function Page({
     grid: (latestGlobal?.grid_import_kw ?? 0) - (latestGlobal?.grid_export_kw ?? 0),
   };
 
-  const cost = computeCost(costSeries, tariff);
+  const cost = computeCost(costSeries, tariffAt);
 
   // The balance strip is always "right now + today", independent of the
   // range picker below (which only scopes the chart and the stats under it).
   const todayReadings = await getReadingsForDate(env.DB, today);
   const todayTeslaSamples = await getTeslaStateForDate(env.DB, today);
   const todayDaily = (await getDailyTotals(env.DB, today, today))[0] ?? null;
-  const todayCost = computeCost(todayReadings, tariff);
+  const todayCost = computeCost(todayReadings, tariffAt);
   const todayGenerated = todayDaily?.generatedKwh ?? 0;
   const todayConsumed = todayDaily?.consumedKwh ?? 0;
   const todayCharge = chargedKwhFromSamples(todayTeslaSamples);
@@ -546,9 +570,9 @@ export default async function Page({
   const selIdx = foundIdx >= 0 ? foundIdx : defaultIdx;
   const sel = cycleList[selIdx];
   const cycle = { start: sel.start, end: sel.end, lengthDays: sel.lengthDays };
-  const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, cycle.end, tariff);
-  const teslaCycle = await getTeslaCycleGridCost(env.DB, cycle.start, cycle.end, tariff);
-  const bill = computeBillSplit(cycle, meterDaily, teslaCycle, tariff, HOUSEMATES);
+  const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, cycle.end, tariffAt);
+  const teslaCycle = await getTeslaCycleGridCost(env.DB, cycle.start, cycle.end, tariffAt);
+  const bill = computeBillSplit(cycle, meterDaily, teslaCycle, tariffAt, HOUSEMATES);
 
   const mkCycleHref = (c: string) => `?range=${range}&date=${date}&cycle=${c}`;
   const prevHref = selIdx > 0 ? mkCycleHref(cycleList[selIdx - 1].start) : null;
@@ -763,9 +787,15 @@ export default async function Page({
                   label="Grid"
                   nowKw={balNow.grid}
                   todayKwh={todayCost.importKwh - todayCost.exportKwh}
-                  detail={`peak ${kwh(todayCost.peakKwh)} ${money(
-                    todayCost.peakKwh * tariff.peakRate,
-                  )} · off-pk ${kwh(todayCost.offPeakKwh)} ${money(todayCost.offPeakKwh * tariff.offPeakRate)}`}
+                  detail={[
+                    `peak ${kwh(todayCost.peakKwh)} ${money(todayCost.peakCost)}`,
+                    todayCost.shoulderKwh > 0.005
+                      ? `shldr ${kwh(todayCost.shoulderKwh)} ${money(todayCost.shoulderCost)}`
+                      : "",
+                    `off-pk ${kwh(todayCost.offPeakKwh)} ${money(todayCost.offPeakCost)}`,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                   color={balNow.grid < 0 ? C.export : C.grid}
                 />
               </div>
@@ -822,7 +852,7 @@ export default async function Page({
                   </span>
                   <span className="ml-auto normal-case tracking-normal text-muted">{rangeLabel} · kW</span>
                 </div>
-                <LiveChartDay series={daySeries} tariff={tariff} sessions={sessions} teslaSamples={teslaSamples} />
+                <LiveChartDay series={daySeries} tariff={tariffAt(date)} sessions={sessions} teslaSamples={teslaSamples} />
                 {sessions.length === 0 && teslaSamples.length === 0 && (
                   <p className="mt-4 text-xs text-muted max-w-2xl">
                     No Tesla charging recorded for this day, so the red line sits at zero.
@@ -834,7 +864,7 @@ export default async function Page({
             )}
             <div className="grid grid-cols-3 gap-x-4 sm:gap-x-8 mt-8">
               <Stat label="Grid-powered" value={pct(gridShare)} sub="of consumption" />
-              <Stat label="Peak-window grid" value={kwh(cost.peakKwh)} sub={`kWh @ $${tariff.peakRate.toFixed(3)}`} />
+              <Stat label="Peak-window grid" value={kwh(cost.peakKwh)} sub={`kWh · ${money(cost.peakCost)}`} />
               <Stat label="Tesla charged" value={`${kwh(homeChargeKwh)} kWh`} sub="at home, this period" />
             </div>
           </section>
@@ -851,7 +881,7 @@ export default async function Page({
               </div>
               <CycleNav label={cycleLabel} prevHref={prevHref} nextHref={nextHref} />
             </div>
-            <BillingCard bill={bill} tariff={tariff} />
+            <BillingCard bill={bill} plans={tariffLabelsInRange(cycle.start, cycle.end, tariffAt)} />
           </section>
 
           {/* Two solar arrays, side by side, each with its own live output */}

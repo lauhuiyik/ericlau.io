@@ -4,7 +4,7 @@ D1 tables — the billing-grade source of truth for the energy dashboard.
 
 Two myEnergy exports are supported (pass either or both):
   *_interval.csv  30-min consumption/generation rows (-> meter_intervals)
-  *_basic.csv     billed Peak/Off Peak/Solar period totals (-> meter_billing_periods)
+  *_basic.csv     billed Peak/Shoulder/Off Peak/Solar period totals (-> meter_billing_periods)
 
 Streams: 'consumption' -> import (register E1), 'generation' -> export (B1).
 Dates in the exports are dd/mm/yyyy; stored as YYYY-MM-DD (Australia/Melbourne).
@@ -84,13 +84,26 @@ def read_intervals(path: Path) -> list[dict]:
 def read_periods(path: Path) -> list[dict]:
     # basic.csv is long-form (one row per tariff); pivot to one row per period.
     periods: dict[tuple[str, str], dict] = {}
-    key_for = {"peak": "peak_kwh", "off peak": "offpeak_kwh", "solar": "solar_kwh"}
+    key_for = {
+        "peak": "peak_kwh",
+        "shoulder": "shoulder_kwh",
+        "solar soak": "shoulder_kwh",  # 1st Energy's name for its shoulder band
+        "off peak": "offpeak_kwh",
+        "solar": "solar_kwh",
+    }
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             fr, to = _date(row["from_date"]), _date(row["to_date"])
             p = periods.setdefault(
                 (fr, to),
-                {"from_date": fr, "to_date": to, "peak_kwh": None, "offpeak_kwh": None, "solar_kwh": None},
+                {
+                    "from_date": fr,
+                    "to_date": to,
+                    "peak_kwh": None,
+                    "shoulder_kwh": None,
+                    "offpeak_kwh": None,
+                    "solar_kwh": None,
+                },
             )
             col = key_for.get(row["tariff_description"].strip().lower())
             if col:
@@ -125,9 +138,10 @@ def emit_sql(intervals: list[dict], periods: list[dict], out: Path) -> None:
     for p in periods:
         lines.append(
             "INSERT OR REPLACE INTO meter_billing_periods "
-            "(from_date,to_date,peak_kwh,offpeak_kwh,solar_kwh) VALUES "
+            "(from_date,to_date,peak_kwh,shoulder_kwh,offpeak_kwh,solar_kwh) VALUES "
             f"({_sql_lit(p['from_date'])},{_sql_lit(p['to_date'])},"
-            f"{p['peak_kwh']},{p['offpeak_kwh']},{p['solar_kwh']});"
+            f"{_sql_lit(p['peak_kwh'])},{_sql_lit(p['shoulder_kwh'])},"
+            f"{_sql_lit(p['offpeak_kwh'])},{_sql_lit(p['solar_kwh'])});"
         )
     out.write_text("\n".join(lines))
     print(f"wrote {out} ({len(intervals)} intervals, {len(periods)} periods)")

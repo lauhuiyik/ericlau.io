@@ -99,26 +99,12 @@ const LUMO_TOU_V3: Tariff = {
  * 1st Energy "1st Emerald" TOU, signed 2026-08-31 (EPAS account 543520, fact
  * sheet 1ST787449MR). Rates are GST-inclusive as printed; the feed-in is GST-free.
  *
- * !! UNRESOLVED: the band WINDOWS have two conflicting sources. The rates
- * themselves are not in doubt — EPAS and fact sheet agree exactly.
- *
- *   FACTSHEET (used here): shoulder 7am-4pm and 9pm-10pm, off-peak 10pm-7am.
- *   WEBSITE (1stenergy.com.au/tou-timings, VIC residential): shoulder/solar-soak
- *   11am-4pm, off-peak 9pm-11am.
- *
- * On this house's measured 12 months the two differ by ~$103/yr ($2,406 vs
- * $2,509), because the fact-sheet reading puts the big 7-9am and 9-10pm import
- * blocks in the CHEAP shoulder band rather than off-peak. Swap
- * EMERALD_WINDOWS_WEBSITE in below if the first 1st Energy invoice disagrees.
+ * Windows CONFIRMED by the first invoice (202610/4607234, 2 Sep - 3 Oct 2026):
+ * peak 4pm-9pm, "Solar Soak" (shoulder) 11am-4pm, off-peak 9pm-11am — i.e. the
+ * retailer's tou-timings page, not the fact sheet's shoulder 7am-4pm + 9pm-10pm.
+ * The invoice's rates match these to the cent.
  */
-const EMERALD_WINDOWS_FACTSHEET: TariffWindow[] = [
-  { band: "peak", startHour: 16, endHour: 21 },
-  { band: "shoulder", startHour: 7, endHour: 16 },
-  { band: "shoulder", startHour: 21, endHour: 22 },
-];
-
-/** The retailer's public timings page. Kept so the alternative is one edit away. */
-export const EMERALD_WINDOWS_WEBSITE: TariffWindow[] = [
+const EMERALD_WINDOWS: TariffWindow[] = [
   { band: "peak", startHour: 16, endHour: 21 },
   { band: "shoulder", startHour: 11, endHour: 16 },
 ];
@@ -130,16 +116,16 @@ const FIRST_EMERALD: Tariff = {
   offPeakRate: 0.1705,
   supplyPerDay: 1.0483,
   feedIn: 0.005,
-  windows: EMERALD_WINDOWS_FACTSHEET,
+  windows: EMERALD_WINDOWS,
 };
 
 /**
- * When 1st Emerald starts pricing. This is the EPAS "Agreement Start Date"; the
- * actual retailer transfer may complete a little later, in which case the first
- * 1st Energy invoice will show the true start and this should be corrected to it.
+ * When 1st Emerald starts pricing: the first day of the first 1st Energy invoice
+ * (202610/4607234). The EPAS agreement started 2026-08-31 but the transfer took
+ * until 2 Sep, so 31 Aug and 1 Sep were still billed by Lumo.
  * Days before this date keep their Lumo rates, permanently.
  */
-export const FIRST_ENERGY_FROM = "2026-08-31";
+export const FIRST_ENERGY_FROM = "2026-09-02";
 
 /** ToU v3 took effect on this date — peak window moved 3pm -> 4pm. */
 export const V3_PEAK_FROM = "2026-07-20";
@@ -196,47 +182,17 @@ function clampNum(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : fallback;
 }
 
-function clampHour(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? Math.min(24, Math.max(0, Math.round(v))) : fallback;
-}
-
 /**
  * Coerce whatever is in KV into a usable current-era tariff.
  *
- * Tolerates the OLD two-band shape ({peakRate, offPeakRate, peakStartHour,
- * peakEndHour}) that KV may still hold from before the 1st Energy switch, so a
- * stale value degrades to sensible windows instead of throwing.
+ * Only RATES are taken from KV. Windows always come from the plan definition:
+ * they belong to the plan, the form can't edit them, and a saved copy would
+ * otherwise pin stale windows (the fact-sheet reading the first invoice
+ * disproved, or the old two-band peakStartHour/peakEndHour shape) over a fix.
  */
 export function normalizeTariff(input: Partial<Tariff> | null | undefined): Tariff {
-  const raw = (input ?? {}) as Partial<Tariff> & {
-    peakStartHour?: number;
-    peakEndHour?: number;
-  };
+  const raw = input ?? {};
   const base = DEFAULT_TARIFF;
-
-  let windows: TariffWindow[];
-  if (Array.isArray(raw.windows) && raw.windows.length > 0) {
-    windows = raw.windows
-      .filter((w) => w && (w.band === "peak" || w.band === "shoulder"))
-      .map((w) => ({
-        band: w.band,
-        startHour: clampHour(w.startHour, 0),
-        endHour: clampHour(w.endHour, 0),
-      }))
-      .filter((w) => w.startHour !== w.endHour);
-    if (windows.length === 0) windows = base.windows;
-  } else if (typeof raw.peakStartHour === "number" && typeof raw.peakEndHour === "number") {
-    // legacy two-band value
-    windows = [
-      {
-        band: "peak",
-        startHour: clampHour(raw.peakStartHour, 16),
-        endHour: clampHour(raw.peakEndHour, 21),
-      },
-    ];
-  } else {
-    windows = base.windows;
-  }
 
   return {
     label: typeof raw.label === "string" && raw.label ? raw.label : base.label,
@@ -245,7 +201,7 @@ export function normalizeTariff(input: Partial<Tariff> | null | undefined): Tari
     offPeakRate: clampNum(raw.offPeakRate, base.offPeakRate),
     supplyPerDay: clampNum(raw.supplyPerDay, base.supplyPerDay),
     feedIn: clampNum(raw.feedIn, base.feedIn),
-    windows,
+    windows: base.windows,
   };
 }
 
@@ -440,38 +396,55 @@ export type Cycle = { start: string; end: string; lengthDays: number; billed: bo
  * Lumo's read dates are NOT a rigid 18th→17th — they drift a day or two (a bill
  * ran 32 days, the next 29), which put a day's usage in the wrong cycle when the
  * dashboard assumed a fixed anchor. So past cycles use the ACTUAL invoice
- * boundaries recorded in meter_billing_periods; cycles after the last invoice
- * fall back to an estimated 18→17 rolling forward, until they cover `today`.
+ * boundaries recorded in meter_billing_periods. Anything not covered by an
+ * invoice — a gap between two (e.g. Lumo's final bills, before the 1st Energy
+ * switch), or the stretch after the last one up to `today` — is filled with
+ * estimated ~monthly cycles, cut short where the next invoice begins.
  */
 export function buildCycleList(
   billedPeriods: { fromDate: string; toDate: string }[],
   today: string,
 ): Cycle[] {
   const sorted = [...billedPeriods].sort((a, b) => a.fromDate.localeCompare(b.fromDate));
-  const cycles: Cycle[] = sorted.map((p) => ({
-    start: p.fromDate,
-    end: p.toDate,
-    lengthDays: daysInclusive(p.fromDate, p.toDate),
-    billed: true,
-  }));
+  const cycles: Cycle[] = [];
 
-  // Estimated tail: continue from the day after the last invoice, in ~monthly
-  // steps, until the current date is covered.
-  let start = cycles.length ? shiftDate(cycles[cycles.length - 1].end, 1) : currentBillingCycle(today).start;
-  for (let guard = 0; start <= today && guard < 24; guard++) {
-    const [y, m, d] = start.split("-").map(Number);
-    let ny = y;
-    let nm = m + 1;
-    if (nm > 12) {
-      nm = 1;
-      ny += 1;
+  // Estimated cycles from `start`, one calendar month (minus a day) each, while
+  // start <= `until`; with `clip`, the last one ends no later than `until`.
+  const pushEstimated = (start: string, until: string, clip: boolean) => {
+    for (let guard = 0; start <= until && guard < 24; guard++) {
+      const [y, m, d] = start.split("-").map(Number);
+      let ny = y;
+      let nm = m + 1;
+      if (nm > 12) {
+        nm = 1;
+        ny += 1;
+      }
+      const pad = (n: number) => String(n).padStart(2, "0");
+      // one calendar month on, minus a day — clamps naturally via shiftDate math
+      let end = shiftDate(`${ny}-${pad(nm)}-${pad(d)}`, -1);
+      if (clip && end > until) end = until;
+      cycles.push({ start, end, lengthDays: daysInclusive(start, end), billed: false });
+      start = shiftDate(end, 1);
     }
-    const pad = (n: number) => String(n).padStart(2, "0");
-    // one calendar month on, minus a day — clamps naturally via shiftDate math
-    const end = shiftDate(`${ny}-${pad(nm)}-${pad(d)}`, -1);
-    cycles.push({ start, end, lengthDays: daysInclusive(start, end), billed: false });
-    start = shiftDate(end, 1);
+  };
+
+  for (const p of sorted) {
+    if (cycles.length) pushEstimated(shiftDate(cycles[cycles.length - 1].end, 1), shiftDate(p.fromDate, -1), true);
+    cycles.push({
+      start: p.fromDate,
+      end: p.toDate,
+      lengthDays: daysInclusive(p.fromDate, p.toDate),
+      billed: true,
+    });
   }
+
+  // Estimated tail: continue from the day after the last invoice until the
+  // current date is covered.
+  pushEstimated(
+    cycles.length ? shiftDate(cycles[cycles.length - 1].end, 1) : currentBillingCycle(today).start,
+    today,
+    false,
+  );
   return cycles;
 }
 
@@ -727,23 +700,24 @@ export type MeterBillingPeriod = {
   fromDate: string;
   toDate: string;
   peakKwh: number;
+  shoulderKwh: number;
   offPeakKwh: number;
   solarKwh: number;
   importKwh: number;
 };
 
-/** Billed period totals exactly as they appear on the bill (18th → 17th cycle),
- *  newest first. */
+/** Billed period totals exactly as they appear on the bill, newest first. */
 export async function getMeterBillingPeriods(db: D1Database): Promise<MeterBillingPeriod[]> {
   const res = await db
     .prepare(
-      `SELECT from_date, to_date, peak_kwh, offpeak_kwh, solar_kwh
+      `SELECT from_date, to_date, peak_kwh, shoulder_kwh, offpeak_kwh, solar_kwh
        FROM meter_billing_periods ORDER BY from_date DESC`,
     )
     .all<{
       from_date: string;
       to_date: string;
       peak_kwh: number | null;
+      shoulder_kwh: number | null;
       offpeak_kwh: number | null;
       solar_kwh: number | null;
     }>();
@@ -751,9 +725,10 @@ export async function getMeterBillingPeriods(db: D1Database): Promise<MeterBilli
     fromDate: r.from_date,
     toDate: r.to_date,
     peakKwh: r.peak_kwh ?? 0,
+    shoulderKwh: r.shoulder_kwh ?? 0,
     offPeakKwh: r.offpeak_kwh ?? 0,
     solarKwh: r.solar_kwh ?? 0,
-    importKwh: (r.peak_kwh ?? 0) + (r.offpeak_kwh ?? 0),
+    importKwh: (r.peak_kwh ?? 0) + (r.shoulder_kwh ?? 0) + (r.offpeak_kwh ?? 0),
   }));
 }
 

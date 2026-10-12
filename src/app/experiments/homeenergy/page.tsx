@@ -592,7 +592,18 @@ export default async function Page({
 
   // 12.76 kW across both arrays. Compared against what the current sky can
   // physically support, not against our own other figures.
-  const sky = checkSolarAgainstSky(latestGlobal?.solar_total_kw ?? null, 12.76, weather);
+  // Checked over the last 15 minutes, so a single cloud-edge spike isn't an alarm.
+  const latestSolarTs = latestGlobal?.solar_total_kw != null ? latestGlobal.ts : null;
+  const recentSolar =
+    latestSolarTs == null
+      ? []
+      : todayReadings
+          .filter((r) => r.solar_total_kw != null && r.ts >= latestSolarTs - 15 * 60 && r.ts <= latestSolarTs)
+          .map((r) => ({ ts: r.ts, kw: r.solar_total_kw as number }));
+  if (latestSolarTs != null && recentSolar[recentSolar.length - 1]?.ts !== latestSolarTs) {
+    recentSolar.push({ ts: latestSolarTs, kw: latestGlobal!.solar_total_kw as number });
+  }
+  const sky = checkSolarAgainstSky(recentSolar, 12.76, weather);
 
   // A missing inverter is surfaced per-array in the solar boxes below (each
   // shows its own "last reported" time), rather than as a page-level banner —

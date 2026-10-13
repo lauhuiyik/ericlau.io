@@ -14,6 +14,7 @@ import {
   getTeslaStateForDate,
   getLatestTeslaState,
   getDailyTotals,
+  ensureClampIntervals,
   getMeterDailyTotals,
   getHomeChargeKwhByDate,
   getLatest,
@@ -213,16 +214,17 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
-/** "This billing period" — the rehauled billing view. Cycle-based (18th→17th),
- * grounded in the meter, with the car split out as the bill-payer's own so the
- * rest divides among housemates. */
+/** "This billing period" — cycle-based, snapped to the real invoice boundaries.
+ * Priced from the smart meter where Powercor has exported it and from the house
+ * clamps for the days it hasn't, with the car split out as the bill-payer's own
+ * so the rest divides among housemates. */
 function BillingCard({ bill, plans }: { bill: BillSplit; plans: string[] }) {
   const b = bill;
   if (b.daysCovered === 0) {
     return (
       <p className="text-sm text-muted max-w-2xl">
-        No meter reads for this cycle yet ({b.cycle.start} → {b.cycle.end}). Powercor lands about a
-        day behind, so the first figures appear tomorrow.
+        No completed days in this cycle yet ({b.cycle.start} → {b.cycle.end}). The first figures
+        appear tomorrow, once a full day has been recorded.
       </p>
     );
   }
@@ -230,19 +232,25 @@ function BillingCard({ bill, plans }: { bill: BillSplit; plans: string[] }) {
   const car = b.tesla;
   const carGridKwh = car.gridPeakKwh + car.gridOffPeakKwh;
   const freePct = car.kwh > 0 ? Math.round((car.freeKwh / car.kwh) * 100) : 0;
+  // A cycle priced even partly from the clamps is an estimate, not the invoice.
+  const estimated = b.clampDays > 0;
   // Projected fields equal the actuals once a cycle is complete (factor = 1).
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-col sm:flex-row sm:items-end gap-8 sm:gap-14">
         <div className="flex flex-col gap-1">
           <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-            {b.complete ? "Bill · final" : "Projected bill"}
+            {b.complete ? (estimated ? "Bill · estimated" : "Bill · final") : "Projected bill"}
           </div>
           <div className="text-5xl sm:text-6xl font-semibold tracking-[-0.02em]">
             {money(b.projectedNet)}
           </div>
           <div className="text-sm text-muted">
-            {b.complete ? "metered in full" : `on track · ${pctThrough}% of the cycle so far`}
+            {b.complete
+              ? estimated
+                ? "every day priced · compare with the invoice"
+                : "metered in full"
+              : `on track · ${pctThrough}% of the cycle so far`}
           </div>
         </div>
         {!b.complete && (
@@ -252,7 +260,7 @@ function BillingCard({ bill, plans }: { bill: BillSplit; plans: string[] }) {
             </div>
             <div className="text-3xl font-semibold tracking-[-0.01em]">{money(b.soFar.net)}</div>
             <div className="text-sm text-muted">
-              {b.daysCovered} of {b.lengthDays} days metered
+              {b.daysCovered} of {b.lengthDays} days recorded
             </div>
           </div>
         )}
@@ -314,8 +322,17 @@ function BillingCard({ bill, plans }: { bill: BillSplit; plans: string[] }) {
             <span className="uppercase tracking-[0.18em] text-muted">You pay</span>
             <span className="text-base text-foreground">{money(b.yourShare)}</span>
           </div>
+          <div className="flex justify-between">
+            <span className="uppercase tracking-[0.18em] text-muted">
+              Each other housemate pays
+            </span>
+            <span className="text-base text-foreground">{money(b.perHousemate)}</span>
+          </div>
           <p className="mt-1 text-[10px] normal-case leading-relaxed tracking-normal text-muted/80">
-            Your car&apos;s grid charging is yours alone; the rest splits {b.housemates} ways.
+            Your car&apos;s grid charging is yours alone; the rest splits {b.housemates} ways. You{" "}
+            {money(b.yourShare)} + {b.housemates - 1} × {money(b.perHousemate)} ={" "}
+            {money(b.yourShare + (b.housemates - 1) * b.perHousemate)}, the{" "}
+            {b.complete ? "bill" : "projected bill"}.
           </p>
         </div>
       </div>
@@ -371,17 +388,26 @@ function BillingCard({ bill, plans }: { bill: BillSplit; plans: string[] }) {
 
       <p className="max-w-3xl text-xs text-muted">
         {b.complete ? (
-          <>Final figures from billing-grade meter data for the whole cycle.</>
+          <>
+            {estimated
+              ? `Estimated from ${b.clampDays} day${b.clampDays === 1 ? "" : "s"} of house-clamp readings${b.clampDays < b.daysCovered ? ` and ${b.daysCovered - b.clampDays} of smart-meter data` : ""}; the invoice may differ by a dollar or two.`
+              : "Final figures from billing-grade meter data for the whole cycle."}
+          </>
         ) : (
           <>
-            Projected linearly from {b.daysCovered} day{b.daysCovered === 1 ? "" : "s"} of
-            billing-grade meter data (to {b.lastMeterDate}) across the {b.lengthDays}-day cycle — it
-            tightens as the month fills in.
+            Projected linearly from {b.daysCovered} completed day{b.daysCovered === 1 ? "" : "s"}
+            {b.clampDays > 0
+              ? ` (${b.clampDays} from the house clamps${b.clampDays < b.daysCovered ? `, ${b.daysCovered - b.clampDays} from the smart meter` : ""})`
+              : " of smart-meter data"}{" "}
+            to {b.lastMeterDate}, across the {b.lengthDays}-day cycle — it tightens as the month
+            fills in, and a heavy-use or away stretch will move it.
           </>
         )}{" "}
-        The car&apos;s grid share is attributed from the house meter over each 30-minute charging
-        window (capped at the grid import then, so it&apos;s an upper bound)
-        {car.hadMeterGap ? "; today's charging has no meter read yet and is counted as grid" : ""}.
+        The clamps read within about 1% of the meter: back-tested on the 2 Sep – 3 Oct invoice,
+        they priced it at $184.40 against $185.34 billed. The car&apos;s grid share is attributed
+        over each 30-minute charging window (capped at the grid import then, so it&apos;s an upper
+        bound)
+        {car.hadMeterGap ? "; today's charging has no completed-day data yet and is counted as grid" : ""}.
       </p>
     </div>
   );
@@ -559,7 +585,7 @@ export default async function Page({
       }
     : null;
 
-  // "This billing period" — snaps to the ACTUAL Lumo invoice boundaries (from
+  // "This billing period" — snaps to the ACTUAL invoice boundaries (from
   // meter_billing_periods), since the read dates drift off a rigid 18th→17th.
   // Cycles after the last invoice are estimated. ?cycle=YYYY-MM-DD picks one.
   const HOUSEMATES = 4;
@@ -570,7 +596,8 @@ export default async function Page({
   const selIdx = foundIdx >= 0 ? foundIdx : defaultIdx;
   const sel = cycleList[selIdx];
   const cycle = { start: sel.start, end: sel.end, lengthDays: sel.lengthDays };
-  const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, cycle.end, tariffAt);
+  await ensureClampIntervals(env.DB, cycle.start, cycle.end, today);
+  const meterDaily = await getMeterDailyTotals(env.DB, cycle.start, cycle.end, tariffAt, true);
   const teslaCycle = await getTeslaCycleGridCost(env.DB, cycle.start, cycle.end, tariffAt);
   const bill = computeBillSplit(cycle, meterDaily, teslaCycle, tariffAt, HOUSEMATES);
 
@@ -883,12 +910,12 @@ export default async function Page({
           </>
           )}
 
-          {/* Billing below the usage charts: the current Lumo cycle (18th→17th),
-              split for housemates. Cycle-based, so the range picker doesn't touch it. */}
+          {/* Billing below the usage charts: the current cycle, split for
+              housemates. Cycle-based, so the range picker doesn't touch it. */}
           <section className="border-t border-rule px-6 sm:px-12 py-10">
             <div className="flex items-baseline justify-between gap-4 mb-8 flex-wrap">
               <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                This billing period · Lumo cycle
+                This billing period
               </div>
               <CycleNav label={cycleLabel} prevHref={prevHref} nextHref={nextHref} />
             </div>

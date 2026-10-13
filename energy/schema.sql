@@ -109,6 +109,19 @@ CREATE TABLE IF NOT EXISTS meter_intervals (
 );
 CREATE INDEX IF NOT EXISTS idx_meter_intervals_date ON meter_intervals (local_date);
 
+-- Half-hourly import/export derived from the house CT clamps (the `readings`
+-- counters), same shape as meter_intervals. Fills days the smart meter hasn't
+-- covered yet — Powercor's export is manual and runs weeks behind — so the bill
+-- in progress can be priced and projected. Filled lazily, one completed day at a
+-- time, by ensureClampIntervals(). The meter always wins where it has the day.
+CREATE TABLE IF NOT EXISTS clamp_intervals (
+  local_date     TEXT NOT NULL,   -- 'YYYY-MM-DD'
+  interval_start TEXT NOT NULL,   -- 'HH:MM' (:00 / :30)
+  stream         TEXT NOT NULL,   -- 'import' | 'export'
+  kwh            REAL NOT NULL,
+  PRIMARY KEY (local_date, interval_start, stream)
+);
+
 -- Billed period totals exactly as invoiced (Peak / Shoulder / Off Peak / Solar),
 -- one row per invoice. Lumo rows came from the myEnergy 'basic' export (two
 -- bands, shoulder NULL); 1st Energy rows are entered from the invoice itself.

@@ -578,7 +578,115 @@ export type MeterDailyTotal = {
   exportKwh: number;
   /** false if any interval that day was estimated/substituted rather than metered. */
   actual: boolean;
+  /** true if the day came from the house CT clamps rather than the smart meter. */
+  clamp?: boolean;
 };
+
+/** Spread `kwh` evenly over the 30-minute slots that [fromMin, toMin] covers. */
+function addToSlots(slots: number[], kwh: number, fromMin: number, toMin: number): void {
+  if (!(kwh > 0)) return;
+  const from = Math.max(0, Math.min(1440, fromMin));
+  const to = Math.max(from + 1, Math.min(1440, toMin));
+  const span = to - from;
+  for (let slot = Math.floor(from / 30); slot < 48 && slot * 30 < to; slot++) {
+    const a = Math.max(from, slot * 30);
+    const b = Math.min(to, slot * 30 + 30);
+    if (b > a) slots[slot] += (kwh * (b - a)) / span;
+  }
+}
+
+/**
+ * One day's cumulative-since-midnight counter -> kWh per 30-minute slot.
+ *
+ * Same reconstruction as computeCost: Anker resets its counters a little AFTER
+ * midnight, so everything before the last reset (a drop to under half the
+ * previous value) is the previous day's carryover and is ignored. The block from
+ * midnight to the first reading, and any gap between readings, is spread across
+ * the slots it spans rather than dumped into one.
+ */
+export function cumulativeToSlots(
+  samples: { ts: number; min: number; value: number | null }[],
+): number[] {
+  const slots = new Array<number>(48).fill(0);
+  const pts = samples.filter((x) => x.value != null).sort((a, b) => a.ts - b.ts);
+  let startIdx = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const prev = pts[i - 1].value ?? 0;
+    if (prev > 0 && (pts[i].value ?? 0) < prev * 0.5) startIdx = i;
+  }
+  const use = pts.slice(startIdx);
+  if (use.length === 0) return slots;
+  addToSlots(slots, use[0].value ?? 0, 0, use[0].min);
+  for (let i = 1; i < use.length; i++) {
+    addToSlots(slots, Math.max(0, (use[i].value ?? 0) - (use[i - 1].value ?? 0)), use[i - 1].min, use[i].min);
+  }
+  return slots;
+}
+
+const slotStart = (slot: number) =>
+  `${String(Math.floor(slot / 2)).padStart(2, "0")}:${slot % 2 ? "30" : "00"}`;
+
+/** A day needs at least this many readings before its clamp totals are trusted. */
+const MIN_CLAMP_READINGS = 200;
+/** Days filled per page load, so a long backlog can't blow the subrequest budget. */
+const CLAMP_FILL_PER_LOAD = 3;
+
+/**
+ * Make sure every COMPLETED day in [start, end] that the smart meter doesn't
+ * cover has its clamp-derived half-hourly import/export in `clamp_intervals`.
+ *
+ * Powercor's myEnergy export is manual, so the meter runs weeks behind. The
+ * clamps are within ~1% of it (2 Sep - 3 Oct: clamp-priced $184.40 vs $185.34
+ * billed), so they price the bill in progress. Filled once per day, then read as
+ * ~96 rows a day instead of re-reading ~1,100 readings on every refresh. Today is
+ * never filled: its counters are still moving.
+ */
+export async function ensureClampIntervals(
+  db: D1Database,
+  start: string,
+  end: string,
+  today: string,
+): Promise<void> {
+  const last = shiftDate(today, -1) < end ? shiftDate(today, -1) : end;
+  if (start > last) return;
+  const have = await db
+    .prepare(
+      `SELECT DISTINCT local_date FROM meter_intervals WHERE local_date BETWEEN ?1 AND ?2
+       UNION SELECT DISTINCT local_date FROM clamp_intervals WHERE local_date BETWEEN ?1 AND ?2`,
+    )
+    .bind(start, last)
+    .all<{ local_date: string }>();
+  const haveSet = new Set((have.results ?? []).map((x) => x.local_date));
+  const missing: string[] = [];
+  for (let d = start; d <= last; d = shiftDate(d, 1)) if (!haveSet.has(d)) missing.push(d);
+
+  for (const date of missing.slice(0, CLAMP_FILL_PER_LOAD)) {
+    const res = await db
+      .prepare(
+        `SELECT ts, local_time, grid_import_kwh_today i, grid_export_kwh_today e
+         FROM readings WHERE local_date = ? ORDER BY ts`,
+      )
+      .bind(date)
+      .all<{ ts: number; local_time: string; i: number | null; e: number | null }>();
+    const rows = res.results ?? [];
+    if (rows.length < MIN_CLAMP_READINGS) continue;
+    const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+    const imp = cumulativeToSlots(rows.map((x) => ({ ts: x.ts, min: mins(x.local_time), value: x.i })));
+    const exp = cumulativeToSlots(rows.map((x) => ({ ts: x.ts, min: mins(x.local_time), value: x.e })));
+    const tuples = (stream: string, slots: number[]) =>
+      slots
+        .map((k, n) => `('${date}','${slotStart(n)}','${stream}',${k.toFixed(4)})`)
+        .join(",");
+    await db.batch([
+      db.prepare(
+        `INSERT OR REPLACE INTO clamp_intervals (local_date, interval_start, stream, kwh) VALUES ${tuples("import", imp)}`,
+      ),
+      db.prepare(
+        `INSERT OR REPLACE INTO clamp_intervals (local_date, interval_start, stream, kwh) VALUES ${tuples("export", exp)}`,
+      ),
+    ]);
+  }
+}
 
 /**
  * Daily import/export totals from the meter, with import split across the price
@@ -599,7 +707,15 @@ export async function getMeterDailyTotals(
   start: string,
   end: string,
   at: TariffAt = tariffResolver(),
+  clampFallback = false,
 ): Promise<MeterDailyTotal[]> {
+  type IntervalRow = {
+    local_date: string;
+    interval_start: string;
+    stream: string;
+    kwh: number;
+    quality: string | null;
+  };
   const res = await db
     .prepare(
       `SELECT local_date, interval_start, stream, kwh, quality
@@ -608,16 +724,32 @@ export async function getMeterDailyTotals(
        ORDER BY local_date ASC, interval_start ASC`,
     )
     .bind(start, end)
-    .all<{
-      local_date: string;
-      interval_start: string;
-      stream: string;
-      kwh: number;
-      quality: string | null;
-    }>();
+    .all<IntervalRow>();
+  const rows: IntervalRow[] = res.results ?? [];
+
+  // Days Powercor hasn't exported yet are filled from the CT clamps, so the cycle
+  // in progress can still be priced. The meter always wins where it has the day.
+  const clampDates = new Set<string>();
+  if (clampFallback) {
+    const meterDates = new Set(rows.map((x) => x.local_date));
+    const cl = await db
+      .prepare(
+        `SELECT local_date, interval_start, stream, kwh
+         FROM clamp_intervals
+         WHERE local_date BETWEEN ? AND ?
+         ORDER BY local_date ASC, interval_start ASC`,
+      )
+      .bind(start, end)
+      .all<Omit<IntervalRow, "quality">>();
+    for (const x of cl.results ?? []) {
+      if (meterDates.has(x.local_date)) continue;
+      clampDates.add(x.local_date);
+      rows.push({ ...x, quality: "Clamp" });
+    }
+  }
 
   const byDate = new Map<string, MeterDailyTotal>();
-  for (const r of res.results ?? []) {
+  for (const r of rows) {
     let d = byDate.get(r.local_date);
     if (!d) {
       d = {
@@ -628,6 +760,7 @@ export async function getMeterDailyTotals(
         importOffPeakKwh: 0,
         exportKwh: 0,
         actual: true,
+        clamp: clampDates.has(r.local_date),
       };
       byDate.set(r.local_date, d);
     }
@@ -793,8 +926,8 @@ const slotLabel = (time: string) =>
 
 /**
  * The car's home charging over [start,end], attributed to grid vs solar using
- * the METER (billing-grade), so it's accurate for any historic cycle — not just
- * the recent days the Anker clamps cover. For each 30-minute interval the car's
+ * the METER (billing-grade) where Powercor has exported it, and the CT clamps'
+ * 30-minute import for the days it hasn't. For each 30-minute interval the car's
  * grid draw is capped at the whole-home grid import then (min): if the house
  * wasn't importing, the car ran on solar/battery and cost nothing; the rest is
  * priced at that interval's tariff window. An upper bound (other loads compete
@@ -817,7 +950,21 @@ export async function getTeslaCycleGridCost(
     .bind(start, end)
     .all<{ local_date: string; interval_start: string; kwh: number }>();
   const imp = new Map<string, number>();
-  for (const r of meter.results ?? []) imp.set(`${r.local_date} ${r.interval_start}`, r.kwh);
+  const meterDates = new Set<string>();
+  for (const r of meter.results ?? []) {
+    imp.set(`${r.local_date} ${r.interval_start}`, r.kwh);
+    meterDates.add(r.local_date);
+  }
+  // Dates the meter hasn't covered yet use the CT clamps' 30-minute import instead.
+  const clampImp = await db
+    .prepare(
+      "SELECT local_date, interval_start, kwh FROM clamp_intervals WHERE stream='import' AND local_date BETWEEN ? AND ?",
+    )
+    .bind(start, end)
+    .all<{ local_date: string; interval_start: string; kwh: number }>();
+  for (const r of clampImp.results ?? []) {
+    if (!meterDates.has(r.local_date)) imp.set(`${r.local_date} ${r.interval_start}`, r.kwh);
+  }
 
   // car kWh per interval
   const car = new Map<string, number>();
@@ -923,6 +1070,7 @@ export type BillSplit = {
   daysCovered: number; // days of the cycle the meter has data for
   lengthDays: number;
   lastMeterDate: string | null;
+  clampDays: number; // of daysCovered, how many came from the CT clamps (meter not exported yet)
   complete: boolean; // meter covers the whole cycle (a past bill), so no projection
   soFar: CostBreakdown; // billing-grade cost for the covered days
   projectedNet: number; // linear projection to the full cycle
@@ -965,6 +1113,7 @@ export function computeBillSplit(
     daysCovered,
     lengthDays: cycle.lengthDays,
     lastMeterDate,
+    clampDays: meterDaily.filter((d) => d.clamp).length,
     complete,
     soFar,
     projectedNet,

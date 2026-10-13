@@ -52,3 +52,10 @@ worker-configuration.d.ts
 # python
 __pycache__/
 *.pyc
+
+# Personal finance data never belongs in this public repo. These catch the
+# usual names: the finance page's backups (finance-backup-*.json), the
+# imported profile and the analysis exports. Keep bank CSVs outside the repo.
+finance-*.json
+finance-*.csv
+finance-*.md

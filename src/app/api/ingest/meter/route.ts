@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 
 // Powercor smart-meter import from the myEnergy CSV exports. `intervals` come
 // from the 'interval' export (30-min consumption/generation), `periods` from the
-// 'basic' export (billed Peak/Off Peak/Solar totals). Both upsert by primary key
+// 'basic' export (billed Peak/Shoulder/Off Peak/Solar totals). Both upsert by primary key
 // so re-running an import — including overlapping date ranges — is idempotent.
 type Interval = {
   local_date: string;
@@ -17,6 +17,7 @@ type Period = {
   from_date: string;
   to_date: string;
   peak_kwh: number | null;
+  shoulder_kwh?: number | null;
   offpeak_kwh: number | null;
   solar_kwh: number | null;
 };
@@ -58,11 +59,13 @@ export async function POST(request: Request) {
   if (periods.length > 0) {
     const stmt = env.DB.prepare(
       `INSERT OR REPLACE INTO meter_billing_periods
-        (from_date, to_date, peak_kwh, offpeak_kwh, solar_kwh)
-       VALUES (?,?,?,?,?)`,
+        (from_date, to_date, peak_kwh, shoulder_kwh, offpeak_kwh, solar_kwh)
+       VALUES (?,?,?,?,?,?)`,
     );
     for (const p of periods) {
-      batch.push(stmt.bind(p.from_date, p.to_date, p.peak_kwh, p.offpeak_kwh, p.solar_kwh));
+      batch.push(
+        stmt.bind(p.from_date, p.to_date, p.peak_kwh, p.shoulder_kwh ?? null, p.offpeak_kwh, p.solar_kwh),
+      );
     }
   }
 

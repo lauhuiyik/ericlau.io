@@ -109,23 +109,34 @@ CREATE TABLE IF NOT EXISTS meter_intervals (
 );
 CREATE INDEX IF NOT EXISTS idx_meter_intervals_date ON meter_intervals (local_date);
 
--- Billed period totals straight from the myEnergy 'basic' export — the exact
--- quantities that appear on the Lumo bill (Peak / Off Peak / Solar). Kept
--- alongside the intervals so a bill can be reconciled against it directly
--- without re-deriving the peak window. Cycle runs the 18th → 17th.
+-- Half-hourly import/export derived from the house CT clamps (the `readings`
+-- counters), same shape as meter_intervals. Fills days the smart meter hasn't
+-- covered yet — Powercor's export is manual and runs weeks behind — so the bill
+-- in progress can be priced and projected. Filled lazily, one completed day at a
+-- time, by ensureClampIntervals(). The meter always wins where it has the day.
+CREATE TABLE IF NOT EXISTS clamp_intervals (
+  local_date     TEXT NOT NULL,   -- 'YYYY-MM-DD'
+  interval_start TEXT NOT NULL,   -- 'HH:MM' (:00 / :30)
+  stream         TEXT NOT NULL,   -- 'import' | 'export'
+  kwh            REAL NOT NULL,
+  PRIMARY KEY (local_date, interval_start, stream)
+);
+
+-- Billed period totals exactly as invoiced (Peak / Shoulder / Off Peak / Solar),
+-- one row per invoice. Lumo rows came from the myEnergy 'basic' export (two
+-- bands, shoulder NULL); 1st Energy rows are entered from the invoice itself.
+-- Kept alongside the intervals so a bill can be reconciled against it directly
+-- without re-deriving the windows. The dashboard's billing cycles snap to these
+-- boundaries; read dates drift, so never assume a fixed anchor day.
 --
--- NOTE (2026-08-31): these two columns are Lumo's TWO-band billing view. The
--- account moved to 1st Energy "1st Emerald" on 2026-08-31, which bills THREE
--- bands (Peak / Shoulder / Off Peak). Whether the myEnergy basic export starts
--- reporting a shoulder column is unknown, so the dashboard derives the shoulder
--- split from meter_intervals rather than from here. Rows already in this table
--- stay valid: they are historical Lumo bills and are never repriced.
+-- Existing databases: ALTER TABLE meter_billing_periods ADD COLUMN shoulder_kwh REAL;
 CREATE TABLE IF NOT EXISTS meter_billing_periods (
-  from_date   TEXT NOT NULL,      -- 'YYYY-MM-DD' inclusive
-  to_date     TEXT NOT NULL,      -- 'YYYY-MM-DD' inclusive
-  peak_kwh    REAL,               -- billed Peak import
-  offpeak_kwh REAL,               -- billed Off Peak import
-  solar_kwh   REAL,               -- billed Solar export (feed-in)
+  from_date    TEXT NOT NULL,     -- 'YYYY-MM-DD' inclusive
+  to_date      TEXT NOT NULL,     -- 'YYYY-MM-DD' inclusive
+  peak_kwh     REAL,              -- billed Peak import
+  offpeak_kwh  REAL,              -- billed Off Peak import
+  solar_kwh    REAL,              -- billed Solar export (feed-in)
+  shoulder_kwh REAL,              -- billed Shoulder / "Solar Soak" import (1st Energy)
   PRIMARY KEY (from_date, to_date)
 );
 
@@ -138,9 +149,10 @@ CREATE TABLE IF NOT EXISTS meter_billing_periods (
 -- whatever plan was in force on that day:
 --
 --   ...  -> 2026-07-19   Lumo "Time of Use v2"        peak 3pm-9pm
---   2026-07-20 -> 08-30  Lumo "Time of Use v3"        peak 4pm-9pm, smart rate
+--   2026-07-20 -> 09-01  Lumo "Time of Use v3"        peak 4pm-9pm, smart rate
 --                                                     11am-4pm priced as off-peak
---   2026-08-31 -> ...    1st Energy "1st Emerald"     3 bands, FIT 3.3c -> 0.5c
+--   2026-09-02 -> ...    1st Energy "1st Emerald"     peak 4pm-9pm, solar soak
+--                                                     11am-4pm, FIT 3.3c -> 0.5c
 --
 -- The KV-backed settings form overrides the CURRENT era only, so editing rates
 -- can never rewrite a past bill.

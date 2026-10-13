@@ -99,26 +99,12 @@ const LUMO_TOU_V3: Tariff = {
  * 1st Energy "1st Emerald" TOU, signed 2026-08-31 (EPAS account 543520, fact
  * sheet 1ST787449MR). Rates are GST-inclusive as printed; the feed-in is GST-free.
  *
- * !! UNRESOLVED: the band WINDOWS have two conflicting sources. The rates
- * themselves are not in doubt — EPAS and fact sheet agree exactly.
- *
- *   FACTSHEET (used here): shoulder 7am-4pm and 9pm-10pm, off-peak 10pm-7am.
- *   WEBSITE (1stenergy.com.au/tou-timings, VIC residential): shoulder/solar-soak
- *   11am-4pm, off-peak 9pm-11am.
- *
- * On this house's measured 12 months the two differ by ~$103/yr ($2,406 vs
- * $2,509), because the fact-sheet reading puts the big 7-9am and 9-10pm import
- * blocks in the CHEAP shoulder band rather than off-peak. Swap
- * EMERALD_WINDOWS_WEBSITE in below if the first 1st Energy invoice disagrees.
+ * Windows CONFIRMED by the first invoice (202610/4607234, 2 Sep - 3 Oct 2026):
+ * peak 4pm-9pm, "Solar Soak" (shoulder) 11am-4pm, off-peak 9pm-11am — i.e. the
+ * retailer's tou-timings page, not the fact sheet's shoulder 7am-4pm + 9pm-10pm.
+ * The invoice's rates match these to the cent.
  */
-const EMERALD_WINDOWS_FACTSHEET: TariffWindow[] = [
-  { band: "peak", startHour: 16, endHour: 21 },
-  { band: "shoulder", startHour: 7, endHour: 16 },
-  { band: "shoulder", startHour: 21, endHour: 22 },
-];
-
-/** The retailer's public timings page. Kept so the alternative is one edit away. */
-export const EMERALD_WINDOWS_WEBSITE: TariffWindow[] = [
+const EMERALD_WINDOWS: TariffWindow[] = [
   { band: "peak", startHour: 16, endHour: 21 },
   { band: "shoulder", startHour: 11, endHour: 16 },
 ];
@@ -130,16 +116,16 @@ const FIRST_EMERALD: Tariff = {
   offPeakRate: 0.1705,
   supplyPerDay: 1.0483,
   feedIn: 0.005,
-  windows: EMERALD_WINDOWS_FACTSHEET,
+  windows: EMERALD_WINDOWS,
 };
 
 /**
- * When 1st Emerald starts pricing. This is the EPAS "Agreement Start Date"; the
- * actual retailer transfer may complete a little later, in which case the first
- * 1st Energy invoice will show the true start and this should be corrected to it.
+ * When 1st Emerald starts pricing: the first day of the first 1st Energy invoice
+ * (202610/4607234). The EPAS agreement started 2026-08-31 but the transfer took
+ * until 2 Sep, so 31 Aug and 1 Sep were still billed by Lumo.
  * Days before this date keep their Lumo rates, permanently.
  */
-export const FIRST_ENERGY_FROM = "2026-08-31";
+export const FIRST_ENERGY_FROM = "2026-09-02";
 
 /** ToU v3 took effect on this date — peak window moved 3pm -> 4pm. */
 export const V3_PEAK_FROM = "2026-07-20";
@@ -196,47 +182,17 @@ function clampNum(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : fallback;
 }
 
-function clampHour(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? Math.min(24, Math.max(0, Math.round(v))) : fallback;
-}
-
 /**
  * Coerce whatever is in KV into a usable current-era tariff.
  *
- * Tolerates the OLD two-band shape ({peakRate, offPeakRate, peakStartHour,
- * peakEndHour}) that KV may still hold from before the 1st Energy switch, so a
- * stale value degrades to sensible windows instead of throwing.
+ * Only RATES are taken from KV. Windows always come from the plan definition:
+ * they belong to the plan, the form can't edit them, and a saved copy would
+ * otherwise pin stale windows (the fact-sheet reading the first invoice
+ * disproved, or the old two-band peakStartHour/peakEndHour shape) over a fix.
  */
 export function normalizeTariff(input: Partial<Tariff> | null | undefined): Tariff {
-  const raw = (input ?? {}) as Partial<Tariff> & {
-    peakStartHour?: number;
-    peakEndHour?: number;
-  };
+  const raw = input ?? {};
   const base = DEFAULT_TARIFF;
-
-  let windows: TariffWindow[];
-  if (Array.isArray(raw.windows) && raw.windows.length > 0) {
-    windows = raw.windows
-      .filter((w) => w && (w.band === "peak" || w.band === "shoulder"))
-      .map((w) => ({
-        band: w.band,
-        startHour: clampHour(w.startHour, 0),
-        endHour: clampHour(w.endHour, 0),
-      }))
-      .filter((w) => w.startHour !== w.endHour);
-    if (windows.length === 0) windows = base.windows;
-  } else if (typeof raw.peakStartHour === "number" && typeof raw.peakEndHour === "number") {
-    // legacy two-band value
-    windows = [
-      {
-        band: "peak",
-        startHour: clampHour(raw.peakStartHour, 16),
-        endHour: clampHour(raw.peakEndHour, 21),
-      },
-    ];
-  } else {
-    windows = base.windows;
-  }
 
   return {
     label: typeof raw.label === "string" && raw.label ? raw.label : base.label,
@@ -245,7 +201,7 @@ export function normalizeTariff(input: Partial<Tariff> | null | undefined): Tari
     offPeakRate: clampNum(raw.offPeakRate, base.offPeakRate),
     supplyPerDay: clampNum(raw.supplyPerDay, base.supplyPerDay),
     feedIn: clampNum(raw.feedIn, base.feedIn),
-    windows,
+    windows: base.windows,
   };
 }
 
@@ -440,38 +396,55 @@ export type Cycle = { start: string; end: string; lengthDays: number; billed: bo
  * Lumo's read dates are NOT a rigid 18th→17th — they drift a day or two (a bill
  * ran 32 days, the next 29), which put a day's usage in the wrong cycle when the
  * dashboard assumed a fixed anchor. So past cycles use the ACTUAL invoice
- * boundaries recorded in meter_billing_periods; cycles after the last invoice
- * fall back to an estimated 18→17 rolling forward, until they cover `today`.
+ * boundaries recorded in meter_billing_periods. Anything not covered by an
+ * invoice — a gap between two (e.g. Lumo's final bills, before the 1st Energy
+ * switch), or the stretch after the last one up to `today` — is filled with
+ * estimated ~monthly cycles, cut short where the next invoice begins.
  */
 export function buildCycleList(
   billedPeriods: { fromDate: string; toDate: string }[],
   today: string,
 ): Cycle[] {
   const sorted = [...billedPeriods].sort((a, b) => a.fromDate.localeCompare(b.fromDate));
-  const cycles: Cycle[] = sorted.map((p) => ({
-    start: p.fromDate,
-    end: p.toDate,
-    lengthDays: daysInclusive(p.fromDate, p.toDate),
-    billed: true,
-  }));
+  const cycles: Cycle[] = [];
 
-  // Estimated tail: continue from the day after the last invoice, in ~monthly
-  // steps, until the current date is covered.
-  let start = cycles.length ? shiftDate(cycles[cycles.length - 1].end, 1) : currentBillingCycle(today).start;
-  for (let guard = 0; start <= today && guard < 24; guard++) {
-    const [y, m, d] = start.split("-").map(Number);
-    let ny = y;
-    let nm = m + 1;
-    if (nm > 12) {
-      nm = 1;
-      ny += 1;
+  // Estimated cycles from `start`, one calendar month (minus a day) each, while
+  // start <= `until`; with `clip`, the last one ends no later than `until`.
+  const pushEstimated = (start: string, until: string, clip: boolean) => {
+    for (let guard = 0; start <= until && guard < 24; guard++) {
+      const [y, m, d] = start.split("-").map(Number);
+      let ny = y;
+      let nm = m + 1;
+      if (nm > 12) {
+        nm = 1;
+        ny += 1;
+      }
+      const pad = (n: number) => String(n).padStart(2, "0");
+      // one calendar month on, minus a day — clamps naturally via shiftDate math
+      let end = shiftDate(`${ny}-${pad(nm)}-${pad(d)}`, -1);
+      if (clip && end > until) end = until;
+      cycles.push({ start, end, lengthDays: daysInclusive(start, end), billed: false });
+      start = shiftDate(end, 1);
     }
-    const pad = (n: number) => String(n).padStart(2, "0");
-    // one calendar month on, minus a day — clamps naturally via shiftDate math
-    const end = shiftDate(`${ny}-${pad(nm)}-${pad(d)}`, -1);
-    cycles.push({ start, end, lengthDays: daysInclusive(start, end), billed: false });
-    start = shiftDate(end, 1);
+  };
+
+  for (const p of sorted) {
+    if (cycles.length) pushEstimated(shiftDate(cycles[cycles.length - 1].end, 1), shiftDate(p.fromDate, -1), true);
+    cycles.push({
+      start: p.fromDate,
+      end: p.toDate,
+      lengthDays: daysInclusive(p.fromDate, p.toDate),
+      billed: true,
+    });
   }
+
+  // Estimated tail: continue from the day after the last invoice until the
+  // current date is covered.
+  pushEstimated(
+    cycles.length ? shiftDate(cycles[cycles.length - 1].end, 1) : currentBillingCycle(today).start,
+    today,
+    false,
+  );
   return cycles;
 }
 
@@ -605,7 +578,115 @@ export type MeterDailyTotal = {
   exportKwh: number;
   /** false if any interval that day was estimated/substituted rather than metered. */
   actual: boolean;
+  /** true if the day came from the house CT clamps rather than the smart meter. */
+  clamp?: boolean;
 };
+
+/** Spread `kwh` evenly over the 30-minute slots that [fromMin, toMin] covers. */
+function addToSlots(slots: number[], kwh: number, fromMin: number, toMin: number): void {
+  if (!(kwh > 0)) return;
+  const from = Math.max(0, Math.min(1440, fromMin));
+  const to = Math.max(from + 1, Math.min(1440, toMin));
+  const span = to - from;
+  for (let slot = Math.floor(from / 30); slot < 48 && slot * 30 < to; slot++) {
+    const a = Math.max(from, slot * 30);
+    const b = Math.min(to, slot * 30 + 30);
+    if (b > a) slots[slot] += (kwh * (b - a)) / span;
+  }
+}
+
+/**
+ * One day's cumulative-since-midnight counter -> kWh per 30-minute slot.
+ *
+ * Same reconstruction as computeCost: Anker resets its counters a little AFTER
+ * midnight, so everything before the last reset (a drop to under half the
+ * previous value) is the previous day's carryover and is ignored. The block from
+ * midnight to the first reading, and any gap between readings, is spread across
+ * the slots it spans rather than dumped into one.
+ */
+export function cumulativeToSlots(
+  samples: { ts: number; min: number; value: number | null }[],
+): number[] {
+  const slots = new Array<number>(48).fill(0);
+  const pts = samples.filter((x) => x.value != null).sort((a, b) => a.ts - b.ts);
+  let startIdx = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const prev = pts[i - 1].value ?? 0;
+    if (prev > 0 && (pts[i].value ?? 0) < prev * 0.5) startIdx = i;
+  }
+  const use = pts.slice(startIdx);
+  if (use.length === 0) return slots;
+  addToSlots(slots, use[0].value ?? 0, 0, use[0].min);
+  for (let i = 1; i < use.length; i++) {
+    addToSlots(slots, Math.max(0, (use[i].value ?? 0) - (use[i - 1].value ?? 0)), use[i - 1].min, use[i].min);
+  }
+  return slots;
+}
+
+const slotStart = (slot: number) =>
+  `${String(Math.floor(slot / 2)).padStart(2, "0")}:${slot % 2 ? "30" : "00"}`;
+
+/** A day needs at least this many readings before its clamp totals are trusted. */
+const MIN_CLAMP_READINGS = 200;
+/** Days filled per page load, so a long backlog can't blow the subrequest budget. */
+const CLAMP_FILL_PER_LOAD = 3;
+
+/**
+ * Make sure every COMPLETED day in [start, end] that the smart meter doesn't
+ * cover has its clamp-derived half-hourly import/export in `clamp_intervals`.
+ *
+ * Powercor's myEnergy export is manual, so the meter runs weeks behind. The
+ * clamps are within ~1% of it (2 Sep - 3 Oct: clamp-priced $184.40 vs $185.34
+ * billed), so they price the bill in progress. Filled once per day, then read as
+ * ~96 rows a day instead of re-reading ~1,100 readings on every refresh. Today is
+ * never filled: its counters are still moving.
+ */
+export async function ensureClampIntervals(
+  db: D1Database,
+  start: string,
+  end: string,
+  today: string,
+): Promise<void> {
+  const last = shiftDate(today, -1) < end ? shiftDate(today, -1) : end;
+  if (start > last) return;
+  const have = await db
+    .prepare(
+      `SELECT DISTINCT local_date FROM meter_intervals WHERE local_date BETWEEN ?1 AND ?2
+       UNION SELECT DISTINCT local_date FROM clamp_intervals WHERE local_date BETWEEN ?1 AND ?2`,
+    )
+    .bind(start, last)
+    .all<{ local_date: string }>();
+  const haveSet = new Set((have.results ?? []).map((x) => x.local_date));
+  const missing: string[] = [];
+  for (let d = start; d <= last; d = shiftDate(d, 1)) if (!haveSet.has(d)) missing.push(d);
+
+  for (const date of missing.slice(0, CLAMP_FILL_PER_LOAD)) {
+    const res = await db
+      .prepare(
+        `SELECT ts, local_time, grid_import_kwh_today i, grid_export_kwh_today e
+         FROM readings WHERE local_date = ? ORDER BY ts`,
+      )
+      .bind(date)
+      .all<{ ts: number; local_time: string; i: number | null; e: number | null }>();
+    const rows = res.results ?? [];
+    if (rows.length < MIN_CLAMP_READINGS) continue;
+    const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+    const imp = cumulativeToSlots(rows.map((x) => ({ ts: x.ts, min: mins(x.local_time), value: x.i })));
+    const exp = cumulativeToSlots(rows.map((x) => ({ ts: x.ts, min: mins(x.local_time), value: x.e })));
+    const tuples = (stream: string, slots: number[]) =>
+      slots
+        .map((k, n) => `('${date}','${slotStart(n)}','${stream}',${k.toFixed(4)})`)
+        .join(",");
+    await db.batch([
+      db.prepare(
+        `INSERT OR REPLACE INTO clamp_intervals (local_date, interval_start, stream, kwh) VALUES ${tuples("import", imp)}`,
+      ),
+      db.prepare(
+        `INSERT OR REPLACE INTO clamp_intervals (local_date, interval_start, stream, kwh) VALUES ${tuples("export", exp)}`,
+      ),
+    ]);
+  }
+}
 
 /**
  * Daily import/export totals from the meter, with import split across the price
@@ -626,7 +707,15 @@ export async function getMeterDailyTotals(
   start: string,
   end: string,
   at: TariffAt = tariffResolver(),
+  clampFallback = false,
 ): Promise<MeterDailyTotal[]> {
+  type IntervalRow = {
+    local_date: string;
+    interval_start: string;
+    stream: string;
+    kwh: number;
+    quality: string | null;
+  };
   const res = await db
     .prepare(
       `SELECT local_date, interval_start, stream, kwh, quality
@@ -635,16 +724,32 @@ export async function getMeterDailyTotals(
        ORDER BY local_date ASC, interval_start ASC`,
     )
     .bind(start, end)
-    .all<{
-      local_date: string;
-      interval_start: string;
-      stream: string;
-      kwh: number;
-      quality: string | null;
-    }>();
+    .all<IntervalRow>();
+  const rows: IntervalRow[] = res.results ?? [];
+
+  // Days Powercor hasn't exported yet are filled from the CT clamps, so the cycle
+  // in progress can still be priced. The meter always wins where it has the day.
+  const clampDates = new Set<string>();
+  if (clampFallback) {
+    const meterDates = new Set(rows.map((x) => x.local_date));
+    const cl = await db
+      .prepare(
+        `SELECT local_date, interval_start, stream, kwh
+         FROM clamp_intervals
+         WHERE local_date BETWEEN ? AND ?
+         ORDER BY local_date ASC, interval_start ASC`,
+      )
+      .bind(start, end)
+      .all<Omit<IntervalRow, "quality">>();
+    for (const x of cl.results ?? []) {
+      if (meterDates.has(x.local_date)) continue;
+      clampDates.add(x.local_date);
+      rows.push({ ...x, quality: "Clamp" });
+    }
+  }
 
   const byDate = new Map<string, MeterDailyTotal>();
-  for (const r of res.results ?? []) {
+  for (const r of rows) {
     let d = byDate.get(r.local_date);
     if (!d) {
       d = {
@@ -655,6 +760,7 @@ export async function getMeterDailyTotals(
         importOffPeakKwh: 0,
         exportKwh: 0,
         actual: true,
+        clamp: clampDates.has(r.local_date),
       };
       byDate.set(r.local_date, d);
     }
@@ -727,23 +833,24 @@ export type MeterBillingPeriod = {
   fromDate: string;
   toDate: string;
   peakKwh: number;
+  shoulderKwh: number;
   offPeakKwh: number;
   solarKwh: number;
   importKwh: number;
 };
 
-/** Billed period totals exactly as they appear on the bill (18th → 17th cycle),
- *  newest first. */
+/** Billed period totals exactly as they appear on the bill, newest first. */
 export async function getMeterBillingPeriods(db: D1Database): Promise<MeterBillingPeriod[]> {
   const res = await db
     .prepare(
-      `SELECT from_date, to_date, peak_kwh, offpeak_kwh, solar_kwh
+      `SELECT from_date, to_date, peak_kwh, shoulder_kwh, offpeak_kwh, solar_kwh
        FROM meter_billing_periods ORDER BY from_date DESC`,
     )
     .all<{
       from_date: string;
       to_date: string;
       peak_kwh: number | null;
+      shoulder_kwh: number | null;
       offpeak_kwh: number | null;
       solar_kwh: number | null;
     }>();
@@ -751,9 +858,10 @@ export async function getMeterBillingPeriods(db: D1Database): Promise<MeterBilli
     fromDate: r.from_date,
     toDate: r.to_date,
     peakKwh: r.peak_kwh ?? 0,
+    shoulderKwh: r.shoulder_kwh ?? 0,
     offPeakKwh: r.offpeak_kwh ?? 0,
     solarKwh: r.solar_kwh ?? 0,
-    importKwh: (r.peak_kwh ?? 0) + (r.offpeak_kwh ?? 0),
+    importKwh: (r.peak_kwh ?? 0) + (r.shoulder_kwh ?? 0) + (r.offpeak_kwh ?? 0),
   }));
 }
 
@@ -818,8 +926,8 @@ const slotLabel = (time: string) =>
 
 /**
  * The car's home charging over [start,end], attributed to grid vs solar using
- * the METER (billing-grade), so it's accurate for any historic cycle — not just
- * the recent days the Anker clamps cover. For each 30-minute interval the car's
+ * the METER (billing-grade) where Powercor has exported it, and the CT clamps'
+ * 30-minute import for the days it hasn't. For each 30-minute interval the car's
  * grid draw is capped at the whole-home grid import then (min): if the house
  * wasn't importing, the car ran on solar/battery and cost nothing; the rest is
  * priced at that interval's tariff window. An upper bound (other loads compete
@@ -842,7 +950,21 @@ export async function getTeslaCycleGridCost(
     .bind(start, end)
     .all<{ local_date: string; interval_start: string; kwh: number }>();
   const imp = new Map<string, number>();
-  for (const r of meter.results ?? []) imp.set(`${r.local_date} ${r.interval_start}`, r.kwh);
+  const meterDates = new Set<string>();
+  for (const r of meter.results ?? []) {
+    imp.set(`${r.local_date} ${r.interval_start}`, r.kwh);
+    meterDates.add(r.local_date);
+  }
+  // Dates the meter hasn't covered yet use the CT clamps' 30-minute import instead.
+  const clampImp = await db
+    .prepare(
+      "SELECT local_date, interval_start, kwh FROM clamp_intervals WHERE stream='import' AND local_date BETWEEN ? AND ?",
+    )
+    .bind(start, end)
+    .all<{ local_date: string; interval_start: string; kwh: number }>();
+  for (const r of clampImp.results ?? []) {
+    if (!meterDates.has(r.local_date)) imp.set(`${r.local_date} ${r.interval_start}`, r.kwh);
+  }
 
   // car kWh per interval
   const car = new Map<string, number>();
@@ -948,6 +1070,7 @@ export type BillSplit = {
   daysCovered: number; // days of the cycle the meter has data for
   lengthDays: number;
   lastMeterDate: string | null;
+  clampDays: number; // of daysCovered, how many came from the CT clamps (meter not exported yet)
   complete: boolean; // meter covers the whole cycle (a past bill), so no projection
   soFar: CostBreakdown; // billing-grade cost for the covered days
   projectedNet: number; // linear projection to the full cycle
@@ -990,6 +1113,7 @@ export function computeBillSplit(
     daysCovered,
     lengthDays: cycle.lengthDays,
     lastMeterDate,
+    clampDays: meterDaily.filter((d) => d.clamp).length,
     complete,
     soFar,
     projectedNet,

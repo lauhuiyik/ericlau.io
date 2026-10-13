@@ -24,6 +24,16 @@
   "kv_namespaces": [
     { "binding": "ENERGY_KV", "id": "fce2b129d1ed462c853380cb027bca32" }
   ],
+  // The Cloudflare Access application covering /experiments/finance (shared
+  // with /experiments/homeenergy; it does NOT cover all of /experiments/*).
+  // Pages that call checkAccess() (src/lib/cf-access.ts) verify the Access
+  // token against these.
+  // Identifiers, not secrets: only Cloudflare's private key can sign a token
+  // they accept. Kept here, not in the dashboard, so every deploy carries them.
+  "vars": {
+    "CF_ACCESS_TEAM_DOMAIN": "ericdotlau.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "53e8f5be2189a70e6c3b390fd5bf69ef40c21eaec613c55413899cb3b8b8b0f5"
+  },
   "observability": {
     "enabled": true
   }

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { projects } from "./_projects";
+import { projects, thumbUrl } from "./_projects";
 import { GalleryCard } from "./_gallery-card";
 import { SiteFooter } from "@/app/_components/site-footer";
 
@@ -38,7 +38,7 @@ export default function Cinematography() {
               slug={p.slug}
               title={p.title}
               client={p.client}
-              vimeoId={p.vimeoId}
+              thumb={thumbUrl(p)}
             />
           ))}
         </div>

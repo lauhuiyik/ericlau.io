@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { projects } from "../_projects";
+import { posterUrl, projects, videoUrl } from "../_projects";
 import { SiteFooter } from "@/app/_components/site-footer";
 
 type Props = {
@@ -37,12 +37,16 @@ export default async function ProjectPage({ params }: Props) {
       </section>
 
       <section className="px-6 sm:px-12 pb-24">
-        <div className="w-full aspect-video">
-          <iframe
-            src={`https://player.vimeo.com/video/${project.vimeoId}?badge=0&autopause=0&player_id=0&app_id=58479`}
-            allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media"
+        <div className="w-full aspect-video bg-black">
+          {/* Self-hosted 1080p H.264 (see ../_projects.ts); only metadata loads until play. */}
+          <video
+            src={videoUrl(project)}
+            poster={posterUrl(project)}
+            controls
+            playsInline
+            preload="metadata"
+            aria-label={`${project.client} — ${project.title}`}
             className="w-full h-full"
-            title={`${project.client} — ${project.title}`}
           />
         </div>
       </section>

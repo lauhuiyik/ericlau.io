@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { projects, thumbUrl } from "./_projects";
-import { GalleryCard } from "./_gallery-card";
+import { projects } from "./_projects";
+import { FilmCard } from "@/app/_components/film-card";
+import { filmThumb } from "@/lib/films";
 import { SiteFooter } from "@/app/_components/site-footer";
 
 export default function Cinematography() {
@@ -33,12 +34,12 @@ export default function Cinematography() {
       <section className="border-t border-rule px-6 sm:px-12 py-12 pb-24">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-12">
           {projects.map((p) => (
-            <GalleryCard
+            <FilmCard
               key={p.slug}
-              slug={p.slug}
+              href={`/cinematography/${p.slug}`}
               title={p.title}
               client={p.client}
-              thumb={thumbUrl(p)}
+              thumb={filmThumb("cinematography", p)}
             />
           ))}
         </div>

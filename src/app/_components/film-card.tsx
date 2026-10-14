@@ -4,14 +4,15 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 type Props = {
-  slug: string;
+  href: string;
   title: string;
   client: string;
-  /** Self-hosted 960x540 thumbnail (see ./_projects.ts). */
+  /** 16:9 thumbnail (see src/lib/films.ts). */
   thumb: string;
 };
 
-export function GalleryCard({ slug, title, client, thumb }: Props) {
+/** A film in a section grid (cinematography, activation, animation). */
+export function FilmCard({ href, title, client, thumb }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -24,7 +25,7 @@ export function GalleryCard({ slug, title, client, thumb }: Props) {
   return (
     <div>
       <Link
-        href={`/cinematography/${slug}`}
+        href={href}
         className="group block"
       >
         <div className="relative w-full aspect-video bg-[#111] overflow-hidden mb-3">

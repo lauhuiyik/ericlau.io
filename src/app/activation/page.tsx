@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { projects } from "./_projects";
+import { FilmCard } from "@/app/_components/film-card";
+import { filmThumb } from "@/lib/films";
 import { SiteFooter } from "@/app/_components/site-footer";
 
 export default function Activation() {
@@ -32,26 +34,13 @@ export default function Activation() {
       <section className="border-t border-rule px-6 sm:px-12 py-12 pb-24">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-12">
           {projects.map((p) => (
-            <Link key={p.slug} href={`/activation/${p.slug}`} className="group block">
-              <div className="relative w-full aspect-video bg-[#111] overflow-hidden mb-3">
-                <img
-                  src={`https://img.youtube.com/vi/${p.youtubeId}/maxresdefault.jpg`}
-                  alt={`${p.client} — ${p.title}`}
-                  className="w-full h-full object-cover transition-all duration-500 group-hover:scale-[1.03]"
-                />
-                <div className="absolute inset-0 flex items-end p-4 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-white/80">
-                    View project ↗
-                  </span>
-                </div>
-              </div>
-              <div className="text-base font-medium tracking-tight group-hover:text-muted transition-colors">
-                {p.title}
-              </div>
-              <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-                {p.client}
-              </div>
-            </Link>
+            <FilmCard
+              key={p.slug}
+              href={`/activation/${p.slug}`}
+              title={p.title}
+              client={p.client}
+              thumb={filmThumb("activation", p)}
+            />
           ))}
         </div>
       </section>

@@ -70,14 +70,15 @@ export const projects: Film[] = [
   },
   {
     slug: "dj-snake-ultra",
-    title: "DJ Snake",
-    client: "Ultra Australia",
+    title: "DJ Snake Ultra Afterparty",
+    client: "Ms Collins",
     aspect: "portrait",
-    description: "A vertical cut following DJ Snake from arrival to the decks, in front of a packed room.",
+    description:
+      "A vertical cut of DJ Snake's Ultra afterparty at Ms Collins, from arrival to the decks in front of a packed room.",
   },
   {
     slug: "annyeong-melbourne",
-    title: "Festival Recap",
+    title: "Annyeong Melbourne Recap",
     client: "Annyeong Melbourne",
     description:
       "Highlights from the K-pop festival at Flemington Racecourse: fans on the rail, DJ sets and a pyro-lit main stage.",
@@ -85,9 +86,8 @@ export const projects: Film[] = [
   {
     slug: "fed-live",
     title: "Fed Live",
-    client: "Fed Square",
-    description:
-      "Highlight film for Fed Live at Federation Square, Melbourne: packed crowds, big lighting and artists on the main stage.",
+    client: "Fed Live",
+    description: "Highlight film for Fed Live: packed crowds, big lighting and artists on the main stage.",
   },
   {
     slug: "aus-gp-2024-entertainment",
@@ -173,9 +173,10 @@ export const projects: Film[] = [
   {
     slug: "beauz",
     title: "BEAUZ",
-    client: "Club Night",
+    client: "Ms Collins",
     aspect: "portrait",
-    description: "Vertical recap of a BEAUZ set: the view from the booth, a packed floor and photos with fans.",
+    description:
+      "Vertical recap of BEAUZ at Ms Collins: the view from the booth, a packed floor and photos with fans.",
   },
   {
     slug: "scarlett-12th-birthday",

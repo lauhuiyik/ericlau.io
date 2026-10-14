@@ -17,7 +17,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE.parent.parent / "public" / "tools" / "downloader" / "EricLauDownloader-Setup.zip"
-FILES = ["Install.cmd", "Uninstall.cmd", "install.ps1", "uninstall.ps1", "dl_agent.py", "README.txt"]
+FILES = ["Install.cmd", "Uninstall.cmd", "install.ps1", "register-task.ps1", "uninstall.ps1", "dl_agent.py", "README.txt"]
 CRLF = {".cmd", ".ps1", ".txt"}
 FIXED_TIME = (2026, 1, 1, 0, 0, 0)
 

@@ -11,10 +11,14 @@ Install
   2. Extract this zip (right-click > Extract All).
   3. Double-click Install.cmd and paste the key when asked.
      If Windows SmartScreen warns you, click "More info" > "Run anyway".
+  4. Click "Yes" on the admin prompt near the end. That lets it start when
+     the PC boots, even before anyone logs in (e.g. after an overnight
+     Windows Update restart). Click "No" and it starts when you log in.
 
-It installs just for your Windows user (no admin rights), into
-%LOCALAPPDATA%\EricLauDownloader, and starts automatically when you log in.
-It only makes outbound HTTPS connections; no ports are opened.
+It installs into %LOCALAPPDATA%\EricLauDownloader and runs as your Windows
+user, in the background. It only makes outbound HTTPS connections; no ports
+are opened. For it to work all the time, set the PC never to sleep while
+plugged in (Settings > System > Power).
 
 Upgrade: run Install.cmd from a newer zip. It keeps your key.
 Uninstall: double-click Uninstall.cmd, then "Disconnect" the PC on the page.

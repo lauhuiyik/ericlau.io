@@ -1,13 +1,15 @@
 <#
   Installs the ericlau.io downloader agent for the current Windows user.
 
-  Everything goes in %LOCALAPPDATA%\EricLauDownloader (no admin rights):
+  Everything goes in %LOCALAPPDATA%\EricLauDownloader, installed as the user:
     python\   Python embeddable package (private copy, pinned + checksum-verified)
     bin\      yt-dlp.exe, ffmpeg.exe, ffprobe.exe, deno.exe (checksum-verified)
     dl_agent.py, config.json (server + connection key), agent.log
 
-  A scheduled task starts the agent hidden at logon and restarts it if it
-  crashes. Re-running this script upgrades in place and keeps the key.
+  A scheduled task (register-task.ps1) starts the agent hidden when Windows
+  boots, before anyone logs in, and restarts it if it crashes. That one step
+  asks for admin approval; declined, the task starts at logon instead.
+  Re-running this script upgrades in place and keeps the key.
 
   Keep this file ASCII-only: Windows PowerShell 5.1 reads BOM-less scripts
   as ANSI, so a stray Unicode character breaks parsing.
@@ -109,7 +111,7 @@ function Stop-Agent {
 try {
   Write-Host ""
   Write-Host "EricLau Downloader - home PC agent installer" -ForegroundColor White
-  Write-Host "Installs to $App (just for $env:USERNAME, no admin needed)."
+  Write-Host "Installs to $App, for $env:USERNAME."
 
   if (-not [Environment]::Is64BitOperatingSystem) { throw "This needs 64-bit Windows 10 or 11." }
   if (-not (Test-Path (Join-Path $Here "dl_agent.py"))) {
@@ -181,6 +183,7 @@ try {
   # ---- the agent ----
   Step "Agent"
   Copy-Item (Join-Path $Here "dl_agent.py") (Join-Path $App "dl_agent.py") -Force
+  Copy-Item (Join-Path $Here "register-task.ps1") (Join-Path $App "register-task.ps1") -Force
   Copy-Item (Join-Path $Here "uninstall.ps1") (Join-Path $App "uninstall.ps1") -Force -ErrorAction SilentlyContinue
   Get-ChildItem -Path $App -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
   Ok "copied"
@@ -238,22 +241,31 @@ try {
     throw "The setup check failed (see above)."
   }
 
-  # ---- start at logon, hidden, restart on crash ----
+  # ---- background task: start with Windows, hidden, restart on crash ----
+  # Starting at boot (before anyone logs in) needs admin, so register-task.ps1
+  # runs elevated for that; without approval it falls back to start-at-login.
   Step "Background task"
   $user = "$env:USERDOMAIN\$env:USERNAME"
-  $action = New-ScheduledTaskAction -Execute (Join-Path $Py "pythonw.exe") -Argument "`"$agent`"" -WorkingDirectory $App
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
-  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-    -MultipleInstances IgnoreNew
-  $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
-    -Principal $principal -Description "Downloads links queued at $Server/tools/downloader" -Force | Out-Null
-  Start-ScheduledTask -TaskName $TaskName
-  Start-Sleep -Seconds 4
-  $running = Get-AgentProcesses | Where-Object { $_.Name -eq "pythonw.exe" }
-  if ($running) { Ok "running (starts automatically when you log in)" }
-  else { Note "registered, but it didn't start yet. Check $App\agent.log, or log out and back in." }
+  $helper = Join-Path $App "register-task.ps1"
+  $resultFile = Join-Path $App "task-mode.txt"
+  Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
+  Note "Windows will ask for admin approval so the downloader can start when the PC boots."
+  try {
+    Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -ArgumentList @(
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$helper`"",
+      "-User", "`"$user`"", "-App", "`"$App`"", "-Server", "`"$Server`"", "-Mode", "Boot") | Out-Null
+  } catch {
+    Note "No admin approval, so it will start when you log in instead."
+  }
+  $mode = ""
+  if (Test-Path $resultFile) { $mode = (Get-Content -Raw $resultFile).Trim() }
+  if ($mode -ne "Boot" -and $mode -ne "Logon") {
+    & $helper -User $user -App $App -Server $Server -Mode Logon
+    if (Test-Path $resultFile) { $mode = (Get-Content -Raw $resultFile).Trim() }
+  }
+  if ($mode -eq "Boot") { Ok "running, and starts when Windows boots (no login needed)" }
+  elseif ($mode -eq "Logon") { Ok "running, and starts when you log in"; Note "It won't run after a restart until someone logs in." }
+  else { Note "The background task didn't start. Run Install.cmd again, or check $App\agent.log." }
 
   Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 

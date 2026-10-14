@@ -359,8 +359,8 @@ export function DownloaderApp() {
             <li>
               <div className="font-medium">1. Download the installer on your Windows PC</div>
               <p className="mt-1 text-muted">
-                Windows 10 or 11. It sets up yt-dlp, ffmpeg and a small background program, with no admin rights
-                needed.
+                Windows 10 or 11. It sets up yt-dlp, ffmpeg and a small background program that starts with
+                Windows.
               </p>
               <a href={INSTALLER} className={`${btn} mt-3 inline-block`}>
                 Download EricLauDownloader-Setup.zip
@@ -404,8 +404,10 @@ export function DownloaderApp() {
               <div className="font-medium">3. On the PC</div>
               <p className="mt-1 text-muted">
                 Extract the zip (right-click → Extract All), double-click <code>Install.cmd</code> and paste the key.
-                If Windows warns about an unrecognised app, click More info → Run anyway. The PC shows up above as
-                online within a few seconds.
+                If Windows warns about an unrecognised app, click More info → Run anyway. Near the end, click Yes on
+                the admin prompt so it starts when the PC boots, even before anyone logs in. The PC shows up above
+                as online within a few seconds. Set the PC never to sleep while plugged in (Settings → System →
+                Power) so it&apos;s always ready.
               </p>
             </li>
           </ol>

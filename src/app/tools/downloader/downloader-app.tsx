@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { logout } from "../actions";
 
 type JobFile = { id: string; name: string; size: number; expiresAt: number };
 type Job = {
@@ -45,9 +46,15 @@ async function send(path: string, init: { method: string; body?: unknown }) {
     headers: { "content-type": "application/json", "x-downloader": "1" },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
+  if (r.status === 401) toLogin();
   const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
   if (!r.ok) throw new Error(String(data.error ?? data.reason ?? `HTTP ${r.status}`));
   return data;
+}
+
+/** The session expired (or the password changed): back to the password page. */
+function toLogin() {
+  window.location.href = "/tools/login?next=/tools/downloader";
 }
 
 function fmtSize(n: number) {
@@ -111,6 +118,7 @@ export function DownloaderApp() {
   const refresh = useCallback(async () => {
     try {
       const r = await fetch(`${API}/jobs`, { cache: "no-store" });
+      if (r.status === 401) return toLogin();
       const data = (await r.json()) as State & { error?: string; reason?: string };
       if (!r.ok) throw new Error(data.reason ?? data.error ?? `HTTP ${r.status}`);
       stateRef.current = data;
@@ -208,7 +216,14 @@ export function DownloaderApp() {
         >
           ← Tools
         </Link>
-        <div className="font-mono text-xs uppercase tracking-[0.18em] text-muted">Downloader</div>
+        <form action={logout}>
+          <button
+            type="submit"
+            className="font-mono text-xs uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors"
+          >
+            Log out
+          </button>
+        </form>
       </header>
 
       <section className="px-6 sm:px-12 pt-12 sm:pt-16 pb-10 max-w-3xl">

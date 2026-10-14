@@ -1,11 +1,11 @@
-import { openForOwner } from "@/lib/downloader-auth";
+import { openForTools } from "@/lib/downloader-auth";
 import { type FileRow, attachmentHeader, json } from "@/lib/downloader";
 
 /** GET → the finished file, streamed from R2 as a download. */
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request, ctx: { params: Promise<{ id: string }> }) {
-  const gate = await openForOwner(request);
+  const gate = await openForTools(request);
   if ("denied" in gate) return gate.denied;
   const { id } = await ctx.params;
   const file = await gate.env.DL_DB

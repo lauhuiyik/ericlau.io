@@ -1,4 +1,4 @@
-import { openForOwner } from "@/lib/downloader-auth";
+import { openForTools } from "@/lib/downloader-auth";
 import {
   AGENT_ONLINE_MS,
   COOKIE_BROWSERS,
@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
 const MAX_URLS = 50;
 
 export async function GET(request: Request) {
-  const ctx = await openForOwner(request);
+  const ctx = await openForTools(request);
   if ("denied" in ctx) return ctx.denied;
   const db = ctx.env.DL_DB;
   const now = Date.now();
@@ -79,7 +79,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const ctx = await openForOwner(request, { write: true });
+  const ctx = await openForTools(request, { write: true });
   if ("denied" in ctx) return ctx.denied;
 
   let body: { urls?: unknown; mode?: unknown; cookiesBrowser?: unknown };

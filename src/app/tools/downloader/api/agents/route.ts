@@ -1,4 +1,4 @@
-import { openForOwner } from "@/lib/downloader-auth";
+import { openForTools } from "@/lib/downloader-auth";
 import { ACTIVE_STATUSES, json, newAgentKey, newId, sha256Hex } from "@/lib/downloader";
 
 /**
@@ -9,7 +9,7 @@ import { ACTIVE_STATUSES, json, newAgentKey, newId, sha256Hex } from "@/lib/down
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const gate = await openForOwner(request, { write: true });
+  const gate = await openForTools(request, { write: true });
   if ("denied" in gate) return gate.denied;
   let body: { name?: unknown } = {};
   try {
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const gate = await openForOwner(request, { write: true });
+  const gate = await openForTools(request, { write: true });
   if ("denied" in gate) return gate.denied;
   const id = new URL(request.url).searchParams.get("id") ?? "";
   const db = gate.env.DL_DB;

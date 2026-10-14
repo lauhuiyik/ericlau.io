@@ -1,14 +1,14 @@
 /**
  * Shared pieces of /tools/downloader.
  *
- * The page (behind Cloudflare Access) queues jobs in D1 (DL_DB). A small agent
+ * The page (behind the tools password) queues jobs in D1 (DL_DB). A small agent
  * on the owner's home PC (downloader/agent/dl_agent.py) polls /api/dl-agent/*,
  * claims jobs, runs yt-dlp + ffmpeg on the home connection — which YouTube and
  * Instagram don't block the way they block cloud IPs — and uploads the
  * results to R2 (DL_BUCKET). Files are swept after FILE_TTL_MS.
  *
- * The agent can't pass the Access login, so /api/dl-agent/* sits outside it
- * and authenticates with a per-PC connection key instead. Keys are minted on
+ * The agent can't use the password login, so /api/dl-agent/* authenticates
+ * with a per-PC connection key instead. Keys are minted on
  * the gated page and only their SHA-256 is stored.
  */
 
@@ -122,7 +122,7 @@ export async function agentFromRequest(request: Request, db: D1Database): Promis
 }
 
 /**
- * Browser-side writes must come from the downloader page itself: the Access
+ * Browser-side writes must come from the downloader page itself: the login
  * cookie rides along with any request to this origin, so refuse cross-site ones.
  */
 export function crossSite(request: Request): string | null {

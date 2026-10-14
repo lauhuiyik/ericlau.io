@@ -1,4 +1,4 @@
-import { openForOwner } from "@/lib/downloader-auth";
+import { openForTools } from "@/lib/downloader-auth";
 import { FINISHED_STATUSES, type JobRow, deleteJobFiles, json } from "@/lib/downloader";
 
 /**
@@ -8,7 +8,7 @@ import { FINISHED_STATUSES, type JobRow, deleteJobFiles, json } from "@/lib/down
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request, ctx: { params: Promise<{ id: string }> }) {
-  const gate = await openForOwner(request, { write: true });
+  const gate = await openForTools(request, { write: true });
   if ("denied" in gate) return gate.denied;
   const { id } = await ctx.params;
   const db = gate.env.DL_DB;
@@ -56,7 +56,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
 }
 
 export async function DELETE(request: Request, ctx: { params: Promise<{ id: string }> }) {
-  const gate = await openForOwner(request, { write: true });
+  const gate = await openForTools(request, { write: true });
   if ("denied" in gate) return gate.denied;
   const { id } = await ctx.params;
   const db = gate.env.DL_DB;

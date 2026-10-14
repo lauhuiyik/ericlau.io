@@ -2,12 +2,13 @@ import Link from "next/link";
 import { sections } from "@/lib/sections";
 
 // Hand-curated list of tools (formerly the "AI" section; /ai redirects here).
-// To add one: build it under src/app/tools/<slug>/, then add an entry here.
+// To add one: build it under src/app/tools/<slug>/, gate its page and any API
+// routes with the tools password (src/lib/tools-auth.ts), then add an entry here.
 const entries: { slug: string; title: string; note: string }[] = [
   {
     slug: "downloader",
     title: "Downloader",
-    note: "YouTube, SoundCloud & Instagram, downloaded by the home PC. Login required.",
+    note: "YouTube, SoundCloud & Instagram, downloaded by the home PC. Password required.",
   },
 ];
 

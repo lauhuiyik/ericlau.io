@@ -9,6 +9,8 @@ declare global {
     TESLA_CLIENT_SECRET?: string;
     /** Comma-separated emails allowed into /experiments/finance (see src/lib/finance-auth.ts). */
     FINANCE_ALLOWED_EMAILS?: string;
+    /** The password for /tools/* (see src/lib/tools-auth.ts). Unset = tools locked. */
+    TOOLS_PASSWORD?: string;
   }
 }
 

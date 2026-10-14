@@ -1,29 +1,27 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { requireOwner } from "@/lib/finance-auth";
 import { type AgentRow, agentFromRequest, crossSite, json } from "@/lib/downloader";
+import { hasToolsSession } from "@/lib/tools-auth";
 
 /**
  * Gates for /tools/downloader's two kinds of caller.
  *
- * The page and its API (/tools/downloader/api/*) are covered by the
- * Cloudflare Access application AND re-check the Access token + owner email
- * here (the same rule as /experiments/finance), so a dashboard slip fails
- * closed. The home-PC agent can't do the Access login, so /api/dl-agent/* is
- * outside Access and authenticates with its connection key instead.
+ * The page and its API (/tools/downloader/api/*) need the tools password
+ * session (src/lib/tools-auth.ts); with no TOOLS_PASSWORD set they refuse
+ * everyone. The home-PC agent can't log in, so /api/dl-agent/* authenticates
+ * with its connection key instead.
  */
 
 type Env = CloudflareEnv;
 
-/** For the gated page API. Writes also have to come from the page itself. */
-export async function openForOwner(
+/** For the page API. Writes also have to come from the page itself. */
+export async function openForTools(
   request: Request,
   { write = false } = {},
 ): Promise<{ env: Env } | { denied: Response }> {
   const { env } = await getCloudflareContext({ async: true });
-  // `next dev` has no Access in front of it; production builds never take this branch.
-  if (process.env.NODE_ENV !== "development") {
-    const owner = await requireOwner(request.headers, env);
-    if (!owner.ok) return { denied: json({ error: "forbidden", reason: owner.reason }, 403) };
+  // `next dev` skips the password; production builds never take this branch.
+  if (process.env.NODE_ENV !== "development" && !(await hasToolsSession(env))) {
+    return { denied: json({ error: "login required" }, 401) };
   }
   if (write) {
     const bad = crossSite(request);

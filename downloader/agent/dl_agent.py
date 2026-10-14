@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Home-PC agent for ericlau.io/experiments/downloader.
+"""Home-PC agent for ericlau.io/tools/downloader.
 
 Runs in the background on the owner's Windows PC (installed by install.ps1),
 polls the site for queued links, downloads them with yt-dlp + ffmpeg on the

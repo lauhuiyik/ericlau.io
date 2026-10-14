@@ -12,7 +12,7 @@ import { DownloaderApp } from "./downloader-app";
  * queues links and hands the finished files back. See src/lib/downloader.ts.
  *
  * Same two layers as /experiments/finance: the Access application must cover
- * /experiments/downloader, AND this page (and its ./api routes) verify the
+ * /tools/downloader, AND this page (and its ./api routes) verify the
  * Access token and owner email themselves, so a dashboard gap fails closed.
  */
 export const dynamic = "force-dynamic";

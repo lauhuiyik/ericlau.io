@@ -1,5 +1,5 @@
 /**
- * Shared pieces of /experiments/downloader.
+ * Shared pieces of /tools/downloader.
  *
  * The page (behind Cloudflare Access) queues jobs in D1 (DL_DB). A small agent
  * on the owner's home PC (downloader/agent/dl_agent.py) polls /api/dl-agent/*,

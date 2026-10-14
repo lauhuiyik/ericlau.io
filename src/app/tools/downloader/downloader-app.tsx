@@ -28,8 +28,8 @@ type Agent = {
 };
 type State = { now: number; jobs: Job[]; agents: Agent[] };
 
-const API = "/experiments/downloader/api";
-const INSTALLER = "/experiments/downloader/EricLauDownloader-Setup.zip";
+const API = "/tools/downloader/api";
+const INSTALLER = "/tools/downloader/EricLauDownloader-Setup.zip";
 const ACTIVE = new Set(["queued", "starting", "downloading", "converting", "uploading"]);
 const COOKIE_OPTIONS = [
   { value: "", label: "None (public posts only)" },
@@ -203,10 +203,10 @@ export function DownloaderApp() {
     <div className="flex flex-1 flex-col">
       <header className="flex items-center justify-between px-6 py-6 sm:px-12">
         <Link
-          href="/experiments"
+          href="/tools"
           className="font-mono text-xs uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors"
         >
-          ← Experiments
+          ← Tools
         </Link>
         <div className="font-mono text-xs uppercase tracking-[0.18em] text-muted">Downloader</div>
       </header>

@@ -197,7 +197,7 @@ try {
   for ($attempt = 1; ; $attempt++) {
     while (-not $Key) {
       Write-Host ""
-      Write-Host "    Open $Server/experiments/downloader, go to PC setup > Create key,"
+      Write-Host "    Open $Server/tools/downloader, go to PC setup > Create key,"
       Write-Host "    then paste the key here (right-click pastes in this window)."
       $Key = (Read-Host "    Key").Trim()
       if ($Key -notmatch '^dla_[A-Za-z0-9_-]{20,100}$') {
@@ -248,7 +248,7 @@ try {
     -MultipleInstances IgnoreNew
   $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
   Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
-    -Principal $principal -Description "Downloads links queued at $Server/experiments/downloader" -Force | Out-Null
+    -Principal $principal -Description "Downloads links queued at $Server/tools/downloader" -Force | Out-Null
   Start-ScheduledTask -TaskName $TaskName
   Start-Sleep -Seconds 4
   $running = Get-AgentProcesses | Where-Object { $_.Name -eq "pythonw.exe" }
@@ -258,7 +258,7 @@ try {
   Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 
   Write-Host ""
-  Write-Host "Done. This PC should now show as online at $Server/experiments/downloader" -ForegroundColor Green
+  Write-Host "Done. This PC should now show as online at $Server/tools/downloader" -ForegroundColor Green
   Write-Host "Copies of finished downloads also go to: $($cfg.save_dir)"
   Write-Host "Log: $App\agent.log    Uninstall: $App\uninstall.ps1"
   exit 0

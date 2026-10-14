@@ -1,7 +1,7 @@
 EricLau Downloader - home PC agent
 ===================================
 
-This lets ericlau.io/experiments/downloader use this PC to download
+This lets ericlau.io/tools/downloader use this PC to download
 YouTube, SoundCloud and Instagram links. The site queues links, this PC
 downloads them on your home connection, and the finished files show up on
 the page (kept for 24 hours). A copy also goes to Downloads\Web Downloads.

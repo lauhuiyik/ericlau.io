@@ -26,6 +26,10 @@ const nextConfig: NextConfig = {
       { source: "/experiments/finance/:path*", headers: FINANCE_HEADERS },
     ];
   },
+  async redirects() {
+    // The "AI" section was renamed "Tools"; keep old links working.
+    return [{ source: "/ai", destination: "/tools", permanent: true }];
+  },
 };
 
 // Exposes the Cloudflare bindings (D1, KV) to `next dev` via getCloudflareContext().

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds public/experiments/downloader/EricLauDownloader-Setup.zip from this folder.
+"""Builds public/tools/downloader/EricLauDownloader-Setup.zip from this folder.
 
 Run after changing anything in downloader/agent/, and commit the zip (the
 downloader page links to it; it sits behind the same Access path):
@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-OUT = HERE.parent.parent / "public" / "experiments" / "downloader" / "EricLauDownloader-Setup.zip"
+OUT = HERE.parent.parent / "public" / "tools" / "downloader" / "EricLauDownloader-Setup.zip"
 FILES = ["Install.cmd", "Uninstall.cmd", "install.ps1", "uninstall.ps1", "dl_agent.py", "README.txt"]
 CRLF = {".cmd", ".ps1", ".txt"}
 FIXED_TIME = (2026, 1, 1, 0, 0, 0)

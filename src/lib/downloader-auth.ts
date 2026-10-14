@@ -3,9 +3,9 @@ import { requireOwner } from "@/lib/finance-auth";
 import { type AgentRow, agentFromRequest, crossSite, json } from "@/lib/downloader";
 
 /**
- * Gates for /experiments/downloader's two kinds of caller.
+ * Gates for /tools/downloader's two kinds of caller.
  *
- * The page and its API (/experiments/downloader/api/*) are covered by the
+ * The page and its API (/tools/downloader/api/*) are covered by the
  * Cloudflare Access application AND re-check the Access token + owner email
  * here (the same rule as /experiments/finance), so a dashboard slip fails
  * closed. The home-PC agent can't do the Access login, so /api/dl-agent/* is

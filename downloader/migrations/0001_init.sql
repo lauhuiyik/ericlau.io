@@ -1,4 +1,4 @@
--- /experiments/downloader (D1 database ericlau-downloader).
+-- /tools/downloader (D1 database ericlau-downloader).
 -- The web page queues jobs here; the home-PC agent (downloader/agent/) claims
 -- them, runs yt-dlp + ffmpeg, and uploads the results to R2 (DL_BUCKET).
 -- Times are unix milliseconds.

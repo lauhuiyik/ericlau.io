@@ -49,8 +49,8 @@ export const sections: Section[] = [
     group: "logs",
   },
   {
-    slug: "ai",
-    title: "AI",
+    slug: "tools",
+    title: "Tools",
     blurb: "A log of one-off solutions to everyday problems.",
     group: "logs",
   },

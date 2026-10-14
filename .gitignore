@@ -59,3 +59,8 @@ __pycache__/
 finance-*.json
 finance-*.csv
 finance-*.md
+
+# downloader agent runtime files, if it is ever run from the repo (config.json holds its key)
+downloader/agent/config.json
+downloader/agent/agent.log*
+downloader/agent/work/

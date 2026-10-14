@@ -11,6 +11,12 @@ const entries: { slug: string; title: string; note: string; href?: string }[] = 
     href: "/experiments/homeenergy",
   },
   {
+    slug: "downloader",
+    title: "Downloader",
+    note: "YouTube, SoundCloud & Instagram, downloaded by the home PC. Login required.",
+    href: "/experiments/downloader",
+  },
+  {
     slug: "japan2026",
     title: "Japan 2026",
     note: "A private trip itinerary — Tokyo & Osaka, Aug 2026. Login required.",

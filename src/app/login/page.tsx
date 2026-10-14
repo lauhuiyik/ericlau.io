@@ -1,6 +1,8 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import { CONTACT_EMAIL, CONTACT_MAILTO } from "@/lib/contact";
+import { SiteFooter } from "@/app/_components/site-footer";
 
 async function authenticate(formData: FormData) {
   "use server";
@@ -71,13 +73,16 @@ export default async function LoginPage({ searchParams }: Props) {
             Enter →
           </button>
         </form>
+        <p className="mt-8 text-sm text-muted">
+          Need the password? Email{" "}
+          <a href={CONTACT_MAILTO} className="text-foreground/80 underline underline-offset-4 hover:text-foreground">
+            {CONTACT_EMAIL}
+          </a>
+          .
+        </p>
       </section>
 
-      <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-        <Link href="/" className="hover:text-foreground transition-colors">
-          ← Back to index
-        </Link>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

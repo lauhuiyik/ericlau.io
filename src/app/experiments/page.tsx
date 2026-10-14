@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { sections } from "@/lib/sections";
+import { SiteFooter } from "@/app/_components/site-footer";
 
 // Hand-curated list of HTML experiments living in /public/experiments/<slug>/.
 // To add one: drop an index.html into public/experiments/<slug>/, then add an entry here.
@@ -74,11 +75,7 @@ export default function Page() {
         </ul>
       </section>
 
-      <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-        <Link href="/" className="hover:text-foreground transition-colors">
-          ← Back to index
-        </Link>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

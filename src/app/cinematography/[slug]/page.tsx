@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { projects } from "../_projects";
+import { SiteFooter } from "@/app/_components/site-footer";
 
 type Props = {
   params: Promise<{ slug: string }>;
@@ -46,14 +47,7 @@ export default async function ProjectPage({ params }: Props) {
         </div>
       </section>
 
-      <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-        <Link
-          href="/cinematography"
-          className="hover:text-foreground transition-colors"
-        >
-          ← Cinematography
-        </Link>
-      </footer>
+      <SiteFooter backHref="/cinematography" backLabel="← Cinematography" />
     </div>
   );
 }

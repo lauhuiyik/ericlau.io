@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { projects } from "./_projects";
 import { GalleryCard } from "./_gallery-card";
+import { SiteFooter } from "@/app/_components/site-footer";
 
 export default function Cinematography() {
   return (
@@ -43,11 +44,7 @@ export default function Cinematography() {
         </div>
       </section>
 
-      <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-        <Link href="/" className="hover:text-foreground transition-colors">
-          ← Back to index
-        </Link>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

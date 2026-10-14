@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { sections } from "@/lib/sections";
+import { CONTACT_EMAIL, CONTACT_MAILTO } from "@/lib/contact";
+import { SiteFooter } from "@/app/_components/site-footer";
 
 type Props = {
   slug: string;
@@ -34,15 +36,15 @@ export function SectionStub({ slug }: Props) {
           {section.blurb}
         </p>
         <p className="mt-12 max-w-xl text-sm text-muted leading-relaxed">
-          Nothing here yet. Coming soon.
+          Nothing here yet. Coming soon. In the meantime, say hello at{" "}
+          <a href={CONTACT_MAILTO} className="text-foreground/80 underline underline-offset-4 hover:text-foreground">
+            {CONTACT_EMAIL}
+          </a>
+          .
         </p>
       </section>
 
-      <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-        <Link href="/" className="hover:text-foreground transition-colors">
-          ← Back to index
-        </Link>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

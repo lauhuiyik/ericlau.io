@@ -13,6 +13,7 @@ import {
   safeNext,
   signSession,
 } from "@/lib/tools-auth";
+import { SiteFooter } from "@/app/_components/site-footer";
 
 /** The password gate for /tools/* (see src/lib/tools-auth.ts). */
 export const dynamic = "force-dynamic";
@@ -107,11 +108,7 @@ export default async function Page({ searchParams }: Props) {
         )}
       </section>
 
-      <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-        <Link href="/" className="hover:text-foreground transition-colors">
-          ← Back to index
-        </Link>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

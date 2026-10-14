@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { sections, groupLabels, type Section } from "@/lib/sections";
+import { CONTACT_MAILTO } from "@/lib/contact";
 
 export default function Home() {
   const grouped = sections.reduce<Record<Section["group"], Section[]>>(
@@ -21,7 +22,7 @@ export default function Home() {
           Eric Lau
         </Link>
         <a
-          href="mailto:hello@ericlau.io"
+          href={CONTACT_MAILTO}
           className="font-mono text-xs uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors"
         >
           Contact
@@ -76,7 +77,7 @@ export default function Home() {
         </div>
         <div className="flex gap-6 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
           <a
-            href="mailto:hello@ericlau.io"
+            href={CONTACT_MAILTO}
             className="hover:text-foreground transition-colors"
           >
             Email

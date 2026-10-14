@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { GalleryImage } from "./_gallery-image";
+import { SiteFooter } from "@/app/_components/site-footer";
 
 const images = Array.from({ length: 37 }, (_, i) => ({
   src: `/photography/lambex26/LAMBEX26-${i + 1}.JPG`,
@@ -41,14 +42,7 @@ export default function LambEx26() {
         </div>
       </section>
 
-      <footer className="border-t border-rule px-6 sm:px-12 py-8 font-mono text-[10px] uppercase tracking-[0.22em] text-muted">
-        <Link
-          href="/photography"
-          className="hover:text-foreground transition-colors"
-        >
-          ← Photography
-        </Link>
-      </footer>
+      <SiteFooter backHref="/photography" backLabel="← Photography" />
     </div>
   );
 }

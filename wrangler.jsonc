@@ -27,15 +27,15 @@
       "database_id": "970949ea-7c0c-434c-a111-e5db27087f30",
       "migrations_dir": "finance/migrations"
     },
-    // /experiments/downloader: the job queue the home-PC agent works through.
+    // /tools/downloader: the job queue the home-PC agent works through.
     {
       "binding": "DL_DB",
       "database_name": "ericlau-downloader",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "59bf1486-e457-4a90-9ba7-adb1e1b3b23e",
       "migrations_dir": "downloader/migrations"
     }
   ],
-  // /experiments/downloader: finished files, uploaded by the home-PC agent and
+  // /tools/downloader: finished files, uploaded by the home-PC agent and
   // deleted after 24 hours (by the app, with a bucket lifecycle rule as backstop).
   "r2_buckets": [
     { "binding": "DL_BUCKET", "bucket_name": "ericlau-downloads" }

@@ -1,21 +1,22 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { checkAccess } from "@/lib/cf-access";
+import { requireOwner } from "@/lib/finance-auth";
 import { FinanceApp } from "./finance-app";
 
 /**
  * Personal spending tracker, behind Cloudflare Access.
  *
  * Two layers: the Access application in the Cloudflare dashboard must cover
- * /experiments/finance, AND this page verifies the Access token itself and
- * renders nothing but a locked notice without one (see src/lib/cf-access.ts).
- * So a gap in the dashboard config fails closed instead of going public.
+ * /experiments/finance, AND this page verifies the Access token itself, and
+ * that it belongs to the owner, rendering nothing but a locked notice
+ * otherwise (src/lib/finance-auth.ts). So a gap in the dashboard config fails
+ * closed instead of going public.
  *
- * The server never sees any financial data: CSV exports are parsed in the
- * browser and kept in that browser's localStorage, and the personal profile
- * (merchant rules, allowances, pay, debts) is imported the same way. So there
- * is nothing to leak through logs, caches or this public repo.
+ * The server never sees any plaintext financial data: CSV exports are parsed
+ * in the browser, encrypted there with the owner's passphrase and saved as
+ * ciphertext to the vault (./vault/route.ts). Nothing readable can leak
+ * through logs, caches, the database or this public repo.
  */
 export const dynamic = "force-dynamic";
 
@@ -28,7 +29,7 @@ export default async function Page() {
   // `next dev` has no Access in front of it; production builds never take this branch.
   if (process.env.NODE_ENV !== "development") {
     const { env } = await getCloudflareContext({ async: true });
-    const gate = await checkAccess(await headers(), env);
+    const gate = await requireOwner(await headers(), env);
     if (!gate.ok) return <Locked reason={gate.reason} />;
   }
   return <FinanceApp />;

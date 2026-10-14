@@ -20,7 +20,10 @@ type Jwk = JsonWebKey & { kid?: string };
 export type AccessResult = { ok: true; email?: string } | { ok: false; reason: string };
 
 const CERTS_TTL_MS = 60 * 60 * 1000;
+/** After a key rotation, refetch early for an unknown kid, but at most this often. */
+const CERTS_FORCED_REFRESH_MS = 60 * 1000;
 let certsCache: { url: string; at: number; keys: Jwk[] } | null = null;
+let lastForcedRefresh = 0;
 
 function b64urlToBytes(s: string): Uint8Array<ArrayBuffer> {
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
@@ -35,13 +38,14 @@ const b64urlJson = (s: string) => JSON.parse(new TextDecoder().decode(b64urlToBy
 /** "ericlau.cloudflareaccess.com", with or without scheme or trailing slash. */
 export const normaliseTeamDomain = (d: string) => d.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
 
-async function fetchKeys(teamDomain: string): Promise<Jwk[]> {
+async function fetchKeys(teamDomain: string, force = false): Promise<Jwk[]> {
   const url = `https://${teamDomain}/cdn-cgi/access/certs`;
-  if (certsCache && certsCache.url === url && Date.now() - certsCache.at < CERTS_TTL_MS) return certsCache.keys;
-  const res = await fetch(url);
+  if (!force && certsCache && certsCache.url === url && Date.now() - certsCache.at < CERTS_TTL_MS) return certsCache.keys;
+  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw new Error(`certs ${res.status}`);
   const body = (await res.json()) as { keys?: Jwk[] };
-  const keys = body.keys ?? [];
+  const keys = Array.isArray(body.keys) ? body.keys : [];
+  if (keys.length === 0) throw new Error("no signing keys"); // never cache an empty key set
   certsCache = { url, at: Date.now(), keys };
   return keys;
 }
@@ -54,18 +58,23 @@ export async function verifyAccessJwt(
   if (parts.length !== 3) return { ok: false, reason: "malformed token" };
   let header: { alg?: string; kid?: string };
   let payload: { aud?: string | string[]; iss?: string; exp?: number; nbf?: number; email?: string };
+  let sig: Uint8Array<ArrayBuffer>;
   try {
     header = b64urlJson(parts[0]);
     payload = b64urlJson(parts[1]);
+    sig = b64urlToBytes(parts[2]);
   } catch {
+    return { ok: false, reason: "malformed token" };
+  }
+  if (!header || typeof header !== "object" || !payload || typeof payload !== "object") {
     return { ok: false, reason: "malformed token" };
   }
   // Only RS256: never let the token pick a weaker algorithm (e.g. "none" or HS256).
   if (header.alg !== "RS256") return { ok: false, reason: "unexpected algorithm" };
 
   const candidates = header.kid ? opts.keys.filter((k) => k.kid === header.kid) : opts.keys;
+  if (candidates.length === 0) return { ok: false, reason: "unknown signing key" };
   const data = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
-  const sig = b64urlToBytes(parts[2]);
   let verified = false;
   for (const k of candidates) {
     if (k.kty !== "RSA" || !k.n || !k.e) continue;
@@ -106,11 +115,15 @@ export async function checkAccess(
   if (!teamDomain || !aud) return { ok: false, reason: "Access check not configured (CF_ACCESS_TEAM_DOMAIN / CF_ACCESS_AUD)" };
   const token = headers.get("cf-access-jwt-assertion");
   if (!token) return { ok: false, reason: "request did not come through Cloudflare Access" };
-  let keys: Jwk[];
   try {
-    keys = await fetchKeys(teamDomain);
+    const result = await verifyAccessJwt(token, { teamDomain, aud, keys: await fetchKeys(teamDomain) });
+    // Cloudflare rotated its keys since we cached them: refetch once (rate-limited) and retry.
+    if (!result.ok && result.reason === "unknown signing key" && Date.now() - lastForcedRefresh > CERTS_FORCED_REFRESH_MS) {
+      lastForcedRefresh = Date.now();
+      return verifyAccessJwt(token, { teamDomain, aud, keys: await fetchKeys(teamDomain, true) });
+    }
+    return result;
   } catch {
-    return { ok: false, reason: "could not load Access signing keys" };
+    return { ok: false, reason: "could not verify the Access token" };
   }
-  return verifyAccessJwt(token, { teamDomain, aud, keys });
 }

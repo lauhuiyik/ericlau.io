@@ -1,10 +1,8 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   BUCKETS,
-  EMPTY_PROFILE,
   type Assignment,
   type ColumnMapping,
   type Debt,
@@ -34,28 +32,14 @@ import {
   shiftPeriod,
   summarise,
   topMerchants,
+  tracked,
 } from "@/lib/finance";
+import { passphraseProblem, suggestPassphrase } from "@/lib/vault-crypto";
+import type { VaultOp } from "@/lib/vault-sync";
+import { type SaveState, type VaultStatus, isWrongPassphrase, useVault } from "./use-vault";
 
-// Everything below lives only in this browser's localStorage. Nothing is sent
-// to the server, so nothing can end up in logs, caches or the (public) repo.
-const KEY = { txns: "finance:v1:txns", profile: "finance:v1:profile", overrides: "finance:v1:overrides" };
-
-function load<T>(key: string, fallback: T): T {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function save(key: string, value: unknown) {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // Storage full or blocked (private mode): the page still works for this visit.
-  }
-}
+// The data lives in the owner's vault on the site, encrypted in this browser
+// with their passphrase (./use-vault.ts). Decrypted data is only ever in memory.
 
 const aud0 = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD", maximumFractionDigits: 0 });
 const aud2 = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" });
@@ -79,47 +63,46 @@ const SOURCE_LABEL: Record<string, string> = { amex: "Amex", nab: "NAB", commban
 type PendingFile = { name: string; rows: string[][]; mapping: ColumnMapping };
 
 export function FinanceApp() {
-  const [ready, setReady] = useState(false);
-  const [txns, setTxns] = useState<Txn[]>([]);
-  const [profile, setProfile] = useState<Profile>(EMPTY_PROFILE);
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const vault = useVault();
+  const { txns, profile, overrides } = vault.data;
+  const ready = vault.status.s === "setup" || vault.status.s === "unlocked";
   const [period, setPeriod] = useState<Period>(() => periodFor(todayIso(), 15));
   const [focus, setFocus] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingFile[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
 
+  // Once the data is open (or replaced from another device), start on the current pay period.
+  // Locked: clear import messages and half-mapped files, which show real transactions.
   useEffect(() => {
-    const p = normaliseProfile(load(KEY.profile, EMPTY_PROFILE));
-    // Reading localStorage has to wait until after hydration.
-    /* eslint-disable react-hooks/set-state-in-effect */
-    setProfile(p);
-    setTxns(load<Txn[]>(KEY.txns, []));
-    setOverrides(load<Record<string, string>>(KEY.overrides, {}));
-    setPeriod(periodFor(todayIso(), p.payday));
-    setReady(true);
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, []);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPeriod(periodFor(todayIso(), vault.data.profile.payday));
+    if (!ready) {
+      setPending([]);
+      setNotice(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vault.status.s]);
 
-  const updateProfile = (p: Profile) => {
-    setProfile(p);
-    save(KEY.profile, p);
-  };
-  const updateTxns = (t: Txn[]) => {
-    setTxns(t);
-    save(KEY.txns, t);
-  };
-  const assign = (description: string, value: string) => {
-    const next = { ...overrides, [normaliseDescription(description)]: value };
-    setOverrides(next);
-    save(KEY.overrides, next);
-  };
+  const updateProfile = (p: Profile) => vault.apply({ t: "profile", patch: p });
+  const assign = (description: string, value: string) =>
+    vault.apply({ t: "assign", entries: { [normaliseDescription(description)]: value } });
 
   const summary = useMemo(() => summarise(txns, period, profile, overrides), [txns, period, profile, overrides]);
+  // Month by month: every pay period from the first transaction up to this one (or the one being viewed, if
+  // later), 6 to 24 columns, none from before the "track from" date.
   const history = useMemo(() => {
-    const periods = Array.from({ length: 6 }, (_, i) => shiftPeriod(period, i - 5, profile.payday));
-    return periods.map((p) => ({ period: p, s: summarise(txns, p, profile, overrides) }));
+    const now = periodFor(todayIso(), profile.payday);
+    const last = period.start > now.start ? period : now;
+    const first = txns.reduce((min, t) => (t.date < min ? t.date : min), period.start);
+    let count = 6;
+    while (count < 24 && shiftPeriod(last, -(count - 1), profile.payday).start > first) count++;
+    const periods = Array.from({ length: count }, (_, i) => shiftPeriod(last, i - (count - 1), profile.payday));
+    return periods
+      .filter((p) => !profile.startDate || p.end >= profile.startDate)
+      .map((p) => ({ period: p, s: summarise(txns, p, profile, overrides) }));
   }, [txns, period, profile, overrides]);
+  const atStart = !!profile.startDate && period.start <= profile.startDate;
   const fresh = useMemo(() => freshness(txns), [txns]);
   const pace = useMemo(() => recentPace(txns, profile, overrides, todayIso()), [txns, profile, overrides]);
   const plan = planFor(profile);
@@ -129,22 +112,25 @@ export function FinanceApp() {
     if (!files) return;
     let txnsNow = txns;
     let profileNow = profile;
+    const ops: VaultOp[] = [];
     const messages: string[] = [];
     const needMapping: PendingFile[] = [];
-    for (const file of Array.from(files)) {
+    // Profile and backup files first: the CSV importers use the profile's cardholder lists.
+    const ordered = Array.from(files).sort(
+      (a, b) => Number(!a.name.toLowerCase().endsWith(".json")) - Number(!b.name.toLowerCase().endsWith(".json")),
+    );
+    for (const file of ordered) {
       const text = await file.text();
       if (file.name.toLowerCase().endsWith(".json")) {
         try {
           const data = JSON.parse(text);
           if (Array.isArray(data.txns)) {
-            // A backup made by "Download backup".
-            profileNow = normaliseProfile(data.profile);
-            const merged = mergeTxns(txnsNow, data.txns as Txn[]);
+            // A backup made by "Download backup". One from before "track from" was set keeps the date set here.
+            const restored = normaliseProfile(data.profile);
+            profileNow = { ...restored, startDate: restored.startDate ?? profileNow.startDate };
+            const merged = mergeTxns(txnsNow, (data.txns as Txn[]).filter((t) => tracked(t, profileNow)));
             txnsNow = merged.txns;
-            if (data.overrides) {
-              setOverrides(data.overrides);
-              save(KEY.overrides, data.overrides);
-            }
+            if (data.overrides && typeof data.overrides === "object") ops.push({ t: "assign", entries: data.overrides });
             messages.push(`${file.name}: restored backup (${merged.added} new transactions).`);
           } else {
             const imported = normaliseProfile(data);
@@ -152,6 +138,8 @@ export function FinanceApp() {
             // Re-importing the profile file must not wipe repayments already logged here.
             profileNow = {
               ...imported,
+              // A profile file without a "track from" date keeps the one set here.
+              startDate: imported.startDate ?? before.startDate,
               debts: imported.debts.map((d: Debt) => {
                 const prev = before.debts.find((x) => x.name === d.name);
                 return prev?.log?.length ? { ...d, log: prev.log } : d;
@@ -166,28 +154,52 @@ export function FinanceApp() {
       }
       const res = importCsv(text, profileNow);
       if (res.ok) {
-        const merged = mergeTxns(txnsNow, res.txns);
+        const keep = res.txns.filter((t) => tracked(t, profileNow));
+        const merged = mergeTxns(txnsNow, keep);
         txnsNow = merged.txns;
-        messages.push(`${file.name}: ${merged.added} new transactions (${res.format}).`);
+        const early = res.txns.length - keep.length;
+        messages.push(
+          `${file.name}: ${merged.added} new transactions (${res.format})${early ? `; ${early} before your start date skipped` : ""}.`,
+        );
       } else if (res.needsMapping) {
         needMapping.push({ name: file.name, rows: res.rows, mapping: guessMapping(res.rows) });
       } else {
         messages.push(`${file.name}: ${res.error}`);
       }
     }
+    // A profile or backup with a later "track from" date deletes what's stored before it: ask first.
+    if (profileNow.startDate && profileNow.startDate !== profile.startDate) {
+      const from = `${short(profileNow.startDate)} ${profileNow.startDate.slice(0, 4)}`;
+      const n = txns.filter((t) => !tracked(t, profileNow)).length;
+      if (
+        n > 0 &&
+        !window.confirm(
+          `This file sets "Track from" to ${from}, which deletes ${n} earlier transaction${n === 1 ? "" : "s"}. Continue?`,
+        )
+      ) {
+        setNotice("Import cancelled; nothing was changed.");
+        if (fileInput.current) fileInput.current.value = "";
+        return;
+      }
+      messages.push(`Tracking from ${from}${n ? `; ${n} earlier transaction${n === 1 ? "" : "s"} deleted` : ""}.`);
+    }
     if (profileNow !== profile) {
-      updateProfile(profileNow);
+      ops.unshift({ t: "profile", patch: profileNow });
       setPeriod(periodFor(todayIso(), profileNow.payday));
     }
-    updateTxns(txnsNow);
+    const ids = new Set(txns.map((t) => t.id));
+    const added = txnsNow.filter((t) => !ids.has(t.id));
+    if (added.length) ops.push({ t: "txns", add: added });
+    vault.apply(ops);
     setPending((p) => [...p, ...needMapping]);
     setNotice(messages.join(" ") || null);
     if (fileInput.current) fileInput.current.value = "";
   }
 
   function importMapped(file: PendingFile) {
-    const merged = mergeTxns(txns, fromMappedCsv(file.rows, file.mapping, profile));
-    updateTxns(merged.txns);
+    const merged = mergeTxns(txns, fromMappedCsv(file.rows, file.mapping, profile).filter((t) => tracked(t, profile)));
+    const ids = new Set(txns.map((t) => t.id));
+    vault.apply({ t: "txns", add: merged.txns.filter((t) => !ids.has(t.id)) });
     setPending((p) => p.filter((x) => x !== file));
     setNotice(`${file.name}: ${merged.added} new transactions.`);
   }
@@ -201,17 +213,20 @@ export function FinanceApp() {
     URL.revokeObjectURL(a.href);
   }
 
-  function clearAll() {
-    if (!window.confirm("Delete all transactions, rules and settings stored in this browser?")) return;
-    for (const k of Object.values(KEY)) {
-      try {
-        window.localStorage.removeItem(k);
-      } catch {}
+  async function deleteEverything() {
+    if (!window.confirm("Delete all your transactions, rules and settings from the site and this device? This can't be undone.")) return;
+    if (
+      !window.confirm(
+        "Really delete everything? Download a backup first if you might want it back. (Cloudflare's own database backups keep the encrypted copy for up to 30 days.)",
+      )
+    )
+      return;
+    try {
+      await vault.deleteEverything();
+      setNotice("Everything was deleted from the site and this device.");
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
     }
-    setTxns([]);
-    setOverrides({});
-    setProfile(EMPTY_PROFILE);
-    setNotice("All local data deleted.");
   }
 
   const budgetRows = BUCKETS.filter(
@@ -229,44 +244,66 @@ export function FinanceApp() {
   return (
     <div className="flex flex-1 flex-col">
       <header className="flex items-center justify-between px-6 py-6 sm:px-12">
-        <Link
+        {/* A full page load, not next/link: the finance page's CSP must not follow the user onto other pages. */}
+        <a
           href="/experiments"
           className="font-mono text-xs uppercase tracking-[0.18em] text-muted hover:text-foreground transition-colors"
         >
           ← Experiments
-        </Link>
+        </a>
         <div className="font-mono text-xs uppercase tracking-[0.18em] text-muted">Finance · private</div>
       </header>
 
       <section className="px-6 sm:px-12 pt-8 pb-6 max-w-5xl">
         <h1 className="text-4xl sm:text-5xl font-semibold tracking-[-0.02em]">Spending</h1>
         <p className="mt-3 max-w-2xl text-sm text-muted leading-relaxed">
-          Drop in CSV exports from CommBank, NAB and Amex. They are read in this browser and stored only on this
-          device — nothing is uploaded to the server.
+          Drop in CSV exports from CommBank, NAB and Amex. They are read in this browser, encrypted with your
+          passphrase and saved to your site, so every device you unlock sees the same data. Nobody can read it without
+          the passphrase — not even the site.
         </p>
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <label className="cursor-pointer rounded border border-rule px-4 py-2 text-sm hover:border-muted">
-            Import CSV / profile
-            <input
-              ref={fileInput}
-              type="file"
-              accept=".csv,.json,text/csv,application/json"
-              multiple
-              className="hidden"
-              onChange={(e) => onFiles(e.target.files)}
-            />
-          </label>
-          {ready && txns.length > 0 && (
-            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">
-              Data through{" "}
-              {Object.entries(fresh)
-                .map(([s, d]) => `${SOURCE_LABEL[s] ?? s} ${short(d)}`)
-                .join(" · ")}
-            </span>
-          )}
-        </div>
-        {notice && <p className="mt-3 text-sm text-foreground/80">{notice}</p>}
+        {ready && (
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <label className="cursor-pointer rounded border border-rule px-4 py-2 text-sm hover:border-muted">
+              Import CSV / profile
+              <input
+                ref={fileInput}
+                type="file"
+                accept=".csv,.json,text/csv,application/json"
+                multiple
+                className="hidden"
+                onChange={(e) => onFiles(e.target.files)}
+              />
+            </label>
+            {txns.length > 0 && (
+              <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">
+                Data through{" "}
+                {Object.entries(fresh)
+                  .map(([s, d]) => `${SOURCE_LABEL[s] ?? s} ${short(d)}`)
+                  .join(" · ")}
+              </span>
+            )}
+          </div>
+        )}
+        {vault.status.s === "unlocked" && <SaveLine save={vault.save} onRetry={vault.retry} />}
+        {(notice || vault.notice) && (
+          <p className="mt-3 text-sm text-foreground/80">{[vault.notice, notice].filter(Boolean).join(" ")}</p>
+        )}
       </section>
+
+      <VaultPanel
+        status={vault.status}
+        onSetup={vault.setup}
+        onUnlock={vault.unlock}
+        onDelete={deleteEverything}
+        onDiscard={() => {
+          if (window.confirm("Remove the data shown here from this browser, without saving it to your site?")) {
+            vault.discardLocal();
+            setPending([]);
+            setNotice("Removed from this browser. Nothing was saved to your site.");
+          }
+        }}
+        hasData={txns.length > 0}
+      />
 
       {pending.map((f) => (
         <MappingForm
@@ -291,8 +328,9 @@ export function FinanceApp() {
           {/* Month (pay period) navigation */}
           <section className="border-t border-rule px-6 sm:px-12 py-6 flex flex-wrap items-center gap-4">
             <button
-              className="rounded border border-rule px-3 py-1 text-sm hover:border-muted"
+              className="rounded border border-rule px-3 py-1 text-sm hover:border-muted disabled:opacity-40 disabled:hover:border-rule"
               onClick={() => setPeriod(shiftPeriod(period, -1, profile.payday))}
+              disabled={atStart}
               aria-label="Previous month"
             >
               ←
@@ -407,15 +445,393 @@ export function FinanceApp() {
             <TxnList rows={visibleTxns} onAssign={assign} />
           </section>
 
-          <History rows={history} profile={profile} />
+          {history.length > 0 && (
+            <History
+              rows={history}
+              profile={profile}
+              current={period}
+              onOpen={(p) => {
+                setPeriod(p);
+                window.scrollTo({ top: 0, behavior: "smooth" });
+              }}
+            />
+          )}
         </>
       )}
 
-      {ready && txns.length === 0 && <SavingsSection profile={profile} onChange={updateProfile} pace={null} />}
+      {ready && txns.length === 0 && (
+        <SavingsSection profile={profile} onChange={updateProfile} pace={null} />
+      )}
 
       {ready && (
-        <Settings profile={profile} onChange={updateProfile} onBackup={downloadBackup} onClear={clearAll} />
+        <Settings
+          profile={profile}
+          onChange={updateProfile}
+          onBackup={downloadBackup}
+          earlierThan={(date) => txns.filter((t) => t.date < date).length}
+        >
+          {vault.status.s === "unlocked" && (
+            <VaultSettings
+              remembered={vault.remembered}
+              onChangePassphrase={vault.changePassphrase}
+              onLock={vault.lockDevice}
+              pendingCount={vault.pendingCount}
+              onDelete={deleteEverything}
+            />
+          )}
+        </Settings>
       )}
+    </div>
+  );
+}
+
+function SaveLine({ save, onRetry }: { save: SaveState; onRetry: () => void }) {
+  const at = save.at
+    ? new Date(save.at).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })
+    : null;
+  return (
+    <p className="mt-3 font-mono text-[11px] uppercase tracking-[0.14em] text-muted" role="status">
+      {save.state === "saving" ? (
+        "Saving…"
+      ) : save.state === "error" ? (
+        <span className="normal-case tracking-normal" style={{ color: save.kind === "offline" ? undefined : OVER }}>
+          ⚠ {save.error}{" "}
+          {save.kind === "signin" && (
+            <>
+              <a className="underline" href="/experiments/finance" target="_blank" rel="noopener">
+                Sign in again
+              </a>{" "}
+              (opens a new tab), then{" "}
+            </>
+          )}
+          <button className="underline" onClick={onRetry}>
+            {save.kind === "signin" ? "try again" : "Try again"}
+          </button>
+        </span>
+      ) : (
+        <>🔒 Encrypted · saved to your site{at ? ` · ${at}` : ""}</>
+      )}
+    </p>
+  );
+}
+
+/** Two password fields for a new passphrase, with a "suggest one" option. */
+function NewPassphrase({
+  pass,
+  confirm,
+  onPass,
+  onConfirm,
+}: {
+  pass: string;
+  confirm: string;
+  onPass: (v: string) => void;
+  onConfirm: (v: string) => void;
+}) {
+  const [suggested, setSuggested] = useState<string | null>(null);
+  const problem = pass ? passphraseProblem(pass) : null;
+  return (
+    <>
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="text-muted">New passphrase</span>
+        <input
+          type="password"
+          autoComplete="new-password"
+          className="rounded border border-rule bg-background px-3 py-2"
+          value={pass}
+          onChange={(e) => {
+            onPass(e.target.value);
+            setSuggested(null);
+          }}
+          autoFocus
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="text-muted">Type it again</span>
+        <input
+          type="password"
+          autoComplete="new-password"
+          className="rounded border border-rule bg-background px-3 py-2"
+          value={confirm}
+          onChange={(e) => onConfirm(e.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        className="self-start text-sm text-muted underline hover:text-foreground"
+        onClick={() => {
+          const p = suggestPassphrase();
+          onPass(p);
+          onConfirm(p);
+          setSuggested(p);
+        }}
+      >
+        Suggest a strong passphrase
+      </button>
+      {suggested && (
+        <div className="rounded border border-rule px-3 py-2 text-sm">
+          <code className="select-all break-all font-mono">{suggested}</code>
+          <button
+            type="button"
+            className="ml-3 text-muted underline hover:text-foreground"
+            onClick={() => navigator.clipboard?.writeText(suggested)}
+          >
+            Copy
+          </button>
+          <p className="mt-1 text-xs text-muted">Save it in your password manager before you continue.</p>
+        </div>
+      )}
+      {problem && (
+        <p className="text-sm" aria-live="polite" style={{ color: OVER }}>
+          {problem}
+        </p>
+      )}
+      {confirm.length > 0 && confirm !== pass && (
+        <p className="text-sm" aria-live="polite" style={{ color: OVER }}>
+          The two passphrases don&apos;t match.
+        </p>
+      )}
+    </>
+  );
+}
+
+/** First visit: choose a passphrase. Saved but not on this device yet: unlock. */
+function VaultPanel({
+  status,
+  onSetup,
+  onUnlock,
+  onDelete,
+  onDiscard,
+  hasData,
+}: {
+  status: VaultStatus;
+  onSetup: (passphrase: string, remember: boolean) => Promise<void>;
+  onUnlock: (passphrase: string, remember: boolean) => Promise<void>;
+  /** Delete what's saved on the site (asks twice). Needs no passphrase. */
+  onDelete: () => void;
+  /** Before anything is saved: clear this browser's copy instead. */
+  onDiscard: () => void;
+  hasData: boolean;
+}) {
+  const passInput = useRef<HTMLInputElement>(null);
+  const [pass, setPass] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [remember, setRemember] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (status.s === "loading") {
+    return <p className="border-t border-rule px-6 sm:px-12 py-8 text-sm text-muted">Loading your data…</p>;
+  }
+  if (status.s === "unavailable") {
+    return (
+      <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-2xl text-sm">
+        <p role="alert" style={{ color: OVER }}>⚠ Couldn&apos;t load your data. {status.error}</p>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button className="rounded border border-rule px-4 py-2 hover:border-muted" onClick={() => location.reload()}>
+            {status.signIn ? "Sign in again" : "Reload"}
+          </button>
+          {status.damaged && (
+            <button className="rounded border border-rule px-4 py-2 text-muted hover:border-muted" onClick={onDelete}>
+              Delete the saved copy and start again
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  }
+  if (status.s === "unlocked") return null;
+
+  const setup = status.s === "setup";
+  const blocked = setup ? passphraseProblem(pass) !== null || confirm !== pass : pass.length === 0;
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (blocked) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await (setup ? onSetup : onUnlock)(pass, remember);
+      setPass("");
+      setConfirm("");
+    } catch (err) {
+      setError(isWrongPassphrase(err) ? "That passphrase doesn't unlock your data." : err instanceof Error ? err.message : String(err));
+      passInput.current?.focus();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-2xl">
+      <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
+        {setup ? "Save to your site" : "Unlock your data"}
+      </h2>
+      {status.reason && <p className="mt-3 text-sm text-foreground/80">{status.reason}</p>}
+      <p className="mt-3 text-sm text-muted leading-relaxed">
+        {setup ? (
+          <>
+            Choose a passphrase. Your data is encrypted with it in this browser before it&apos;s saved, so nobody can read
+            it without the passphrase — not even the site. You type it once on each device. Keep it in your password
+            manager: if you forget it and no device still remembers it, the saved copy can&apos;t be opened.
+            {hasData && " What's on this page now will be saved."}
+          </>
+        ) : (
+          "Enter your passphrase to open your data on this device."
+        )}
+      </p>
+      <form className="mt-4 flex flex-col gap-3 sm:max-w-sm" onSubmit={submit}>
+        {/* Lets a password manager file the passphrase under something recognisable. */}
+        <input type="text" name="username" autoComplete="username" value="ericlau.io finance" readOnly hidden />
+        {setup ? (
+          <NewPassphrase pass={pass} confirm={confirm} onPass={setPass} onConfirm={setConfirm} />
+        ) : (
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-muted">Passphrase</span>
+            <input
+              ref={passInput}
+              type="password"
+              autoComplete="current-password"
+              className="rounded border border-rule bg-background px-3 py-2"
+              value={pass}
+              onChange={(e) => setPass(e.target.value)}
+              aria-describedby={error ? "vault-error" : undefined}
+              autoFocus
+            />
+          </label>
+        )}
+        <label className="flex items-center gap-2 text-sm text-muted">
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+          Remember on this device
+        </label>
+        {error && (
+          <p id="vault-error" role="alert" className="text-sm" style={{ color: OVER }}>
+            {error}
+          </p>
+        )}
+        <button
+          type="submit"
+          disabled={busy || blocked}
+          className="self-start rounded border border-rule px-4 py-2 text-sm hover:border-muted disabled:opacity-50"
+        >
+          {busy ? (setup ? "Encrypting and saving…" : "Unlocking…") : setup ? "Save to my site" : "Unlock"}
+        </button>
+      </form>
+      {setup && hasData && (
+        <p className="mt-6 text-xs text-muted">
+          Shared computer?{" "}
+          <button type="button" className="underline hover:text-foreground" onClick={onDiscard}>
+            Remove this data from this browser
+          </button>{" "}
+          without saving it.
+        </p>
+      )}
+      {!setup && (
+        <p className="mt-6 text-xs text-muted">
+          Forgot your passphrase, and no device remembers it?{" "}
+          <button type="button" className="underline hover:text-foreground" onClick={onDelete}>
+            Delete the saved data and start again
+          </button>
+          . Transactions can be re-imported from your bank files and profile.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function VaultSettings({
+  remembered,
+  onChangePassphrase,
+  onLock,
+  onDelete,
+  pendingCount,
+}: {
+  remembered: boolean;
+  onChangePassphrase: (passphrase: string, remember: boolean) => Promise<void>;
+  onLock: (discardUnsaved?: boolean) => Promise<void>;
+  onDelete: () => void;
+  pendingCount: () => number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pass, setPass] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async (fn: () => Promise<void>, done: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await fn();
+      setMsg(done || null);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  async function lock() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await onLock();
+    } catch (e) {
+      const n = pendingCount();
+      if (n && window.confirm(`${e instanceof Error ? e.message : String(e)} Lock anyway and lose ${n === 1 ? "it" : "them"}?`)) {
+        await onLock(true).catch((err) => setMsg(err instanceof Error ? err.message : String(err)));
+      } else if (!n) {
+        setMsg(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="mt-8">
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">Passphrase & this device</h3>
+      <p className="mt-2 text-sm text-muted">
+        {remembered
+          ? "This device remembers your passphrase, so the page opens without asking. Lock it on a shared device."
+          : "This device asks for your passphrase each visit."}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-3 text-sm">
+        <button className="rounded border border-rule px-4 py-2 hover:border-muted" onClick={() => setOpen(!open)}>
+          Change passphrase
+        </button>
+        <button
+          className="rounded border border-rule px-4 py-2 hover:border-muted disabled:opacity-50"
+          disabled={busy}
+          onClick={lock}
+        >
+          Lock this device
+        </button>
+        <button className="rounded border border-rule px-4 py-2 hover:border-muted" onClick={onDelete}>
+          Delete everything saved on the site
+        </button>
+      </div>
+      {open && (
+        <form
+          className="mt-4 flex flex-col gap-3 sm:max-w-sm"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (passphraseProblem(pass) || pass !== confirm) return;
+            void run(async () => {
+              await onChangePassphrase(pass, remembered);
+              setPass("");
+              setConfirm("");
+              setOpen(false);
+            }, "Passphrase changed. Older saved versions under the old passphrase were deleted from the site (Cloudflare's own database backups keep them for up to 30 days). Other devices will ask for the new one.");
+          }}
+        >
+          <input type="text" name="username" autoComplete="username" value="ericlau.io finance" readOnly hidden />
+          <NewPassphrase pass={pass} confirm={confirm} onPass={setPass} onConfirm={setConfirm} />
+          <button
+            type="submit"
+            disabled={busy || passphraseProblem(pass) !== null || pass !== confirm}
+            className="self-start rounded border border-rule px-4 py-2 text-sm hover:border-muted disabled:opacity-50"
+          >
+            {busy ? "Re-encrypting…" : "Save new passphrase"}
+          </button>
+        </form>
+      )}
+      {msg && <p className="mt-3 text-sm text-foreground/80">{msg}</p>}
     </div>
   );
 }
@@ -551,7 +967,17 @@ function DebtEditor({ profile, onChange }: { profile: Profile; onChange: (p: Pro
             <input
               className="rounded border border-rule bg-background px-3 py-2"
               defaultValue={d.name}
-              onBlur={(e) => e.target.value.trim() && update(i, { name: e.target.value.trim() })}
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v === d.name) return;
+                // Debts are matched by name when syncing, so two can't share one.
+                if (!v || profile.debts.some((x, j) => j !== i && x.name === v)) {
+                  if (v) window.alert(`You already have a debt called “${v}”.`);
+                  e.target.value = d.name;
+                  return;
+                }
+                update(i, { name: v });
+              }}
             />
           </label>
           <Field label="Owed when added" value={d.balance} onChange={(v) => update(i, { balance: toNum(v) ?? 0 })} />
@@ -566,9 +992,12 @@ function DebtEditor({ profile, onChange }: { profile: Profile; onChange: (p: Pro
       ))}
       <button
         className="mt-3 rounded border border-rule px-3 py-2 text-sm hover:border-muted"
-        onClick={() =>
-          onChange({ ...profile, debts: [...profile.debts, { name: `Debt ${profile.debts.length + 1}`, balance: 0, payment: 0, log: [] }] })
-        }
+        onClick={() => {
+          const names = new Set(profile.debts.map((d) => d.name));
+          let n = profile.debts.length + 1;
+          while (names.has(`Debt ${n}`)) n++;
+          onChange({ ...profile, debts: [...profile.debts, { name: `Debt ${n}`, balance: 0, payment: 0, log: [] }] });
+        }}
       >
         Add debt
       </button>
@@ -642,8 +1071,13 @@ function SavingsSection({
           <input
             inputMode="decimal"
             className="rounded border border-rule bg-background px-3 py-2"
+            key={String(profile.startingSavings ?? "")}
             defaultValue={profile.startingSavings ?? ""}
-            onBlur={(e) => onChange({ ...profile, startingSavings: Math.max(0, num(e.target.value) ?? 0) })}
+            onBlur={(e) => {
+              if (e.target.value !== String(profile.startingSavings ?? "")) {
+                onChange({ ...profile, startingSavings: Math.max(0, num(e.target.value) ?? 0) });
+              }
+            }}
           />
         </label>
         <label className="flex flex-col gap-1">
@@ -674,8 +1108,11 @@ function SavingsSection({
           <input
             inputMode="decimal"
             className="rounded border border-rule bg-background px-3 py-2"
+            key={String(profile.interestRate ?? "")}
             defaultValue={profile.interestRate ?? ""}
-            onBlur={(e) => onChange({ ...profile, interestRate: num(e.target.value) })}
+            onBlur={(e) => {
+              if (e.target.value !== String(profile.interestRate ?? "")) onChange({ ...profile, interestRate: num(e.target.value) });
+            }}
           />
         </label>
       </div>
@@ -1010,21 +1447,49 @@ function TxnList({
   );
 }
 
-function History({ rows, profile }: { rows: { period: Period; s: ReturnType<typeof summarise> }[]; profile: Profile }) {
+function History({
+  rows,
+  profile,
+  current,
+  onOpen,
+}: {
+  rows: { period: Period; s: ReturnType<typeof summarise> }[];
+  profile: Profile;
+  current: Period;
+  onOpen: (p: Period) => void;
+}) {
   const plan = planFor(profile);
+  // Start scrolled to the newest months (the table is wider than a phone).
+  const scroller = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scroller.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [rows.length]);
   const buckets = BUCKETS.filter(
     (b) => (profile.targets[b.id] ?? 0) > 0 || rows.some((r) => Math.abs(r.s.byBucket[b.id] ?? 0) > 0.005),
   );
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 overflow-x-auto">
+    <section className="border-t border-rule px-6 sm:px-12 py-8">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Month by month</h2>
-      <table className="mt-4 min-w-[44rem] text-sm tabular-nums">
+      <p className="mt-1 text-xs text-muted">Tap a month to open it.</p>
+      {/* Only the table scrolls sideways; the category column stays in view. */}
+      <div ref={scroller} className="mt-4 overflow-x-auto">
+      <table className="min-w-[44rem] text-sm tabular-nums">
         <thead>
           <tr className="text-left text-muted">
-            <th className="py-2 pr-6 font-normal">Category</th>
+            <th className="sticky left-0 bg-background py-2 pr-6 font-normal">Category</th>
             {rows.map((r) => (
-              <th key={r.period.start} className="py-2 pr-6 text-right font-normal">
-                {short(r.period.start)}
+              <th key={r.period.start} className="py-2 pr-6 text-right font-normal whitespace-nowrap">
+                <button
+                  className={
+                    r.period.start === current.start ? "text-foreground underline" : "hover:text-foreground hover:underline"
+                  }
+                  onClick={() => onOpen(r.period)}
+                  aria-label={`Open ${short(r.period.start)} ${r.period.start.slice(0, 4)}`}
+                >
+                  {short(r.period.start)}
+                  {r.period.start.slice(5, 7) === "01" || r.period.start.slice(5, 7) === "12" ? ` ${r.period.start.slice(2, 4)}` : ""}
+                </button>
               </th>
             ))}
             <th className="py-2 text-right font-normal">Allowance</th>
@@ -1035,7 +1500,7 @@ function History({ rows, profile }: { rows: { period: Period; s: ReturnType<type
             const target = profile.targets[b.id] ?? 0;
             return (
               <tr key={b.id}>
-                <td className="py-2 pr-6 text-foreground/90">{b.label}</td>
+                <td className="sticky left-0 bg-background py-2 pr-6 text-foreground/90">{b.label}</td>
                 {rows.map((r) => {
                   const v = r.s.byBucket[b.id] ?? 0;
                   const over = target > 0 && v > target;
@@ -1052,7 +1517,7 @@ function History({ rows, profile }: { rows: { period: Period; s: ReturnType<type
           })}
           {rows.some((r) => r.s.byBucket.uncategorised) && (
             <tr>
-              <td className="py-2 pr-6 text-muted">Uncategorised</td>
+              <td className="sticky left-0 bg-background py-2 pr-6 text-muted">Uncategorised</td>
               {rows.map((r) => (
                 <td key={r.period.start} className="py-2 pr-6 text-right text-muted">
                   {r.s.byBucket.uncategorised ? money(r.s.byBucket.uncategorised) : "—"}
@@ -1062,7 +1527,7 @@ function History({ rows, profile }: { rows: { period: Period; s: ReturnType<type
             </tr>
           )}
           <tr className="font-medium">
-            <td className="py-2 pr-6">Total spent</td>
+            <td className="sticky left-0 bg-background py-2 pr-6">Total spent</td>
             {rows.map((r) => (
               <td key={r.period.start} className="py-2 pr-6 text-right">
                 {money(r.s.spent)}
@@ -1071,7 +1536,7 @@ function History({ rows, profile }: { rows: { period: Period; s: ReturnType<type
             <td className="py-2 text-right text-muted">{money(plan.allowances)}</td>
           </tr>
           <tr>
-            <td className="py-2 pr-6 text-muted">Pay − debts − spent</td>
+            <td className="sticky left-0 bg-background py-2 pr-6 text-muted">Pay − debts − spent</td>
             {rows.map((r) => {
               const pay = r.s.income > 0 ? r.s.income : plan.pay;
               const left = pay - debtsForPeriod(profile, r.period) - r.s.spent;
@@ -1092,6 +1557,7 @@ function History({ rows, profile }: { rows: { period: Period; s: ReturnType<type
           </tr>
         </tbody>
       </table>
+      </div>
       <p className="mt-3 text-xs text-muted">
         ▲ = over the allowance, or less than the savings target left over. Debts use what you logged that month,
         otherwise the usual repayment.
@@ -1104,12 +1570,15 @@ function Settings({
   profile,
   onChange,
   onBackup,
-  onClear,
+  earlierThan,
+  children,
 }: {
   profile: Profile;
   onChange: (p: Profile) => void;
   onBackup: () => void;
-  onClear: () => void;
+  /** How many stored transactions fall before a date (for the "track from" warning). */
+  earlierThan?: (date: string) => number;
+  children?: ReactNode;
 }) {
   const num = (v: string) => {
     const n = parseAmount(v);
@@ -1146,6 +1615,32 @@ function Settings({
           value={profile.emergencyTarget}
           onChange={(v) => onChange({ ...profile, emergencyTarget: num(v) })}
         />
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted">Track from (earlier transactions are deleted)</span>
+          <input
+            key={profile.startDate ?? ""}
+            type="date"
+            className="rounded border border-rule bg-background px-3 py-2"
+            defaultValue={profile.startDate ?? ""}
+            onBlur={(e) => {
+              // A half-typed date reads as "": put the saved one back rather than clearing it.
+              if (e.target.validity.badInput) {
+                e.target.value = profile.startDate ?? "";
+                return;
+              }
+              const v = e.target.value || undefined;
+              if (v === profile.startDate) return;
+              if (v && earlierThan && earlierThan(v) > 0) {
+                const n = earlierThan(v);
+                if (!window.confirm(`Delete ${n} transaction${n === 1 ? "" : "s"} before ${short(v)} ${v.slice(0, 4)}? Re-importing your files won't bring them back while this date is set.`)) {
+                  e.target.value = profile.startDate ?? "";
+                  return;
+                }
+              }
+              onChange({ ...profile, startDate: v });
+            }}
+          />
+        </label>
       </div>
       <h3 className="mt-8 font-mono text-[10px] uppercase tracking-[0.18em] text-muted">Monthly allowance per category</h3>
       <div className="mt-3 grid gap-4 sm:grid-cols-3">
@@ -1169,12 +1664,10 @@ function Settings({
       </p>
       <div className="mt-6 flex flex-wrap gap-3 text-sm">
         <button className="rounded border border-rule px-4 py-2 hover:border-muted" onClick={onBackup}>
-          Download backup
-        </button>
-        <button className="rounded border border-rule px-4 py-2 hover:border-muted" onClick={onClear}>
-          Delete all local data
+          Download backup (unencrypted)
         </button>
       </div>
+      {children}
       <Explainer />
     </details>
   );
@@ -1187,8 +1680,12 @@ function Field({ label, value, onChange }: { label: string; value: number | unde
       <input
         inputMode="decimal"
         className="rounded border border-rule bg-background px-3 py-2"
+        // Keyed by the stored value, so a change saved from another device shows up here.
+        key={String(value ?? "")}
         defaultValue={value ?? ""}
-        onBlur={(e) => onChange(e.target.value)}
+        onBlur={(e) => {
+          if (e.target.value !== String(value ?? "")) onChange(e.target.value);
+        }}
       />
     </label>
   );
@@ -1207,6 +1704,15 @@ function Explainer() {
         Card repayments and transfers between your own accounts are not spending, so they are excluded (otherwise a
         purchase would count twice: once on the card and again when the card is paid). Refunds reduce their category.
         Supplementary cardholders&apos; spending is shown separately and not counted against your allowances.
+      </p>
+      <p className="text-foreground/80">How your data is kept private</p>
+      <p>
+        Files are read in this browser. Before anything is saved, it is encrypted here with a key made from your
+        passphrase, so the site only ever stores scrambled data that it cannot read. Each device you unlock downloads
+        that copy and decrypts it locally. The passphrase never leaves your device. If you forget it and no device
+        still remembers it, the saved copy can&apos;t be opened. The unlock screen lets you delete it and start again:
+        transactions can be re-imported from your bank files, but category choices, logged repayments and settings
+        made here are lost unless you downloaded a backup. Keep the passphrase in your password manager.
       </p>
     </div>
   );

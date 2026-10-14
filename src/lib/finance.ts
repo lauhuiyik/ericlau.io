@@ -4,8 +4,9 @@
  * PRIVACY: this repo is public. Nothing personal belongs in this file — no
  * transactions, merchants specific to one person, budget targets, income or
  * cardholder names. Those live in a "profile" JSON the owner imports in the
- * browser; transactions are parsed client-side and kept in the browser's
- * localStorage. Only generic, chain-level merchant patterns are hard-coded.
+ * browser; transactions are parsed client-side and only ever saved encrypted
+ * with the owner's passphrase (src/lib/vault-*.ts). Only generic, chain-level
+ * merchant patterns are hard-coded.
  */
 
 export const BUCKETS = [
@@ -113,6 +114,8 @@ export type Profile = {
   emergencyTarget?: number;
   /** Savings account interest, % per year (optional). */
   interestRate?: number;
+  /** Track from this date (YYYY-MM-DD): earlier transactions are deleted and never imported. */
+  startDate?: string;
   /** Money owed, repaid from pay each month (paid outside the budget buckets). */
   debts: Debt[];
   /** Cardholder names whose spending counts as the owner's own. */
@@ -402,6 +405,21 @@ export function importCsv(text: string, profile: Profile): ImportResult {
   return { ok: true, txns: fromMappedCsv(rows, detected, profile), format: detected.source };
 }
 
+/** Debts are matched by name when two devices' edits are merged, so a repeated name gets " (2)", " (3)"… */
+function uniqueNames(debts: Debt[]): Debt[] {
+  const seen = new Set<string>();
+  return debts.map((d) => {
+    let name = d.name;
+    for (let n = 2; seen.has(name); n++) name = `${d.name} (${n})`;
+    seen.add(name);
+    return name === d.name ? d : { ...d, name };
+  });
+}
+
+/** False for a transaction before the profile's "track from" date. */
+export const tracked = (t: Pick<Txn, "date">, profile: Pick<Profile, "startDate">) =>
+  !profile.startDate || t.date >= profile.startDate;
+
 /** Adds new transactions, skipping ids already stored. Returns the merged list and how many were new. */
 export function mergeTxns(existing: Txn[], incoming: Txn[]): { txns: Txn[]; added: number } {
   const ids = new Set(existing.map((t) => t.id));
@@ -556,18 +574,21 @@ export function normaliseProfile(raw: unknown): Profile {
     bufferTarget: nonNegative(p.bufferTarget),
     emergencyTarget: nonNegative(p.emergencyTarget),
     interestRate: nonNegative(p.interestRate),
-    debts: Array.isArray(p.debts)
-      ? p.debts
-          .filter((d): d is Debt => !!d && typeof d.name === "string" && typeof d.balance === "number" && typeof d.payment === "number")
-          .map((d) => ({
-            name: d.name,
-            balance: Math.max(0, d.balance),
-            payment: Math.max(0, d.payment),
-            log: Array.isArray(d.log)
-              ? d.log.filter((x) => x && typeof x.period === "string" && typeof x.amount === "number")
-              : [],
-          }))
-      : [],
+    startDate: typeof p.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.startDate) ? p.startDate : undefined,
+    debts: uniqueNames(
+      Array.isArray(p.debts)
+        ? p.debts
+            .filter((d): d is Debt => !!d && typeof d.name === "string" && typeof d.balance === "number" && typeof d.payment === "number")
+            .map((d) => ({
+              name: d.name,
+              balance: Math.max(0, d.balance),
+              payment: Math.max(0, d.payment),
+              log: Array.isArray(d.log)
+                ? d.log.filter((x) => x && typeof x.period === "string" && typeof x.amount === "number")
+                : [],
+            }))
+        : [],
+    ),
     ownCardholders: strings(p.ownCardholders),
     allowedCardholders: strings(p.allowedCardholders),
     targets,

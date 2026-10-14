@@ -7,6 +7,8 @@ declare global {
     /** Tesla Fleet API app credentials (developer.tesla.com). */
     TESLA_CLIENT_ID?: string;
     TESLA_CLIENT_SECRET?: string;
+    /** Comma-separated emails allowed into /experiments/finance (see src/lib/finance-auth.ts). */
+    FINANCE_ALLOWED_EMAILS?: string;
   }
 }
 

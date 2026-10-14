@@ -19,7 +19,14 @@
   },
   // Home energy dashboard storage.
   "d1_databases": [
-    { "binding": "DB", "database_name": "ericlau-energy", "database_id": "296f6f55-74f5-4809-ae12-e8b46a9f8636" }
+    { "binding": "DB", "database_name": "ericlau-energy", "database_id": "296f6f55-74f5-4809-ae12-e8b46a9f8636" },
+    // /experiments/finance: the owner's vault, encrypted in the browser (ciphertext only).
+    {
+      "binding": "FINANCE_DB",
+      "database_name": "ericlau-finance",
+      "database_id": "970949ea-7c0c-434c-a111-e5db27087f30",
+      "migrations_dir": "finance/migrations"
+    }
   ],
   "kv_namespaces": [
     { "binding": "ENERGY_KV", "id": "fce2b129d1ed462c853380cb027bca32" }

@@ -79,6 +79,17 @@ export type Txn = {
  * subscription on a card): counted on its usual day until a real row for it
  * turns up. `match` is the normalised statement description that confirms it.
  */
+/** An amount as of the end of a day. */
+export type Anchor = { amount: number; asOf: string };
+export type CashAnchors = {
+  /** The everyday bank account (CommBank) balance. */
+  bank?: Anchor;
+  /** Owed on each card ("amex", "nab"), and when its statement is due. */
+  cards?: Record<string, Anchor & { due?: string }>;
+  /** Money others owe you (e.g. supplementary cardholders paying you back). */
+  owedToYou?: number;
+};
+
 export type Recurring = { id: string; name: string; amount: number; day: number; category: string; match?: string };
 
 /**
@@ -138,6 +149,8 @@ export type Profile = {
   debts: Debt[];
   /** Regular charges that send no notification. */
   recurring: Recurring[];
+  /** Balances the owner entered, as of a date; the cash position adds what happened since (see cashPosition). */
+  cash?: CashAnchors;
   /** Cardholder names whose spending counts as the owner's own. */
   ownCardholders: string[];
   /** If non-empty, rows for any other cardholder are dropped at import. */
@@ -651,6 +664,7 @@ export function normaliseProfile(raw: unknown): Profile {
     emergencyTarget: nonNegative(p.emergencyTarget),
     interestRate: nonNegative(p.interestRate),
     startDate: typeof p.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.startDate) ? p.startDate : undefined,
+    cash: normaliseCash(p.cash),
     recurring: Array.isArray(p.recurring)
       ? p.recurring
           .filter(
@@ -870,4 +884,83 @@ export function recentPace(
     results.push((s.income > 0 ? s.income : pay) - planFor(profile).debts - s.spent);
   }
   return results.length ? results.reduce((a, b) => a + b, 0) / results.length : null;
+}
+
+// ---------------------------------------------------------------------------
+// Cash position: what's in the bank vs what's owed on the cards
+// ---------------------------------------------------------------------------
+
+const isDay = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+const anchorOf = (v: unknown): Anchor | undefined => {
+  const a = v as Anchor;
+  return a && typeof a.amount === "number" && Number.isFinite(a.amount) && isDay(a.asOf) ? { amount: a.amount, asOf: a.asOf } : undefined;
+};
+
+function normaliseCash(raw: unknown): CashAnchors | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const c = raw as CashAnchors;
+  const cards: NonNullable<CashAnchors["cards"]> = {};
+  for (const [k, v] of Object.entries(c.cards ?? {})) {
+    const a = anchorOf(v);
+    if (a) cards[k] = { ...a, ...(isDay((v as { due?: unknown }).due) ? { due: (v as { due: string }).due } : {}) };
+  }
+  return {
+    ...(anchorOf(c.bank) ? { bank: anchorOf(c.bank) } : {}),
+    cards,
+    ...(typeof c.owedToYou === "number" && c.owedToYou > 0 ? { owedToYou: c.owedToYou } : {}),
+  };
+}
+
+export const CARD_LABELS: Record<string, string> = { amex: "Amex", nab: "NAB" };
+
+export type CashPosition = {
+  bank?: { now: number; asOf: string; moved: number };
+  cards: { source: string; owed: number; asOf: string; added: number; repaid: number; due?: string }[];
+  owed: number;
+  /** bank − owed: positive = usable, negative = short. */
+  net?: number;
+  owedToYou: number;
+  /** Cards due before the next pay, and how far the bank balance is from covering them. */
+  dueBeforePay: number;
+  shortBeforePay?: number;
+};
+
+/**
+ * Bank and card balances now: each entered balance, plus what's recorded after its date. Card spending
+ * (incl. supplementary, fees and phone-captured rows) adds to what's owed; repayments and
+ * refunds take it off. CommBank rows move the bank balance (money out down, money in up).
+ */
+export function cashPosition(txns: Txn[], profile: Profile, today: string, nextPay: string): CashPosition {
+  const cash = profile.cash ?? {};
+  const cards: CashPosition["cards"] = [];
+  for (const [source, a] of Object.entries(cash.cards ?? {})) {
+    let added = 0;
+    let repaid = 0;
+    for (const t of txns) {
+      if (t.source !== source || t.date <= a.asOf || t.date > today) continue;
+      if (t.kind === "transfer") repaid += Math.abs(t.amount);
+      else if (t.kind !== "income") {
+        if (t.amount >= 0) added += t.amount;
+        else repaid += -t.amount; // refunds
+      }
+    }
+    cards.push({ source, owed: Math.round((a.amount + added - repaid) * 100) / 100, asOf: a.asOf, added, repaid, due: a.due });
+  }
+  let bank: CashPosition["bank"];
+  if (cash.bank) {
+    let moved = 0;
+    for (const t of txns) if (t.source === "commbank" && t.date > cash.bank.asOf && t.date <= today) moved -= t.amount;
+    bank = { now: Math.round((cash.bank.amount + moved) * 100) / 100, asOf: cash.bank.asOf, moved };
+  }
+  const owed = cards.reduce((s, c) => s + c.owed, 0);
+  const dueBeforePay = cards.filter((c) => c.due && c.due < nextPay).reduce((s, c) => s + c.owed, 0);
+  return {
+    bank,
+    cards,
+    owed,
+    net: bank ? bank.now - owed : undefined,
+    owedToYou: cash.owedToYou ?? 0,
+    dueBeforePay,
+    shortBeforePay: bank ? bank.now - dueBeforePay : undefined,
+  };
 }

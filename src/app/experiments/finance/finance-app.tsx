@@ -39,6 +39,9 @@ import {
   payDates,
   payPeriodFor,
   shiftPayPeriod,
+  CARD_LABELS,
+  type CashAnchors,
+  cashPosition,
 } from "@/lib/finance";
 import { passphraseProblem, suggestPassphrase } from "@/lib/vault-crypto";
 import type { VaultOp } from "@/lib/vault-sync";
@@ -358,6 +361,15 @@ export function FinanceApp() {
         </section>
       ) : (
         <>
+          <CashPanel
+            txns={txns}
+            profile={profile}
+            onChange={updateProfile}
+            nextPay={shift(here(todayIso()), 1).start}
+            planned={debtsForPeriod(profile, shift(here(todayIso()), 1)) + plan.savings}
+            pay={plan.pay}
+          />
+
           {/* Month (pay period) navigation */}
           <section className="border-t border-rule px-6 sm:px-12 py-6 flex flex-wrap items-center gap-4">
             <button
@@ -1416,6 +1428,163 @@ function ProjectionChart({
 function ordinal(n: number) {
   if (n % 100 >= 11 && n % 100 <= 13) return "th";
   return ["th", "st", "nd", "rd"][n % 10] ?? "th";
+}
+
+/** Bank balance against what's owed on the cards: are you short, and by how much before next pay? */
+function CashPanel({
+  txns,
+  profile,
+  onChange,
+  nextPay,
+  planned,
+  pay,
+}: {
+  txns: Txn[];
+  profile: Profile;
+  onChange: (p: Profile) => void;
+  nextPay: string;
+  planned: number;
+  pay: number;
+}) {
+  const today = todayIso();
+  const c = cashPosition(txns, profile, today, nextPay);
+  const cash = profile.cash ?? {};
+  const [editing, setEditing] = useState(!cash.bank);
+  const [form, setForm] = useState(() => ({
+    bank: cash.bank?.amount?.toString() ?? "",
+    owedToYou: cash.owedToYou?.toString() ?? "",
+    cards: Object.fromEntries(
+      ["nab", "amex"].map((k) => [k, { owed: cash.cards?.[k]?.amount?.toString() ?? "", due: cash.cards?.[k]?.due ?? "" }]),
+    ) as Record<string, { owed: string; due: string }>,
+  }));
+  function save() {
+    const num = (v: string) => {
+      const n = parseAmount(v);
+      return n === null ? undefined : Math.abs(n);
+    };
+    const next: CashAnchors = { cards: {} };
+    const b = num(form.bank);
+    if (b !== undefined) next.bank = { amount: b, asOf: today };
+    for (const [k, v] of Object.entries(form.cards)) {
+      const o = num(v.owed);
+      if (o !== undefined) next.cards![k] = { amount: o, asOf: today, ...(v.due ? { due: v.due } : {}) };
+    }
+    const owed = num(form.owedToYou);
+    if (owed) next.owedToYou = owed;
+    onChange({ ...profile, cash: next });
+    setEditing(false);
+  }
+  const red = (n: number) => (n < 0 ? { color: OVER } : undefined);
+  const signed = (n: number) => (n < 0 ? `−${money(-n)}` : money(n));
+  const afterPay = c.net !== undefined ? c.net + pay - planned : undefined;
+  return (
+    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+      <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Cash position · right now</h2>
+      {c.bank && c.cards.length > 0 ? (
+        <>
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-6">
+            <Tile label="In CommBank" value={money(c.bank.now)} note={`entered ${short(c.bank.asOf)}${c.bank.moved ? `, ${signed(c.bank.moved)} since` : ""}`} />
+            <Tile
+              label="Owed on cards"
+              value={money(c.owed)}
+              note={c.cards.map((x) => `${CARD_LABELS[x.source] ?? x.source} ${money(x.owed)}`).join(" · ")}
+            />
+            <Tile
+              label={c.net! >= 0 ? "Usable" : "Short by"}
+              value={money(Math.abs(c.net!))}
+              note={c.net! >= 0 ? "bank minus everything owed" : "to clear both cards today"}
+              warn={c.net! < 0}
+            />
+            <Tile
+              label="After next pay"
+              value={signed(afterPay!)}
+              note={`+ pay ${money(pay)} − repayments & savings ${money(planned)}`}
+              warn={afterPay! < 0}
+            />
+          </div>
+          <ul className="mt-4 space-y-1 text-sm text-muted">
+            {c.cards
+              .filter((x) => x.due)
+              .sort((a, b) => a.due!.localeCompare(b.due!))
+              .map((x) => (
+                <li key={x.source}>
+                  {CARD_LABELS[x.source] ?? x.source}: {money(x.owed)} due {short(x.due!)}
+                  {x.due! < nextPay ? ` (before your next pay on ${short(nextPay)})` : ""}
+                  {x.added || x.repaid ? ` · since ${short(x.asOf)}: +${money(x.added)} spent, −${money(x.repaid)} repaid/refunded` : ""}
+                </li>
+              ))}
+            {c.dueBeforePay > 0 && (
+              <li style={red(c.shortBeforePay!)}>
+                Due before {short(nextPay)}: {money(c.dueBeforePay)} against {money(c.bank.now)} in the bank
+                {c.shortBeforePay! < 0 ? ` — ${money(-c.shortBeforePay!)} short` : " — covered"}.
+              </li>
+            )}
+            {c.owedToYou > 0 && (
+              <li>
+                Owed to you: {money(c.owedToYou)}. Once paid back you&apos;d be {c.net! + c.owedToYou >= 0 ? "ahead by" : "short by"}{" "}
+                {money(Math.abs(c.net! + c.owedToYou))}.
+              </li>
+            )}
+            <li className="text-xs">
+              Card spending and repayments after each date are added from your phone and imports. Re-enter balances whenever
+              you check your banking apps.
+            </li>
+          </ul>
+        </>
+      ) : (
+        <p className="mt-3 text-sm text-muted">
+          Enter your CommBank balance and what you owe on each card (from the banking apps). From then on the page keeps
+          them up to date from your phone and imports.
+        </p>
+      )}
+      <button className="mt-4 text-sm text-muted underline hover:text-foreground" onClick={() => setEditing(!editing)}>
+        {editing ? "Cancel" : "Update balances"}
+      </button>
+      {editing && (
+        <form
+          className="mt-4 grid gap-4 text-sm sm:grid-cols-3 max-w-3xl"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save();
+          }}
+        >
+          <label className="flex flex-col gap-1">
+            <span className="text-muted">CommBank balance today</span>
+            <input inputMode="decimal" className="rounded border border-rule bg-background px-3 py-2" value={form.bank} onChange={(e) => setForm({ ...form, bank: e.target.value })} />
+          </label>
+          {(["nab", "amex"] as const).map((k) => (
+            <div key={k} className="flex flex-col gap-2">
+              <label className="flex flex-col gap-1">
+                <span className="text-muted">{CARD_LABELS[k]} owed today (incl. pending)</span>
+                <input
+                  inputMode="decimal"
+                  className="rounded border border-rule bg-background px-3 py-2"
+                  value={form.cards[k].owed}
+                  onChange={(e) => setForm({ ...form, cards: { ...form.cards, [k]: { ...form.cards[k], owed: e.target.value } } })}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-muted">{CARD_LABELS[k]} statement due date</span>
+                <input
+                  type="date"
+                  className="rounded border border-rule bg-background px-3 py-2"
+                  value={form.cards[k].due}
+                  onChange={(e) => setForm({ ...form, cards: { ...form.cards, [k]: { ...form.cards[k], due: e.target.value } } })}
+                />
+              </label>
+            </div>
+          ))}
+          <label className="flex flex-col gap-1">
+            <span className="text-muted">Owed to you (e.g. supplementary cards)</span>
+            <input inputMode="decimal" className="rounded border border-rule bg-background px-3 py-2" value={form.owedToYou} onChange={(e) => setForm({ ...form, owedToYou: e.target.value })} />
+          </label>
+          <button type="submit" className="self-end rounded border border-rule px-4 py-2 hover:border-muted sm:col-span-3 sm:justify-self-start">
+            Save balances (as of today)
+          </button>
+        </form>
+      )}
+    </section>
+  );
 }
 
 function Tile({ label, value, note, warn }: { label: string; value: string; note: string; warn?: boolean }) {

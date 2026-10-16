@@ -93,8 +93,10 @@ export const CARD_DEFAULTS: Record<string, { closeDay: number }> = { nab: { clos
 export const PAYMENT_WINDOW_DAYS = 14;
 
 export type CashAnchors = {
-  /** The everyday bank account (CommBank) balance. */
+  /** All the cash on hand (accounts and cash), as one total. */
   bank?: Anchor;
+  /** Where that total came from, so it's quick to update next time. */
+  pockets?: { name: string; amount: number }[];
   /** Each card ("amex", "nab"): total owed, what's still to pay on the latest statement, and when that's due. */
   cards?: Record<string, CardAnchor>;
   /** Money others owe you (e.g. supplementary cardholders paying you back). */
@@ -924,6 +926,13 @@ function normaliseCash(raw: unknown): CashAnchors | undefined {
   }
   return {
     ...(anchorOf(c.bank) ? { bank: anchorOf(c.bank) } : {}),
+    ...(Array.isArray(c.pockets)
+      ? {
+          pockets: c.pockets
+            .filter((x) => x && typeof x.name === "string" && typeof x.amount === "number" && Number.isFinite(x.amount))
+            .map((x) => ({ name: x.name.slice(0, 60), amount: x.amount })),
+        }
+      : {}),
     cards,
     ...(typeof c.owedToYou === "number" && c.owedToYou > 0 ? { owedToYou: c.owedToYou } : {}),
   };
@@ -985,37 +994,61 @@ export function cashPosition(txns: Txn[], profile: Profile, today: string): Cash
   const cash = profile.cash ?? {};
   const cards: CardPosition[] = [];
   for (const [source, a] of Object.entries(cash.cards ?? {})) {
+    const closeDay = a.closeDay ?? CARD_DEFAULTS[source]?.closeDay ?? 1;
+    const firstClose = closeOnOrBefore(a.asOf, closeDay);
+    // Statements as of the entered date: the latest one (what's still unpaid on it), then one per closing
+    // date since, each holding the spending from the previous close (statement periods never change).
+    const statements: { closes: string; due: string; amount: number }[] = [
+      { closes: firstClose, due: a.due ?? addDays(firstClose, PAYMENT_WINDOW_DAYS), amount: a.statement ?? a.amount },
+    ];
+    let open = a.amount - (a.statement ?? a.amount); // spending since the last close, not yet on a statement
     let added = 0;
-    let refunds = 0;
     let repaidOnCard = 0;
     let repaidFromBank = 0;
+    const events: { date: string; spend: number }[] = [];
     for (const t of txns) {
       if (t.date <= a.asOf || t.date > today) continue;
       if (t.source === source) {
         if (t.kind === "transfer") repaidOnCard += Math.abs(t.amount);
         else if (t.kind !== "income") {
-          if (t.amount >= 0) added += t.amount;
-          else refunds += -t.amount;
+          events.push({ date: t.date, spend: t.amount });
+          if (t.amount > 0) added += t.amount;
         }
       } else if (t.source === "commbank" && t.kind === "transfer" && t.amount > 0 && CARD_WORDS[source]?.test(t.description)) {
         repaidFromBank += t.amount;
       }
     }
-    const repaid = Math.max(repaidOnCard, repaidFromBank);
-    const owed = Math.round((a.amount + added - refunds - repaid) * 100) / 100;
-    const closeDay = a.closeDay ?? CARD_DEFAULTS[source]?.closeDay ?? 1;
-    const lastClose = closeOnOrBefore(a.asOf, closeDay);
-    const due = a.due ?? addDays(lastClose, PAYMENT_WINDOW_DAYS);
-    const statement = Math.max(0, Math.round(((a.statement ?? a.amount) - repaid) * 100) / 100);
-    const closes = nextClose(due < a.asOf ? addDays(lastClose, 1) : lastClose, closeDay);
+    events.sort((x, y) => x.date.localeCompare(y.date));
+    let close = nextClose(firstClose, closeDay);
+    let k = 0;
+    while (close <= today) {
+      while (k < events.length && events[k].date <= close) open += events[k++].spend;
+      statements.push({ closes: close, due: addDays(close, PAYMENT_WINDOW_DAYS), amount: Math.max(0, open) });
+      open = 0;
+      close = nextClose(close, closeDay);
+    }
+    while (k < events.length) open += events[k++].spend;
+    // Repayments pay the oldest statement first; anything beyond comes off the next one.
+    let repaid = Math.max(repaidOnCard, repaidFromBank);
+    let left = repaid;
+    for (const st of statements) {
+      const pay = Math.min(left, st.amount);
+      st.amount = Math.round((st.amount - pay) * 100) / 100;
+      left -= pay;
+    }
+    open = Math.round((open - left) * 100) / 100;
+    repaid = Math.round(repaid * 100) / 100;
+    const unpaid = statements.filter((st) => st.amount > 0.005);
+    const current = unpaid[0] ?? statements[statements.length - 1];
+    const owed = Math.round((statements.reduce((x, st) => x + st.amount, 0) + open) * 100) / 100;
     cards.push({
       source,
       owed,
-      statement,
-      due,
-      daysLeft: daysFrom(today, due),
-      overdue: statement > 0.005 && today > due,
-      next: { amount: Math.max(0, Math.round((owed - statement) * 100) / 100), closes, due: addDays(closes, PAYMENT_WINDOW_DAYS) },
+      statement: Math.round(unpaid.reduce((x, st) => x + st.amount, 0) * 100) / 100,
+      due: current.due,
+      daysLeft: daysFrom(today, current.due),
+      overdue: unpaid.some((st) => st.due < today),
+      next: { amount: Math.max(0, open), closes: close, due: addDays(close, PAYMENT_WINDOW_DAYS) },
       asOf: a.asOf,
       added,
       repaid,

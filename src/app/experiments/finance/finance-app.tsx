@@ -1465,7 +1465,9 @@ function CashPanel({
     closeDay: String(cash.cards?.[k]?.closeDay ?? CARD_DEFAULTS[k]?.closeDay ?? 1),
   });
   const [form, setForm] = useState(() => ({
-    bank: cash.bank?.amount?.toString() ?? "",
+    pockets: (cash.pockets?.length
+      ? cash.pockets.map((x) => ({ name: x.name, amount: x.amount.toString() }))
+      : [{ name: "CommBank", amount: cash.bank?.amount?.toString() ?? "" }]) as { name: string; amount: string }[],
     owedToYou: cash.owedToYou?.toString() ?? "",
     cards: { nab: blankCard("nab"), amex: blankCard("amex") } as Record<string, ReturnType<typeof blankCard>>,
   }));
@@ -1477,8 +1479,13 @@ function CashPanel({
       return n === null ? undefined : Math.abs(n);
     };
     const next: CashAnchors = { cards: {} };
-    const b = num(form.bank);
-    if (b !== undefined) next.bank = { amount: b, asOf: today };
+    const pockets = form.pockets
+      .map((x) => ({ name: x.name.trim() || "Cash", amount: parseAmount(x.amount) }))
+      .filter((x): x is { name: string; amount: number } => x.amount !== null);
+    if (pockets.length) {
+      next.bank = { amount: Math.round(pockets.reduce((t, x) => t + x.amount, 0) * 100) / 100, asOf: today };
+      next.pockets = pockets;
+    }
     for (const [k, v] of Object.entries(form.cards)) {
       const owed = num(v.owed);
       if (owed === undefined) continue;
@@ -1488,7 +1495,6 @@ function CashPanel({
         amount: owed,
         asOf: today,
         ...(st !== undefined ? { statement: st } : {}),
-        ...(v.due ? { due: v.due } : {}),
         ...(day >= 1 && day <= 31 ? { closeDay: day } : {}),
       };
     }
@@ -1503,6 +1509,22 @@ function CashPanel({
   const input = "rounded border border-rule bg-background px-3 py-2";
   return (
     <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+      {/* The number that matters most: after paying every statement that's due, how short (or how much spare). */}
+      {ready && (
+        <div className="mb-5">
+          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
+            {(c.usable ?? 0) < 0 ? "After paying what's due, you'd still be short by" : "After paying what's due, you'd have spare"}
+          </p>
+          <p className="mt-1 text-5xl sm:text-6xl font-semibold tracking-tight tabular-nums" style={(c.usable ?? 0) < 0 ? { color: OVER } : undefined}>
+            {money(Math.abs(c.usable ?? 0))}
+          </p>
+          <p className="mt-1 text-sm text-muted">
+            {money(c.bank!.now)} cash − {money(c.dues.reduce((x, d) => x + d.amount, 0))} in statements due
+            {c.owedToYou > 0 && `. If you're paid back the ${money(c.owedToYou)} owed to you: ${(c.usable ?? 0) + c.owedToYou < 0 ? `short by ${money(-((c.usable ?? 0) + c.owedToYou))}` : `${money((c.usable ?? 0) + c.owedToYou)} spare`}`}
+          </p>
+        </div>
+      )}
+
       {/* The warning that matters most: what's still owed on each statement, by when, and whether the bank covers it. */}
       {ready &&
         c.dues.map((d) => {
@@ -1523,8 +1545,8 @@ function CashPanel({
                 {d.overdue
                   ? "Interest is now being charged on this statement. Pay it as soon as you can."
                   : isShort
-                    ? `Your money in hand can't cover this: ${money(-d.bankAfter!)} short. Pay the full amount by the due date to avoid interest.`
-                    : `Your money in hand covers it, leaving ${money(d.bankAfter ?? 0)} after this payment. Pay in full by the due date to stay interest-free.`}
+                    ? `Your cash can't cover this: ${money(-d.bankAfter!)} short. Pay the full amount by the due date to avoid interest.`
+                    : `Your cash covers it, leaving ${money(d.bankAfter ?? 0)} after this payment. Pay in full by the due date to stay interest-free.`}
               </p>
             </div>
           );
@@ -1537,17 +1559,20 @@ function CashPanel({
       {ready ? (
         <>
           <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-6">
-            <Tile label="Money in hand" value={money(c.bank!.now)} note={`entered ${short(c.bank!.asOf)}${c.bank!.moved ? `, ${signed(c.bank!.moved)} since` : ""}`} />
             <Tile
-              label={(c.usable ?? 0) >= 0 ? "Usable now" : "Short for statements"}
-              value={money(Math.abs(c.usable ?? 0))}
-              note="money in hand minus statements still to pay"
-              warn={(c.usable ?? 0) < 0}
+              label="Cash I have now"
+              value={money(c.bank!.now)}
+              note={`${(profile.cash?.pockets ?? []).map((x) => `${x.name} ${money(x.amount)}`).join(" + ") || "entered"} on ${short(c.bank!.asOf)}${c.bank!.moved ? `, ${signed(c.bank!.moved)} since` : ""}`}
+            />
+            <Tile
+              label="Due on statements"
+              value={money(c.dues.reduce((x, d) => x + d.amount, 0))}
+              note={c.dues.length ? c.dues.map((d) => `${CARD_LABELS[d.source] ?? d.source} by ${short(d.due)}`).join(" · ") : "all paid"}
             />
             <Tile
               label="Owed on cards in total"
               value={money(c.owed)}
-              note={c.net! >= 0 ? `money in hand covers it all, ${money(c.net!)} spare` : `${money(-c.net!)} more than you have, incl. next statements`}
+              note={c.net! >= 0 ? `your cash covers it all, ${money(c.net!)} spare` : `${money(-c.net!)} more than you have, incl. next statements`}
               warn={c.net! < 0}
             />
             <Tile label="After next pay" value={signed(afterPay)} note={`if everything owed is paid · pay ${money(pay)} − repayments & savings ${money(planned)}`} warn={afterPay < 0} />
@@ -1560,7 +1585,6 @@ function CashPanel({
                 {short(x.next.closes)}, due {short(x.next.due)}): {money(x.next.amount)} so far
               </li>
             ))}
-            {c.owedToYou > 0 && <li>Owed to you: {money(c.owedToYou)} (e.g. supplementary cards). Once paid back: {signed((c.usable ?? 0) + c.owedToYou)} usable.</li>}
             <li className="text-xs">
               Paying each statement in full by its due date keeps the card interest-free; spending after a statement closes is due on the next one.
               New spending and repayments since {short(c.bank!.asOf)} come in from your phone and imports. Update balances whenever you check your apps.
@@ -1569,7 +1593,7 @@ function CashPanel({
         </>
       ) : (
         <p className="mt-3 text-sm text-muted">
-          Enter the money you have in hand (all accounts and cash) and, for each card, what the app shows: total owed, the statement amount still to pay and its due date.
+          Enter the cash you have now (add each account or stash; they&apos;re summed) and, for each card, what the app shows: total owed and the statement amount still to pay. Due dates follow each card&apos;s statement cycle (closing day + 14 days).
         </p>
       )}
       <button className="mt-4 text-sm text-muted underline hover:text-foreground" onClick={() => setEditing(!editing)}>
@@ -1584,10 +1608,51 @@ function CashPanel({
           }}
         >
           <div className="flex flex-col gap-3">
-            <label className="flex flex-col gap-1">
-              <span className="text-muted">Money in hand today (all accounts and cash)</span>
-              <input inputMode="decimal" className={input} value={form.bank} onChange={(e) => setForm({ ...form, bank: e.target.value })} />
-            </label>
+            <div className="flex flex-col gap-2">
+              <span className="text-muted">Cash I have now (each account or stash)</span>
+              {form.pockets.map((x, i) => (
+                <div key={i} className="flex gap-2">
+                  <input
+                    className={`${input} w-28`}
+                    value={x.name}
+                    placeholder="Where"
+                    onChange={(e) => setForm({ ...form, pockets: form.pockets.map((y, j) => (j === i ? { ...y, name: e.target.value } : y)) })}
+                  />
+                  <input
+                    inputMode="decimal"
+                    className={`${input} min-w-0 flex-1`}
+                    value={x.amount}
+                    placeholder="0.00"
+                    onChange={(e) => setForm({ ...form, pockets: form.pockets.map((y, j) => (j === i ? { ...y, amount: e.target.value } : y)) })}
+                  />
+                  {form.pockets.length > 1 && (
+                    <button
+                      type="button"
+                      className="text-muted hover:text-foreground"
+                      aria-label={`Remove ${x.name || "this"}`}
+                      onClick={() => setForm({ ...form, pockets: form.pockets.filter((_, j) => j !== i) })}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              ))}
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  className="text-muted underline hover:text-foreground"
+                  onClick={() => setForm({ ...form, pockets: [...form.pockets, { name: "", amount: "" }] })}
+                >
+                  + Add another
+                </button>
+                <span>
+                  Total{" "}
+                  <span className="font-medium">
+                    {money(form.pockets.reduce((t, x) => t + (parseAmount(x.amount) ?? 0), 0))}
+                  </span>
+                </span>
+              </div>
+            </div>
             <label className="flex flex-col gap-1">
               <span className="text-muted">Owed to you (e.g. supplementary cards)</span>
               <input inputMode="decimal" className={input} value={form.owedToYou} onChange={(e) => setForm({ ...form, owedToYou: e.target.value })} />
@@ -1604,11 +1669,7 @@ function CashPanel({
                 <input inputMode="decimal" className={input} value={form.cards[k].statement} onChange={(e) => setCard(k, { statement: e.target.value })} />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-muted">{CARD_LABELS[k]}: statement due date</span>
-                <input type="date" className={input} value={form.cards[k].due} onChange={(e) => setCard(k, { due: e.target.value })} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-muted">{CARD_LABELS[k]}: statement closes on day</span>
+                <span className="text-muted">{CARD_LABELS[k]}: statement closes on day (due 14 days later)</span>
                 <input inputMode="numeric" className={input} value={form.cards[k].closeDay} onChange={(e) => setCard(k, { closeDay: e.target.value })} />
               </label>
             </div>

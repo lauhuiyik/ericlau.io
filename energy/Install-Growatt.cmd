@@ -7,8 +7,10 @@ rem  One double-click install for the Growatt home poller.
 rem
 rem  Growatt's API refuses datacenter IPs (10011 error_permission_denied), so
 rem  this one call has to originate from the house. This sets up a machine on
-rem  the home network to fetch the reading every 5 minutes and post it to
-rem  ericlau.io, which is the only piece the cloud can't do itself.
+rem  the home network to fetch the reading and post it to ericlau.io, which is
+rem  the only piece the cloud can't do itself. The task runs every 5 minutes but
+rem  only reports when a reading is due: hourly, or every run in Live mode.
+rem  Re-run this file to pick up a newer version of the scripts.
 rem
 rem  Self-elevates, fetches the scripts, prompts for the two secrets, does a
 rem  test run, then registers the scheduled task.
@@ -56,7 +58,7 @@ if errorlevel 1 (
 
 echo.
 echo === 3 of 4  Test run ===
-powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%\growatt-poller.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TARGET%\growatt-poller.ps1" -Force
 if errorlevel 1 goto :fail
 
 echo.
@@ -66,7 +68,8 @@ if errorlevel 1 goto :fail
 
 echo.
 echo ---------------------------------------------------------------
-echo  Done. Runs every 5 minutes, including after a reboot.
+echo  Done. Checks every 5 minutes, including after a reboot, and reports
+echo  hourly, or every 5 minutes while Live mode is on.
 echo  Log:  %TARGET%\growatt-poller.log
 echo ---------------------------------------------------------------
 echo.

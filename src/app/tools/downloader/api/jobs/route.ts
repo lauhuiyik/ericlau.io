@@ -1,11 +1,13 @@
+import { ringDownloader } from "@/lib/doorbell";
 import { openForTools } from "@/lib/downloader-auth";
 import {
-  AGENT_ONLINE_MS,
   COOKIE_BROWSERS,
   FILE_TTL_MS,
   type AgentRow,
   type FileRow,
   type JobRow,
+  agentState,
+  hasDoorbell,
   json,
   markUiSeen,
   newId,
@@ -25,7 +27,7 @@ export async function GET(request: Request) {
   if ("denied" in ctx) return ctx.denied;
   const db = ctx.env.DL_DB;
   const now = Date.now();
-  await markUiSeen(db, now);
+  await markUiSeen(db, ctx.env.MEDIA_BUCKET, now);
   await sweep(db, ctx.env.DL_BUCKET, now);
 
   const { results: jobs } = await db
@@ -66,12 +68,15 @@ export async function GET(request: Request) {
       try {
         info = JSON.parse(a.info);
       } catch {}
+      const state = agentState(a.last_seen, hasDoorbell(info), now);
       return {
         id: a.id,
         name: a.name,
         createdAt: a.created_at,
         lastSeen: a.last_seen,
-        online: a.last_seen != null && now - a.last_seen < AGENT_ONLINE_MS,
+        // Standby counts as online: a doorbell agent wakes within ~15 s of a new link.
+        online: state !== "offline",
+        state,
         info,
       };
     }),
@@ -120,6 +125,7 @@ export async function POST(request: Request) {
         .bind(newId(), url, mode, cookies, now + i, now + i),
     ),
   );
-  await markUiSeen(db, now);
+  await ringDownloader(ctx.env.MEDIA_BUCKET, now);
+  await markUiSeen(db, ctx.env.MEDIA_BUCKET, now);
   return json({ created: urls.length });
 }

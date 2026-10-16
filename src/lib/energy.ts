@@ -626,8 +626,13 @@ export function cumulativeToSlots(
 const slotStart = (slot: number) =>
   `${String(Math.floor(slot / 2)).padStart(2, "0")}:${slot % 2 ? "30" : "00"}`;
 
-/** A day needs at least this many readings before its clamp totals are trusted. */
-const MIN_CLAMP_READINGS = 200;
+/**
+ * A day needs at least this many readings before its clamp totals are trusted.
+ * Collection is hourly outside Live mode (4 samples a run, ~100 a day, with a
+ * run just before midnight to catch the closing counters); a day that lost
+ * most of its runs is left to the meter instead.
+ */
+const MIN_CLAMP_READINGS = 60;
 /** Days filled per page load, so a long backlog can't blow the subrequest budget. */
 const CLAMP_FILL_PER_LOAD = 3;
 
@@ -638,7 +643,7 @@ const CLAMP_FILL_PER_LOAD = 3;
  * Powercor's myEnergy export is manual, so the meter runs weeks behind. The
  * clamps are within ~1% of it (2 Sep - 3 Oct: clamp-priced $184.40 vs $185.34
  * billed), so they price the bill in progress. Filled once per day, then read as
- * ~96 rows a day instead of re-reading ~1,100 readings on every refresh. Today is
+ * ~96 rows a day instead of re-reading every reading on each refresh. Today is
  * never filled: its counters are still moving.
  */
 export async function ensureClampIntervals(

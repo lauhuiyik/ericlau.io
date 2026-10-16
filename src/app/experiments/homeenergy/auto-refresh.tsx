@@ -11,7 +11,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * This endpoint only reads our own KV snapshot — it never touches Anker or
  * Growatt, so it costs nothing and cannot trip their rate limits, which is why
  * it can poll this often. Real freshness is set by the collector: a CI run
- * every 5 min that takes 4 samples 60s apart, giving ~1-minute data.
+ * that takes 4 samples 60s apart, once an hour, or every 5 min (~1-minute
+ * data) while Live mode is on (live-toggle.tsx). The page passes `seconds`
+ * to match.
  */
 export function AutoRefresh({
   seconds = 10,

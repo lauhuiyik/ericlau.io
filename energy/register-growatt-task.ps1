@@ -31,7 +31,10 @@ Write-Host "Registered '$taskName' - every 5 minutes, as SYSTEM, survives reboot
 # Prove it actually runs. Registration succeeding is not evidence that the
 # schedule works, which is exactly how the previous version slipped through.
 $logPath = Join-Path $here 'growatt-poller.log'
+# Outside the hourly reporting window the poller only touches this file.
+$checkPath = Join-Path $here 'growatt-poller.last-check'
 $before = if (Test-Path $logPath) { (Get-Item $logPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+$beforeCheck = if (Test-Path $checkPath) { (Get-Item $checkPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
 Write-Host 'Running it once now to verify...'
 schtasks /Run /TN $taskName | Out-Null
@@ -39,6 +42,13 @@ schtasks /Run /TN $taskName | Out-Null
 $deadline = (Get-Date).AddSeconds(60)
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 3
+    if ((Test-Path $checkPath) -and (Get-Item $checkPath).LastWriteTimeUtc -gt $beforeCheck) {
+        Write-Host ''
+        Get-Content $checkPath
+        Write-Host ''
+        Write-Host 'Working. It reports hourly, or every 5 minutes while Live mode is on.'
+        exit 0
+    }
     if ((Test-Path $logPath) -and (Get-Item $logPath).LastWriteTimeUtc -gt $before) {
         Write-Host ''
         Get-Content $logPath -Tail 3

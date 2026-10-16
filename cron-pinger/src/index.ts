@@ -1,6 +1,15 @@
 /**
- * Companion Worker for the home energy dashboard. Two jobs, both on its
- * 5-minute Cron Trigger:
+ * Companion Worker for the home energy dashboard. Two jobs on its 5-minute
+ * Cron Trigger, but only when due:
+ *
+ * CADENCE — hourly (the :00 tick, plus 23:50 Melbourne so the day's closing
+ * counters are caught before they reset at midnight), or every tick while
+ * Live mode is on (the dashboard's "Go live" button). Each collector run posts
+ * 4 readings plus token/cache calls to the site, whose Worker is on the Free
+ * plan's ~10 ms CPU allowance per request; collecting around the clock every
+ * 5 min, alongside the downloader agent, ran it out and visitors got 1102
+ * errors. The Live flag is the public doorbell file status/energy.json in
+ * ericlau-media (see the site's src/lib/doorbell.ts).
  *
  * 1. DISPATCH — fires the "Energy collector" GitHub Actions workflow.
  *    GitHub Actions' own `schedule:` trigger never fired autonomously for that
@@ -27,6 +36,7 @@ export interface Env {
   GROWATT_PLANT_ID?: string;
   ENERGY_KV?: KVNamespace; // same namespace the main site binds
   DB?: D1Database; // same database the main site binds
+  MEDIA?: R2Bucket; // ericlau-media, for the Live mode flag
 }
 
 const REPO = "lauhuiyik/ericlau.io";
@@ -37,15 +47,44 @@ const GROWATT_KV_KEY = "growatt_latest";
  *  behaviour. */
 const GROWATT_DIAG_KV_KEY = "growatt_diag";
 /** How stale the newest reading may get before it counts as a stall. The
- * collector runs every 5 min, so this tolerates three missed cycles before
- * crying wolf. */
-const STALE_AFTER_SEC = 20 * 60;
+ * collector runs hourly outside Live mode, so this tolerates one missed run
+ * (and a slow GitHub start) before crying wolf. */
+const STALE_AFTER_SEC = 130 * 60;
+const LIVE_KEY = "status/energy.json";
+
+/** Live mode is on (the dashboard set liveUntil in the future). */
+async function isLive(env: Env): Promise<boolean> {
+  try {
+    const obj = await env.MEDIA?.get(LIVE_KEY);
+    if (!obj) return false;
+    const { liveUntil } = (await obj.json()) as { liveUntil?: number };
+    return Number(liveUntil) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+/** Hourly, plus 23:50 Melbourne for the closing counters. Cron ticks land on :00, :05, … */
+function dueWithoutLive(at: Date): boolean {
+  const parts = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Melbourne",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(at);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value);
+  return minute < 5 || (hour === 23 && minute >= 50 && minute < 55);
+}
 
 export default {
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    // All independent: none of these may stop the others running.
-    ctx.waitUntil(dispatch(env).then((r) => console.log("dispatch", JSON.stringify(r))));
-    ctx.waitUntil(refreshGrowatt(env).then((r) => console.log("growatt", JSON.stringify(r))));
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const live = await isLive(env);
+    if (live || dueWithoutLive(new Date(event.scheduledTime))) {
+      // All independent: none of these may stop the others running.
+      ctx.waitUntil(dispatch(env).then((r) => console.log("dispatch", JSON.stringify({ live, ...r }))));
+      ctx.waitUntil(refreshGrowatt(env).then((r) => console.log("growatt", JSON.stringify(r))));
+    }
     ctx.waitUntil(checkFreshness(env).then((r) => console.log("freshness", JSON.stringify(r))));
   },
 
@@ -241,7 +280,7 @@ async function checkFreshness(env: Env): Promise<{ ok: boolean; detail: string }
         `Energy collector stalled — no reading for ${mins} min`,
         [
           `The newest reading is **${mins} minutes old** (last sample ${latest.local_time ?? "unknown"}).`,
-          `Expected a new one every ~5 minutes.`,
+          `Expected a new one at least hourly (every ~5 minutes in Live mode).`,
           ``,
           `Worth checking, in the order these have actually gone wrong before:`,
           `- Recent runs of the \`Energy collector\` workflow, for an Anker auth error such as a CAPTCHA prompt`,

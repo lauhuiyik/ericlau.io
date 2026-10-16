@@ -29,6 +29,8 @@ import {
   type SourceFreshness,
 } from "@/lib/energy";
 import { AutoRefresh } from "./auto-refresh";
+import { LiveToggle } from "./live-toggle";
+import { getEnergyLiveUntil } from "@/lib/doorbell";
 import { FlowDiagram } from "./flow-diagram";
 import { getWeatherNow, checkSolarAgainstSky } from "@/lib/weather";
 import { RangePicker } from "./range-picker";
@@ -476,7 +478,7 @@ export default async function Page({
   const isLiveToday = range === "day" && date === today;
   const win = rangeWindow(range, date);
 
-  const latestGlobal = await getLatest(env.DB);
+  const [latestGlobal, liveUntil] = await Promise.all([getLatest(env.DB), getEnergyLiveUntil(env.MEDIA_BUCKET)]);
   // Not date-scoped: the balance strip always describes right now, whichever day
   // is being browsed.
   const latestTesla = await getLatestTeslaState(env.DB);
@@ -645,8 +647,10 @@ export default async function Page({
         >
           ← Eric Lau
         </Link>
-        <div className="flex items-center gap-3 sm:gap-6 whitespace-nowrap font-mono text-[11px] sm:text-xs uppercase tracking-[0.12em] sm:tracking-[0.18em] text-muted">
-          {isLiveToday && <AutoRefresh seconds={10} currentTs={latestGlobal?.ts ?? null} />}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 sm:gap-x-6 whitespace-nowrap font-mono text-[11px] sm:text-xs uppercase tracking-[0.12em] sm:tracking-[0.18em] text-muted">
+          {/* Readings arrive hourly unless Live mode is on, so only refresh fast while it is. */}
+          {isLiveToday && <AutoRefresh seconds={liveUntil ? 10 : 300} currentTs={latestGlobal?.ts ?? null} />}
+          <LiveToggle liveUntil={liveUntil} />
           <Link href="/experiments/homeenergy/settings" className="hover:text-foreground transition-colors">
             Settings
           </Link>

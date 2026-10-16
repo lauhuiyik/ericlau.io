@@ -24,8 +24,11 @@ type Agent = {
   name: string;
   createdAt: number;
   lastSeen: number | null;
+  /** True when online or on standby. */
   online: boolean;
-  info: { version?: string; ytDlp?: string; host?: string; os?: string };
+  /** standby = idle agent 1.1+, waiting on the doorbell (wakes within ~15 s of a new link). */
+  state: "online" | "standby" | "offline";
+  info: { version?: string; ytDlp?: string; host?: string; os?: string; doorbell?: boolean };
 };
 type State = { now: number; jobs: Job[]; agents: Agent[] };
 
@@ -130,6 +133,7 @@ export function DownloaderApp() {
   }, []);
 
   // Poll fast while anything is moving (or a new PC is about to connect), slowly otherwise.
+  // Every poll is a Worker request, so the idle pace is deliberately relaxed.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
     let stopped = false;
@@ -138,7 +142,7 @@ export function DownloaderApp() {
       if (stopped) return;
       const s = stateRef.current;
       const busyNow = !!s?.jobs.some((j) => ACTIVE.has(j.status)) || (newKey !== null && !s?.agents.some((a) => a.online));
-      timer = setTimeout(tick, busyNow ? 2000 : 8000);
+      timer = setTimeout(tick, busyNow ? 3000 : 15000);
     };
     tick();
     const onVisible = () => !document.hidden && refresh();
@@ -202,6 +206,9 @@ export function DownloaderApp() {
   const jobs = state?.jobs ?? [];
   const agents = state?.agents ?? [];
   const online = agents.filter((a) => a.online);
+  const awake = online.filter((a) => a.state === "online");
+  // Agent 1.0 has no doorbell and polls the site every minute; 1.1+ is idle until a link arrives.
+  const outdated = agents.filter((a) => a.info.version && !a.info.doorbell);
   // Server time from the last poll (everything below only renders once that's loaded).
   const now = state?.now ?? 0;
   const hasFinished = jobs.some((j) => !ACTIVE.has(j.status));
@@ -236,12 +243,23 @@ export function DownloaderApp() {
         <div className="mt-6 flex items-center gap-2 text-sm">
           {state === null ? (
             <span className="text-muted">{loadError ? `Couldn't load: ${loadError}` : "Loading…"}</span>
-          ) : online.length > 0 ? (
+          ) : awake.length > 0 ? (
             <>
               <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
               <span>
-                {online.map((a) => a.name).join(", ")} online
-                {online[0].info.ytDlp ? <span className="text-muted"> · yt-dlp {online[0].info.ytDlp}</span> : null}
+                {awake.map((a) => a.name).join(", ")} online
+                {awake[0].info.ytDlp ? <span className="text-muted"> · yt-dlp {awake[0].info.ytDlp}</span> : null}
+              </span>
+            </>
+          ) : online.length > 0 ? (
+            <>
+              <span className="inline-block h-2 w-2 rounded-full bg-emerald-400/50" />
+              <span>
+                {online[0].name} on standby
+                <span className="text-muted">
+                  {online[0].lastSeen ? ` · checked in ${fmtAgo(now - online[0].lastSeen)}` : ""} · wakes up within
+                  15 s of a new link
+                </span>
               </span>
             </>
           ) : agents.length > 0 ? (
@@ -262,6 +280,13 @@ export function DownloaderApp() {
             </>
           )}
         </div>
+        {outdated.length > 0 ? (
+          <p className="mt-3 max-w-xl text-sm text-amber-400">
+            {outdated.map((a) => a.name).join(", ")} runs an older agent that checks in with the site every minute.
+            Update it so it stays idle until you add a link: on the PC, download the zip under PC setup and run
+            Install.cmd again. It keeps the key.
+          </p>
+        ) : null}
       </section>
 
       <section className="border-t border-rule px-6 sm:px-12 py-10 max-w-3xl">
@@ -419,7 +444,14 @@ export function DownloaderApp() {
                   <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
                     <div>
                       <span className={a.online ? "" : "text-muted"}>
-                        {a.name} · {a.online ? "online" : a.lastSeen ? `last seen ${fmtAgo(now - a.lastSeen)}` : "never connected"}
+                        {a.name} ·{" "}
+                        {a.state === "online"
+                          ? "online"
+                          : a.state === "standby"
+                            ? `on standby, checked in ${fmtAgo(now - (a.lastSeen ?? now))}`
+                            : a.lastSeen
+                              ? `last seen ${fmtAgo(now - a.lastSeen)}`
+                              : "never connected"}
                       </span>
                       {a.info.host ? (
                         <div className="text-xs text-muted">

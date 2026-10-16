@@ -12,6 +12,8 @@
  * the gated page and only their SHA-256 is stored.
  */
 
+import { ringDownloader } from "@/lib/doorbell";
+
 export type JobStatus =
   | "queued"
   | "starting"
@@ -76,11 +78,26 @@ export const JOB_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const PART_SIZE = 8 * 1024 * 1024;
 /** Largest single file the agent may upload. */
 export const MAX_FILE_BYTES = 20 * 1024 * 1024 * 1024;
-/** An agent that hasn't polled for this long is shown as offline. */
-export const AGENT_ONLINE_MS = 45_000;
-/** Agent poll interval while the page is open or work is pending, and when idle. */
-export const POLL_FAST_MS = 2_000;
-export const POLL_IDLE_MS = 10_000;
+/**
+ * How often the agent checks in. Every check-in is a Worker request, and the
+ * Workers Free plan's ~10 ms CPU allowance can't take a PC polling around the
+ * clock (1,000+ "exceeded resources" errors a day at 10 s), so agents 1.1+
+ * sit on the doorbell (src/lib/doorbell.ts) and only check in hourly when
+ * idle. Agent 1.0 has no doorbell and just polls more slowly until updated.
+ */
+export const POLL_BUSY_MS = 3_000; // jobs queued or running
+export const POLL_PAGE_OPEN_MS = 60_000; // the page is open, nothing to do
+export const HEARTBEAT_MS = 60 * 60 * 1000; // idle (doorbell agents)
+export const LEGACY_PAGE_OPEN_MS = 5_000;
+export const LEGACY_IDLE_MS = 60_000;
+/** How often doorbell agents read the doorbell file. */
+export const DOORBELL_EVERY_MS = 15_000;
+/** Checked in this recently: "online". */
+export const AGENT_ONLINE_MS = 90_000;
+/** A doorbell agent within its heartbeat is "on standby" (wakes when rung). */
+export const AGENT_STANDBY_MS = HEARTBEAT_MS + 10 * 60 * 1000;
+/** Agent 1.0 (no doorbell) polls every LEGACY_IDLE_MS. */
+const LEGACY_ONLINE_MS = 150_000;
 /** "Page is open" means it polled within this window. */
 const UI_ACTIVE_MS = 3 * 60 * 1000;
 
@@ -146,23 +163,41 @@ async function setMeta(db: D1Database, k: string, v: string) {
     .run();
 }
 
-/** Record that the page is open (at most one write per 15 s). */
-export async function markUiSeen(db: D1Database, now = Date.now()) {
+/**
+ * Record that the page is open (at most one write per 15 s). When it has just
+ * been opened, ring the doorbell so the PC checks in and shows as online.
+ */
+export async function markUiSeen(db: D1Database, media: R2Bucket, now = Date.now()) {
   const last = Number((await getMeta(db, "ui_seen")) ?? 0);
   if (now - last > 15_000) await setMeta(db, "ui_seen", String(now));
+  if (now - last > UI_ACTIVE_MS) await ringDownloader(media, now);
 }
 
 /** How long the agent should wait before polling again. */
-export async function nextPollMs(db: D1Database, now = Date.now()): Promise<number> {
-  const uiSeen = Number((await getMeta(db, "ui_seen")) ?? 0);
-  if (now - uiSeen < UI_ACTIVE_MS) return POLL_FAST_MS;
+export async function nextPollMs(db: D1Database, doorbell: boolean, now = Date.now()): Promise<number> {
   const pending = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM dl_jobs WHERE status = 'queued' OR status IN (${ACTIVE_STATUSES.map(() => "?").join(",")})`,
     )
     .bind(...ACTIVE_STATUSES)
     .first<{ n: number }>();
-  return (pending?.n ?? 0) > 0 ? POLL_FAST_MS : POLL_IDLE_MS;
+  if ((pending?.n ?? 0) > 0) return POLL_BUSY_MS;
+  const uiSeen = Number((await getMeta(db, "ui_seen")) ?? 0);
+  if (now - uiSeen < UI_ACTIVE_MS) return doorbell ? POLL_PAGE_OPEN_MS : LEGACY_PAGE_OPEN_MS;
+  return doorbell ? HEARTBEAT_MS : LEGACY_IDLE_MS;
+}
+
+/** Whether an agent's last poll said it watches the doorbell (agent 1.1+). */
+export const hasDoorbell = (info: unknown) =>
+  !!info && typeof info === "object" && (info as { doorbell?: unknown }).doorbell === true;
+
+export type AgentState = "online" | "standby" | "offline";
+
+export function agentState(lastSeen: number | null, doorbell: boolean, now = Date.now()): AgentState {
+  if (lastSeen == null) return "offline";
+  const age = now - lastSeen;
+  if (age < (doorbell ? AGENT_ONLINE_MS : LEGACY_ONLINE_MS)) return "online";
+  return doorbell && age < AGENT_STANDBY_MS ? "standby" : "offline";
 }
 
 /** Delete a job's files from R2 (finished or half-uploaded) and their rows. */

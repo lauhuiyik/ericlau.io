@@ -1,11 +1,17 @@
 import { openForAgent } from "@/lib/downloader-auth";
-import { ACTIVE_STATUSES, type JobRow, json, nextPollMs, sweep } from "@/lib/downloader";
+import { DL_DOORBELL_KEY, doorbellUrl } from "@/lib/doorbell";
+import { ACTIVE_STATUSES, DOORBELL_EVERY_MS, type JobRow, hasDoorbell, json, nextPollMs, sweep } from "@/lib/downloader";
 
 /**
  * The home-PC agent's heartbeat (downloader/agent/dl_agent.py).
  *
  *   POST { running: string[], freeSlots: number, info: {...} }
- *     → { jobs: [claimed jobs], cancel: [job ids to stop], nextPollMs }
+ *     → { jobs: [claimed jobs], cancel: [job ids to stop], nextPollMs, now, doorbell? }
+ *
+ * Agents whose info says `doorbell: true` (1.1+) are told to wait up to an
+ * hour when idle, reading the doorbell file every few seconds meanwhile; the
+ * page rings it when a link is added. `now` lets them tell a ring that came
+ * after this poll from one that came before it.
  *
  * Outside Cloudflare Access (the agent can't log in); authenticated by the
  * PC's connection key. Jobs this PC had claimed but no longer reports as
@@ -83,9 +89,12 @@ export async function POST(request: Request) {
     jobs = claimed.results.sort((a, b) => a.created_at - b.created_at);
   }
 
+  const doorbell = hasDoorbell(body.info);
   return json({
     jobs: jobs.map((j) => ({ id: j.id, url: j.url, mode: j.mode, cookiesBrowser: j.cookies_browser })),
     cancel,
-    nextPollMs: await nextPollMs(db, now),
+    nextPollMs: await nextPollMs(db, doorbell, now),
+    now,
+    ...(doorbell ? { doorbell: { url: doorbellUrl(DL_DOORBELL_KEY), everyMs: DOORBELL_EVERY_MS } } : {}),
   });
 }

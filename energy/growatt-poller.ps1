@@ -18,8 +18,12 @@
 
   Deliberately uses only built-in PowerShell — no Python, no modules to install.
 
-  Run it by hand once to check it works, then every 5 minutes via Task Scheduler.
+  Run it by hand once to check it works (-Force skips the schedule check), then
+  every 5 minutes via Task Scheduler. It only reports when a reading is due:
+  hourly, or every run while the dashboard's Live mode is on.
 #>
+
+param([switch]$Force)
 
 $ErrorActionPreference = 'Stop'
 
@@ -56,6 +60,30 @@ try {
 
 foreach ($key in 'GrowattToken', 'PlantId', 'IngestSecret', 'SiteUrl') {
     if (-not $cfg.$key) { Write-Log "ERROR: config is missing $key"; exit 1 }
+}
+
+# --- 0. Is a reading due? -------------------------------------------------
+# The collector runs hourly unless Live mode is on (the dashboard's "Go live"),
+# and /api/ingest only merges a Growatt snapshot under 15 minutes old. So this
+# reports in the two runs before each hour's collection (:55 to :05), and
+# before the 23:50 closing run, and every run while Live mode is on. The Live
+# flag is a public file on media.ericlau.io, served by R2, so checking it
+# costs the site nothing. Unreadable = not live.
+$now = Get-Date
+$due = ($now.Minute -ge 55) -or ($now.Minute -lt 5) -or ($now.Hour -eq 23 -and $now.Minute -ge 40)
+if (-not $due -and -not $Force) {
+    $live = $false
+    try {
+        $t = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $flag = Invoke-RestMethod -Uri "https://media.ericlau.io/status/energy.json?t=$t" -TimeoutSec 10 -Headers @{ 'Cache-Control' = 'no-cache' }
+        $live = [double]$flag.liveUntil -gt [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    } catch {}
+    if (-not $live) {
+        # Overwritten, not appended, so the log isn't filled with skips; the
+        # installer checks this file to prove the scheduled task runs.
+        Set-Content -Path (Join-Path $here 'growatt-poller.last-check') -Value ("{0}  idle: reports between :55 and :05, or every run in Live mode" -f ($now.ToString('yyyy-MM-dd HH:mm:ss')))
+        exit 0
+    }
 }
 
 # --- 1. Ask Growatt -------------------------------------------------------

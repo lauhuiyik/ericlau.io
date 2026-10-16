@@ -1,4 +1,5 @@
 import { openForTools } from "@/lib/downloader-auth";
+import { ringDownloader } from "@/lib/doorbell";
 import { FINISHED_STATUSES, type JobRow, deleteJobFiles, json } from "@/lib/downloader";
 
 /**
@@ -49,6 +50,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
       )
       .bind(now, now, id)
       .run();
+    await ringDownloader(gate.env.MEDIA_BUCKET, now);
     return json({ ok: true });
   }
 

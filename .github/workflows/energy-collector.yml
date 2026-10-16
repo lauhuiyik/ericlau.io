@@ -1,8 +1,10 @@
 name: Energy collector
 
 # Runs the home energy collector so it works 24/7 without relying on any
-# machine being on. Cadence is ~5 min, matching the Growatt datalogger's own
-# reporting interval — no faster, to stay clear of Anker's rate limits.
+# machine being on. Cadence is set by cron-pinger/: hourly (plus 23:50 for the
+# day's closing counters), or every ~5 min while the dashboard's Live mode is
+# on, matching the Growatt datalogger's own reporting interval. Never faster,
+# to stay clear of Anker's rate limits.
 #
 # Intentionally dispatch-ONLY. The schedule lives in the companion Cloudflare
 # Worker (cron-pinger/), which calls workflow_dispatch, for two reasons:

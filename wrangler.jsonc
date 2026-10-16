@@ -38,7 +38,16 @@
   // /tools/downloader: finished files, uploaded by the home-PC agent and
   // deleted after 24 hours (by the app, with a bucket lifecycle rule as backstop).
   "r2_buckets": [
-    { "binding": "DL_BUCKET", "bucket_name": "ericlau-downloads" }
+    { "binding": "DL_BUCKET", "bucket_name": "ericlau-downloads" },
+    // The self-hosted media bucket (media.ericlau.io). The Worker only writes
+    // the doorbell files under status/ (src/lib/doorbell.ts) that the home PC
+    // and the energy cron Worker read, so they don't have to poll this Worker.
+    { "binding": "MEDIA_BUCKET", "bucket_name": "ericlau-media" }
+  ],
+  // Turning energy Live mode on asks the cron Worker for a reading right away,
+  // instead of waiting for its next 5-minute tick.
+  "services": [
+    { "binding": "ENERGY_PINGER", "service": "ericlau-energy-cron-pinger" }
   ],
   "kv_namespaces": [
     { "binding": "ENERGY_KV", "id": "fce2b129d1ed462c853380cb027bca32" }

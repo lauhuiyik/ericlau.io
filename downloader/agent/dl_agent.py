@@ -2,9 +2,14 @@
 """Home-PC agent for ericlau.io/tools/downloader.
 
 Runs in the background on the owner's Windows PC (installed by install.ps1),
-polls the site for queued links, downloads them with yt-dlp + ffmpeg on the
-home connection, and uploads the results back to the site (R2), where the
+picks up queued links from the site, downloads them with yt-dlp + ffmpeg on
+the home connection, and uploads the results back to the site (R2), where the
 gated page hands them out for 24 hours. A copy is also kept on the PC.
+
+When idle it checks in with the site only hourly. In between it reads a tiny
+"doorbell" file on media.ericlau.io every 15 s (served by R2, so it costs the
+site's Worker nothing); the page rings it when a link is added or the page is
+opened, and the agent checks in straight away.
 
 Only outbound HTTPS: the PC needs no open ports or tunnel. It authenticates
 to /api/dl-agent/* with the connection key created on the gated page.
@@ -36,7 +41,7 @@ import urllib.request
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 APP_DIR = Path(__file__).resolve().parent
 IS_WINDOWS = os.name == "nt"
 # CREATE_NO_WINDOW: no console window flashing up for each yt-dlp/ffmpeg run under pythonw
@@ -207,7 +212,7 @@ class JobRunner(threading.Thread):
 
     def report(self, force: bool = False, **fields) -> None:
         now = time.monotonic()
-        if not force and now - self._last_report < 1.5:
+        if not force and now - self._last_report < 4:
             return
         self._last_report = now
         if self.title:
@@ -519,6 +524,8 @@ class Agent:
     def info(self) -> dict:
         return {
             "version": VERSION,
+            # Tells the site this agent waits on the doorbell, so it may idle for an hour.
+            "doorbell": True,
             "ytDlp": self.yt_version,
             "host": socket.gethostname(),
             "os": platform.platform(terse=True),
@@ -539,11 +546,53 @@ class Agent:
         except Exception as exc:  # noqa: BLE001
             log.warning("yt-dlp update failed: %s", exc)
 
+    def doorbell_ring(self, url: str) -> int | None:
+        """When the doorbell last rang (server ms; 0 = never), or None if it couldn't be read."""
+        req = urllib.request.Request(f"{url}?t={int(time.time())}", headers={
+            "User-Agent": f"EricLauDownloaderAgent/{VERSION}", "Cache-Control": "no-cache"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return int(json.loads(r.read() or b"{}").get("ring") or 0)
+        except urllib.error.HTTPError as e:
+            return 0 if e.code == 404 else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def wait(self, delay: float, doorbell: dict | None, polled_at: int) -> None:
+        """Sleep until the next check-in is due, a job frees a slot, or the doorbell rings."""
+        deadline = time.monotonic() + delay
+        every = max(5.0, float(doorbell.get("everyMs", 15000)) / 1000) if doorbell else 0.0
+        failing = False
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            if self.wake.wait(min(left, every) if every else left):
+                return
+            if not every or deadline - time.monotonic() <= 0:
+                continue
+            ring = self.doorbell_ring(doorbell["url"])
+            if ring is None:
+                if not failing:
+                    log.warning("doorbell unreadable; still checking in at the usual time")
+                failing = True
+                continue
+            failing = False
+            # A ring stamped just before our last check-in may not have been visible to it
+            # yet (different Worker requests), so allow a few seconds' overlap. The cost is
+            # one extra check-in per ring.
+            if ring >= polled_at - 5000:
+                log.info("doorbell rang")
+                return
+
     def run(self) -> None:
         log.info("agent %s starting; server %s; yt-dlp %s", VERSION, self.cfg["server"], self.yt_version)
         # Leftovers from a crash or reboot mid-job; the site fails those jobs on our first poll.
         shutil.rmtree(APP_DIR / "work", ignore_errors=True)
         backoff = 2.0
+        doorbell: dict | None = None
+        polled_at = 0
+        idle = False
         while True:
             self.maybe_update()
             with self.lock:
@@ -572,13 +621,18 @@ class Agent:
                             log.info("[%s] cancel requested", job_id)
                             r.cancel()
                     delay = max(1.0, float(resp.get("nextPollMs", 10000)) / 1000)
+                    doorbell = resp["doorbell"] if isinstance(resp.get("doorbell"), dict) else None
+                    polled_at = int(resp.get("now") or 0)
+                    if delay >= 600 and not idle:
+                        log.info("idle: watching the doorbell, next check-in in %d min", delay // 60)
+                    idle = delay >= 600
             except Exception as exc:  # noqa: BLE001
                 log.warning("poll failed: %s (retrying in %.0fs)", exc, backoff)
                 delay = backoff
                 backoff = min(backoff * 2, 60)
             with self.lock:
                 keep_awake(bool(self.jobs))
-            self.wake.wait(delay)
+            self.wait(delay, doorbell, polled_at)
             self.wake.clear()
 
 

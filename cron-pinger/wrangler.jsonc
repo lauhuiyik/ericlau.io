@@ -24,7 +24,7 @@
     { "binding": "DB", "database_name": "ericlau-energy", "database_id": "296f6f55-74f5-4809-ae12-e8b46a9f8636" }
   ],
   // Energy Live mode flag (status/energy.json), written by the site's
-  // /api/energy/live. Off = collect hourly; on = every 5 minutes.
+  // /experiments/homeenergy/live. Off = collect hourly; on = every 5 minutes.
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "ericlau-media" }
   ],

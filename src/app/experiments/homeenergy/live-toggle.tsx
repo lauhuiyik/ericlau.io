@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 /**
- * Live mode switch (POST /api/energy/live).
+ * Live mode switch (POST /experiments/homeenergy/live).
  *
  * Off: readings arrive about once an hour, which keeps the site's Worker well
  * inside the Free plan's CPU allowance. On: back to a reading every minute or
@@ -38,7 +38,7 @@ export function LiveToggle({ liveUntil }: { liveUntil: number }) {
     setBusy(true);
     setError("");
     try {
-      const r = await fetch("/api/energy/live", {
+      const r = await fetch("/experiments/homeenergy/live", {
         method: "POST",
         headers: { "content-type": "application/json", "x-energy": "1" },
         body: JSON.stringify({ on }),

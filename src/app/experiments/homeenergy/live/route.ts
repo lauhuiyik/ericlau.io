@@ -17,8 +17,10 @@ export const dynamic = "force-dynamic";
  * public doorbell file status/energy.json (src/lib/doorbell.ts) so the home
  * PC can read it without touching this Worker.
  *
- * /api/energy/* is behind Cloudflare Access; the POST also verifies the
- * Access token itself and refuses cross-site requests.
+ * Lives under /experiments/homeenergy/ for the same reason as settings/save:
+ * Cloudflare Access covers this path (and only some /api/energy/* routes), so
+ * the browser's request arrives with an Access token. The POST verifies that
+ * token itself and refuses cross-site requests.
  */
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store" };
 

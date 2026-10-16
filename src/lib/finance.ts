@@ -81,11 +81,22 @@ export type Txn = {
  */
 /** An amount as of the end of a day. */
 export type Anchor = { amount: number; asOf: string };
+/**
+ * A card as the banking app shows it on `asOf`: `amount` = everything owed (incl. pending), `statement` =
+ * the latest statement's balance still unpaid, `due` = its due date. `closeDay` (day of month the statement
+ * closes) and the 14-day payment window predict the next statement.
+ */
+export type CardAnchor = Anchor & { statement?: number; due?: string; closeDay?: number };
+
+export const CARD_DEFAULTS: Record<string, { closeDay: number }> = { nab: { closeDay: 16 }, amex: { closeDay: 1 } };
+/** Days from a statement closing to its due date (both cards: about 30-day statements, 14 days to pay). */
+export const PAYMENT_WINDOW_DAYS = 14;
+
 export type CashAnchors = {
   /** The everyday bank account (CommBank) balance. */
   bank?: Anchor;
-  /** Owed on each card ("amex", "nab"), and when its statement is due. */
-  cards?: Record<string, Anchor & { due?: string }>;
+  /** Each card ("amex", "nab"): total owed, what's still to pay on the latest statement, and when that's due. */
+  cards?: Record<string, CardAnchor>;
   /** Money others owe you (e.g. supplementary cardholders paying you back). */
   owedToYou?: number;
 };
@@ -902,7 +913,14 @@ function normaliseCash(raw: unknown): CashAnchors | undefined {
   const cards: NonNullable<CashAnchors["cards"]> = {};
   for (const [k, v] of Object.entries(c.cards ?? {})) {
     const a = anchorOf(v);
-    if (a) cards[k] = { ...a, ...(isDay((v as { due?: unknown }).due) ? { due: (v as { due: string }).due } : {}) };
+    if (!a) continue;
+    const x = v as CardAnchor;
+    cards[k] = {
+      ...a,
+      ...(typeof x.statement === "number" && x.statement >= 0 ? { statement: x.statement } : {}),
+      ...(isDay(x.due) ? { due: x.due } : {}),
+      ...(typeof x.closeDay === "number" && x.closeDay >= 1 && x.closeDay <= 31 ? { closeDay: Math.round(x.closeDay) } : {}),
+    };
   }
   return {
     ...(anchorOf(c.bank) ? { bank: anchorOf(c.bank) } : {}),
@@ -912,39 +930,96 @@ function normaliseCash(raw: unknown): CashAnchors | undefined {
 }
 
 export const CARD_LABELS: Record<string, string> = { amex: "Amex", nab: "NAB" };
+const CARD_WORDS: Record<string, RegExp> = { nab: /\bNAB\b/i, amex: /AMERICAN EXPRESS|\bAMEX\b/i };
+
+/** The statement closing on day `day` of the month, on or before `date` (short months use their last day). */
+export function closeOnOrBefore(date: string, day: number): string {
+  const d = utc(date);
+  for (const m of [0, -1]) {
+    const y = d.getUTCFullYear();
+    const mo = d.getUTCMonth() + m;
+    const last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    const c = iso(new Date(Date.UTC(y, mo, Math.min(day, last))));
+    if (c <= date) return c;
+  }
+  return date;
+}
+const nextClose = (close: string, day: number) => closeOnOrBefore(addDays(close, 40), day);
+
+export type CardPosition = {
+  source: string;
+  owed: number; // everything owed now
+  statement: number; // latest statement still to pay (0 = paid)
+  due: string;
+  daysLeft: number;
+  overdue: boolean;
+  next: { amount: number; closes: string; due: string }; // building up for the next statement
+  asOf: string;
+  added: number;
+  repaid: number;
+};
 
 export type CashPosition = {
   bank?: { now: number; asOf: string; moved: number };
-  cards: { source: string; owed: number; asOf: string; added: number; repaid: number; due?: string }[];
+  cards: CardPosition[];
   owed: number;
-  /** bank − owed: positive = usable, negative = short. */
+  /** bank − everything owed: positive = usable, negative = short. */
   net?: number;
+  /** Statements still to pay, in due order, with the bank balance left after each (negative = short). */
+  dues: { source: string; amount: number; due: string; daysLeft: number; overdue: boolean; bankAfter?: number }[];
+  /** Bank minus statements due (what's usable without risking interest). */
+  usable?: number;
   owedToYou: number;
-  /** Cards due before the next pay, and how far the bank balance is from covering them. */
-  dueBeforePay: number;
-  shortBeforePay?: number;
 };
 
+const daysFrom = (a: string, b: string) => Math.round((utc(b).getTime() - utc(a).getTime()) / 86_400_000);
+
 /**
- * Bank and card balances now: each entered balance, plus what's recorded after its date. Card spending
- * (incl. supplementary, fees and phone-captured rows) adds to what's owed; repayments and
- * refunds take it off. CommBank rows move the bank balance (money out down, money in up).
+ * Bank and card balances now, from the balances entered on `asOf` plus what's recorded after:
+ * card spending (incl. supplementary, fees, phone-captured) adds to what's owed; refunds take it off;
+ * repayments (seen on the card, or as a CommBank transfer to it, whichever is larger) pay the statement
+ * first. CommBank rows move the bank balance. Paying each statement in full by its due date keeps the
+ * card interest-free; anything after the statement closed is due on the next one.
  */
-export function cashPosition(txns: Txn[], profile: Profile, today: string, nextPay: string): CashPosition {
+export function cashPosition(txns: Txn[], profile: Profile, today: string): CashPosition {
   const cash = profile.cash ?? {};
-  const cards: CashPosition["cards"] = [];
+  const cards: CardPosition[] = [];
   for (const [source, a] of Object.entries(cash.cards ?? {})) {
     let added = 0;
-    let repaid = 0;
+    let refunds = 0;
+    let repaidOnCard = 0;
+    let repaidFromBank = 0;
     for (const t of txns) {
-      if (t.source !== source || t.date <= a.asOf || t.date > today) continue;
-      if (t.kind === "transfer") repaid += Math.abs(t.amount);
-      else if (t.kind !== "income") {
-        if (t.amount >= 0) added += t.amount;
-        else repaid += -t.amount; // refunds
+      if (t.date <= a.asOf || t.date > today) continue;
+      if (t.source === source) {
+        if (t.kind === "transfer") repaidOnCard += Math.abs(t.amount);
+        else if (t.kind !== "income") {
+          if (t.amount >= 0) added += t.amount;
+          else refunds += -t.amount;
+        }
+      } else if (t.source === "commbank" && t.kind === "transfer" && t.amount > 0 && CARD_WORDS[source]?.test(t.description)) {
+        repaidFromBank += t.amount;
       }
     }
-    cards.push({ source, owed: Math.round((a.amount + added - repaid) * 100) / 100, asOf: a.asOf, added, repaid, due: a.due });
+    const repaid = Math.max(repaidOnCard, repaidFromBank);
+    const owed = Math.round((a.amount + added - refunds - repaid) * 100) / 100;
+    const closeDay = a.closeDay ?? CARD_DEFAULTS[source]?.closeDay ?? 1;
+    const lastClose = closeOnOrBefore(a.asOf, closeDay);
+    const due = a.due ?? addDays(lastClose, PAYMENT_WINDOW_DAYS);
+    const statement = Math.max(0, Math.round(((a.statement ?? a.amount) - repaid) * 100) / 100);
+    const closes = nextClose(due < a.asOf ? addDays(lastClose, 1) : lastClose, closeDay);
+    cards.push({
+      source,
+      owed,
+      statement,
+      due,
+      daysLeft: daysFrom(today, due),
+      overdue: statement > 0.005 && today > due,
+      next: { amount: Math.max(0, Math.round((owed - statement) * 100) / 100), closes, due: addDays(closes, PAYMENT_WINDOW_DAYS) },
+      asOf: a.asOf,
+      added,
+      repaid,
+    });
   }
   let bank: CashPosition["bank"];
   if (cash.bank) {
@@ -953,14 +1028,21 @@ export function cashPosition(txns: Txn[], profile: Profile, today: string, nextP
     bank = { now: Math.round((cash.bank.amount + moved) * 100) / 100, asOf: cash.bank.asOf, moved };
   }
   const owed = cards.reduce((s, c) => s + c.owed, 0);
-  const dueBeforePay = cards.filter((c) => c.due && c.due < nextPay).reduce((s, c) => s + c.owed, 0);
+  let running = bank?.now;
+  const dues = cards
+    .filter((c) => c.statement > 0.005)
+    .sort((x, y) => x.due.localeCompare(y.due))
+    .map((c) => {
+      if (running !== undefined) running -= c.statement;
+      return { source: c.source, amount: c.statement, due: c.due, daysLeft: c.daysLeft, overdue: c.overdue, bankAfter: running };
+    });
   return {
     bank,
     cards,
     owed,
     net: bank ? bank.now - owed : undefined,
+    dues,
+    usable: running,
     owedToYou: cash.owedToYou ?? 0,
-    dueBeforePay,
-    shortBeforePay: bank ? bank.now - dueBeforePay : undefined,
   };
 }

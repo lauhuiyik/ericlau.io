@@ -97,7 +97,7 @@ export const debtRemaining = (d: Debt) =>
   Math.max(0, d.balance - (d.log ?? []).reduce((a, x) => a + x.amount, 0));
 
 /** What was logged for this pay period (0 = skipped), or undefined if not decided yet. */
-export const debtLogged = (d: Debt, period: Period) => d.log?.find((x) => x.period === period.start)?.amount;
+export const debtLogged = (d: Debt, period: Period) => d.log?.find((x) => x.period === (period.key ?? period.start))?.amount;
 
 /** Repayments counted against a month: what was logged, else the planned amount. */
 export function debtsForPeriod(profile: Profile, period: Period) {
@@ -111,8 +111,9 @@ export function debtsForPeriod(profile: Profile, period: Period) {
 
 /** Record (or with amount === null, clear) what was paid on a debt this period. */
 export function logDebt(d: Debt, period: Period, amount: number | null): Debt {
-  const log = (d.log ?? []).filter((x) => x.period !== period.start);
-  if (amount !== null) log.push({ period: period.start, amount: Math.max(0, amount) });
+  const key = period.key ?? period.start;
+  const log = (d.log ?? []).filter((x) => x.period !== key);
+  if (amount !== null) log.push({ period: key, amount: Math.max(0, amount) });
   return { ...d, log };
 }
 
@@ -452,7 +453,8 @@ export function mergeTxns(existing: Txn[], incoming: Txn[]): { txns: Txn[]; adde
 // Budget periods (pay cycle)
 // ---------------------------------------------------------------------------
 
-export type Period = { start: string; end: string }; // inclusive, YYYY-MM-DD
+/** Inclusive, YYYY-MM-DD. `key` is the nominal payday start (debt logs are kept against it). */
+export type Period = { start: string; end: string; key?: string };
 
 const iso = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 const utc = (s: string) => new Date(`${s}T00:00:00Z`);
@@ -490,7 +492,9 @@ export type PeriodSummary = {
   byBucket: Record<string, number>; // includes "uncategorised"
   spent: number;
   income: number;
+  /** Spending on supplementary cards: not in the budget (paid back), shown separately. */
   supplementary: number;
+  supplementaryBy: Record<string, number>;
   txns: (Txn & { assignment: Assignment | "uncategorised" })[];
 };
 
@@ -506,6 +510,7 @@ export function summarise(
   let spent = 0;
   let income = 0;
   let supplementary = 0;
+  const supplementaryBy: Record<string, number> = {};
   const rows: PeriodSummary["txns"] = [];
   const all = today ? [...txns, ...expectedCharges(txns, period, profile, today)] : txns;
   for (const t of all) {
@@ -514,13 +519,60 @@ export function summarise(
       t.kind !== "spend" ? t.kind : t.expected ? (toAssignment(t.category) ?? "uncategorised") : categorise(t, profile, overrides);
     rows.push({ ...t, assignment: assignment as Assignment | "uncategorised" });
     if (t.kind === "income") income += -t.amount;
-    else if (t.kind === "supplementary") supplementary += t.amount;
+    else if (t.kind === "supplementary") {
+      supplementary += t.amount;
+      const who = t.cardholder || "Supplementary card";
+      supplementaryBy[who] = (supplementaryBy[who] ?? 0) + t.amount;
+    }
     else if (t.kind === "spend" && assignment !== "transfer" && assignment !== "ignore") {
       byBucket[assignment] = (byBucket[assignment] ?? 0) + t.amount;
       spent += t.amount;
     }
   }
-  return { byBucket, spent, income, supplementary, txns: rows };
+  return { byBucket, spent, income, supplementary, supplementaryBy, txns: rows };
+}
+
+// ---------------------------------------------------------------------------
+// Pay periods that start when pay actually lands
+// ---------------------------------------------------------------------------
+
+/** How far from the usual payday a salary can land and still start that period (early before a weekend, late after a holiday). */
+const PAY_WINDOW_DAYS = 6;
+
+/** The days salary landed: money-in rows at least half the usual pay (or $500 if pay isn't set). */
+export function payDates(txns: Txn[], profile: Profile): string[] {
+  const min = Math.max(500, (profile.payAmount ?? 0) * 0.5);
+  return [...new Set(txns.filter((t) => t.kind === "income" && -t.amount >= min).map((t) => t.date))].sort();
+}
+
+const between = (a: string, b: string) => Math.round((utc(a).getTime() - utc(b).getTime()) / 86_400_000);
+
+/** When the period that nominally starts on `nominal` really starts: the day pay landed near it, else the payday. */
+function actualStart(nominal: string, pays: string[]) {
+  return pays.find((d) => Math.abs(between(d, nominal)) <= PAY_WINDOW_DAYS) ?? nominal;
+}
+
+/**
+ * The pay period containing `date`: from the day pay landed (or the payday, if no pay is recorded near it)
+ * to the day before the next one. So buckets reset when the money actually arrives.
+ */
+export function payPeriodFor(date: string, profile: Profile, pays: string[]): Period {
+  const base = periodFor(date, profile.payday);
+  for (const k of [0, 1, -1]) {
+    const nom = k === 0 ? base : shiftPeriod(base, k, profile.payday);
+    const start = actualStart(nom.start, pays);
+    const next = shiftPeriod(nom, 1, profile.payday);
+    const end = iso(new Date(utc(actualStart(next.start, pays)).getTime() - 86_400_000));
+    if (date >= start && date <= end) return { start, end, key: nom.start };
+  }
+  return { ...base, key: base.start };
+}
+
+export function shiftPayPeriod(p: Period, by: number, profile: Profile, pays: string[]): Period {
+  const nominal = periodFor(p.key ?? p.start, profile.payday);
+  const target = shiftPeriod(nominal, by, profile.payday);
+  // Day 10 of a nominal period is always inside the real one (pay moves it by at most 6 days).
+  return payPeriodFor(iso(new Date(utc(target.start).getTime() + 10 * 86_400_000)), profile, pays);
 }
 
 /** Short merchant name for grouping: the normalised description minus

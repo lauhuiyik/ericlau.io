@@ -29,7 +29,6 @@ import {
   project,
   recentPace,
   savingsGoals,
-  shiftPeriod,
   summarise,
   topMerchants,
   tracked,
@@ -37,6 +36,9 @@ import {
   suggestRecurring,
   toAssignment,
   upcomingCharges,
+  payDates,
+  payPeriodFor,
+  shiftPayPeriod,
 } from "@/lib/finance";
 import { passphraseProblem, suggestPassphrase } from "@/lib/vault-crypto";
 import type { VaultOp } from "@/lib/vault-sync";
@@ -48,6 +50,7 @@ import { type PhoneState, type SaveState, type VaultStatus, isWrongPassphrase, u
 const aud0 = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD", maximumFractionDigits: 0 });
 const aud2 = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" });
 const money = (n: number) => aud0.format(Math.round(n));
+const titleCase = (name: string) => name.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const short = (iso: string) =>
   new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-AU", { day: "numeric", month: "short", timeZone: "UTC" });
 const todayIso = () => {
@@ -87,13 +90,24 @@ export function FinanceApp() {
   // Locked: clear import messages and half-mapped files, which show real transactions.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setPeriod(periodFor(todayIso(), vault.data.profile.payday));
+    setPeriod(payPeriodFor(todayIso(), vault.data.profile, payDates(vault.data.txns, vault.data.profile)));
     if (!ready) {
       setPending([]);
       setNotice(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vault.status.s]);
+
+  // Pay periods start the day salary lands (or on the payday, if none is recorded nearby).
+  const pays = useMemo(() => payDates(txns, profile), [txns, profile]);
+  const here = (date: string) => payPeriodFor(date, profile, pays);
+  const shift = (p: Period, by: number) => shiftPayPeriod(p, by, profile, pays);
+  // When pay lands (or moves), the period being viewed takes its real dates.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPeriod((p) => shiftPayPeriod(p, 0, profile, pays));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pays.join(), profile.payday]);
 
   const updateProfile = (p: Profile) => vault.apply({ t: "profile", patch: p });
   const assign = (description: string, value: string) =>
@@ -104,16 +118,16 @@ export function FinanceApp() {
   // Month by month: every pay period from the first transaction up to this one (or the one being viewed, if
   // later), 6 to 24 columns, none from before the "track from" date.
   const history = useMemo(() => {
-    const now = periodFor(todayIso(), profile.payday);
+    const now = payPeriodFor(todayIso(), profile, pays);
     const last = period.start > now.start ? period : now;
     const first = txns.reduce((min, t) => (t.date < min ? t.date : min), period.start);
     let count = 6;
-    while (count < 24 && shiftPeriod(last, -(count - 1), profile.payday).start > first) count++;
-    const periods = Array.from({ length: count }, (_, i) => shiftPeriod(last, i - (count - 1), profile.payday));
+    while (count < 24 && shiftPayPeriod(last, -(count - 1), profile, pays).start > first) count++;
+    const periods = Array.from({ length: count }, (_, i) => shiftPayPeriod(last, i - (count - 1), profile, pays));
     return periods
       .filter((p) => !profile.startDate || p.end >= profile.startDate)
       .map((p) => ({ period: p, s: summarise(txns, p, profile, overrides, todayIso()) }));
-  }, [txns, period, profile, overrides]);
+  }, [txns, period, profile, overrides, pays]);
   const atStart = !!profile.startDate && period.start <= profile.startDate;
   const fresh = useMemo(() => freshness(txns), [txns]);
   const pace = useMemo(() => recentPace(txns, profile, overrides, todayIso()), [txns, profile, overrides]);
@@ -197,7 +211,7 @@ export function FinanceApp() {
     }
     if (profileNow !== profile) {
       ops.unshift({ t: "profile", patch: profileNow });
-      setPeriod(periodFor(todayIso(), profileNow.payday));
+      setPeriod(payPeriodFor(todayIso(), profileNow, payDates(txnsNow, profileNow)));
     }
     const ids = new Set(txns.map((t) => t.id));
     const added = txnsNow.filter((t) => !ids.has(t.id));
@@ -247,7 +261,14 @@ export function FinanceApp() {
   const uncategorised = summary.txns.filter((t) => t.assignment === "uncategorised");
   const pay = summary.income > 0 ? summary.income : plan.pay;
   const debtsThisMonth = debtsForPeriod(profile, period);
-  const canStillSpend = pay - plan.savings - debtsThisMonth - summary.spent;
+  // Last period: did it end short (spending past pay − savings − debts), and were any repayments skipped?
+  const prevPeriod = shift(period, -1);
+  const prev = summarise(txns, prevPeriod, profile, overrides, todayIso());
+  const prevLeft = (prev.income > 0 ? prev.income : plan.pay) - plan.savings - debtsForPeriod(profile, prevPeriod) - prev.spent;
+  const hasPrev = prev.txns.length > 0 && !(profile.startDate && prevPeriod.end < profile.startDate);
+  const carried = hasPrev && prevLeft < 0 ? -prevLeft : 0;
+  const skipped = profile.debts.filter((d) => debtLogged(d, prevPeriod) === 0 && debtRemaining(d) > 0);
+  const canStillSpend = pay - plan.savings - debtsThisMonth - summary.spent - carried;
   const isCurrent = progress > 0 && progress < 1;
   const visibleTxns = summary.txns.filter((t) =>
     focus ? t.assignment === focus : t.kind === "spend" || t.kind === "income",
@@ -341,7 +362,7 @@ export function FinanceApp() {
           <section className="border-t border-rule px-6 sm:px-12 py-6 flex flex-wrap items-center gap-4">
             <button
               className="rounded border border-rule px-3 py-1 text-sm hover:border-muted disabled:opacity-40 disabled:hover:border-rule"
-              onClick={() => setPeriod(shiftPeriod(period, -1, profile.payday))}
+              onClick={() => setPeriod(shift(period, -1))}
               disabled={atStart}
               aria-label="Previous month"
             >
@@ -352,7 +373,7 @@ export function FinanceApp() {
             </div>
             <button
               className="rounded border border-rule px-3 py-1 text-sm hover:border-muted"
-              onClick={() => setPeriod(shiftPeriod(period, 1, profile.payday))}
+              onClick={() => setPeriod(shift(period, 1))}
               aria-label="Next month"
             >
               →
@@ -360,14 +381,15 @@ export function FinanceApp() {
             {!isCurrent && (
               <button
                 className="text-sm text-muted underline hover:text-foreground"
-                onClick={() => setPeriod(periodFor(todayIso(), profile.payday))}
+                onClick={() => setPeriod(here(todayIso()))}
               >
                 This month
               </button>
             )}
             <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">
-              Pay period starting on payday (the {profile.payday}
-              {ordinal(profile.payday)})
+              {pays.includes(period.start)
+                ? `Pay period from the day your pay landed (${short(period.start)})`
+                : `Pay period from payday (the ${profile.payday}${ordinal(profile.payday)}) until your pay lands`}
               {isCurrent && ` · ${Math.round(progress * 100)}% through`}
             </span>
           </section>
@@ -382,12 +404,45 @@ export function FinanceApp() {
               value={money(Math.abs(canStillSpend))}
               note={
                 canStillSpend >= 0
-                  ? `pay − savings − debts (${money(debtsThisMonth)}) − spent`
-                  : "⚠ spending is past pay minus savings and debts"
+                  ? `pay − savings − debts (${money(debtsThisMonth)}) − spent${carried ? ` − ${money(carried)} carried over` : ""}`
+                  : `⚠ spending is past pay minus savings and debts${carried ? ` (incl. ${money(carried)} carried over)` : ""}`
               }
               warn={canStillSpend < 0}
             />
           </section>
+
+          {(carried > 0 || skipped.length > 0) && (
+            <section className="border-t border-rule px-6 sm:px-12 py-4 max-w-5xl text-sm" role="note">
+              {carried > 0 && (
+                <p style={{ color: OVER }}>
+                  ⚠ Carried over from {short(prevPeriod.start)} – {short(prevPeriod.end)}: that period spent {money(carried)} more
+                  than pay minus savings and debts, so it comes off what&apos;s left this period.
+                </p>
+              )}
+              {skipped.length > 0 && (
+                <p className="mt-1 text-foreground/80">
+                  Skipped last period: {skipped.map((d) => `${d.name} (${money(d.payment)})`).join(", ")}. The balance
+                  didn&apos;t drop, so the payoff date moved out.
+                </p>
+              )}
+            </section>
+          )}
+
+          {summary.supplementary > 0 && (
+            <section className="border-t border-rule px-6 sm:px-12 py-4 max-w-5xl text-sm">
+              <p>
+                <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">Supplementary cards</span>{" "}
+                <span className="font-medium">{money(summary.supplementary)}</span> this period, not in your budget (to be
+                paid back):{" "}
+                <span className="text-muted">
+                  {Object.entries(summary.supplementaryBy)
+                    .sort((x, y) => y[1] - x[1])
+                    .map(([who, amt]) => `${titleCase(who)} ${money(amt)}`)
+                    .join(" · ")}
+                </span>
+              </p>
+            </section>
+          )}
 
           {isCurrent && upcomingCharges(period, profile, todayIso()).length > 0 && (
             <p className="border-t border-rule px-6 sm:px-12 py-4 text-sm text-muted max-w-5xl">

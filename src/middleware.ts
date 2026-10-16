@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-// Public routes that never require auth
-const PUBLIC_PREFIXES = ["/login", "/api/auth", "/_next", "/favicon.ico"];
+// Public routes that never require auth. /api/finance/notify has its own
+// credential (the phone key) and only ever adds encrypted notes.
+const PUBLIC_PREFIXES = ["/login", "/api/auth", "/_next", "/favicon.ico", "/api/finance/notify"];
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

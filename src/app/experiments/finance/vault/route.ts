@@ -1,6 +1,5 @@
-import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { requireOwner } from "@/lib/finance-auth";
 import { MAX_CT_CHARS, parseEnvelope } from "@/lib/vault-envelope";
+import { crossSite, json, ownerDb as open } from "./guard";
 
 /**
  * The owner's encrypted finance vault (one row in D1 database ericlau-finance).
@@ -25,33 +24,11 @@ import { MAX_CT_CHARS, parseEnvelope } from "@/lib/vault-envelope";
  */
 export const dynamic = "force-dynamic";
 
-const HEADERS = { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" };
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: HEADERS });
 const MAX_BODY_CHARS = MAX_CT_CHARS + 4096;
 const HISTORY_KEPT = 30;
 const HISTORY_DAYS = 60;
 
 type Row = { version: number; envelope: string; updated_at: string };
-
-async function open(request: Request): Promise<{ db: D1Database } | { denied: Response }> {
-  const { env } = await getCloudflareContext({ async: true });
-  // `next dev` has no Access in front of it; production builds never take this branch.
-  if (process.env.NODE_ENV !== "development") {
-    const owner = await requireOwner(request.headers, env);
-    if (!owner.ok) return { denied: json({ error: "forbidden", reason: owner.reason }, 403) };
-  }
-  return { db: env.FINANCE_DB };
-}
-
-/** Writes must come from the finance page itself: the Access cookie is sent with any request to this origin. */
-function crossSite(request: Request): string | null {
-  if (request.headers.get("x-finance-vault") !== "1") return "missing x-finance-vault header";
-  const site = request.headers.get("sec-fetch-site");
-  if (site && site !== "same-origin") return "cross-site request";
-  const origin = request.headers.get("origin");
-  if (origin && origin !== new URL(request.url).origin) return "cross-origin request";
-  return null;
-}
 
 async function currentVersion(db: D1Database) {
   const row = await db.prepare("SELECT version FROM vault WHERE id = 'main'").first<{ version: number }>();
@@ -134,6 +111,9 @@ export async function DELETE(request: Request) {
   await ctx.db.batch([
     ctx.db.prepare("DELETE FROM vault WHERE id = 'main'"),
     ctx.db.prepare("DELETE FROM vault_history WHERE id = 'main'"),
+    // The phone feed too: its key could only be opened by the vault just deleted.
+    ctx.db.prepare("DELETE FROM inbox_key"),
+    ctx.db.prepare("DELETE FROM inbox"),
   ]);
   return json({ deleted: true });
 }

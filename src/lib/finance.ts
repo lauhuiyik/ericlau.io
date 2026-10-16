@@ -62,7 +62,24 @@ export type Txn = {
   amount: number;
   cardholder?: string;
   kind: TxnKind;
+  /** Captured from a phone notification: shown at once, replaced when the statement row for it arrives. */
+  provisional?: boolean;
+  /** When it happened (ISO time), for phone-captured transactions. */
+  at?: string;
+  /** The phone app that reported it ("Google Wallet", "Amex app", …). */
+  via?: string;
+  /** A regular charge counted on its usual day because nothing reported it (see expectedCharges). */
+  expected?: boolean;
+  /** For expected charges: the bucket or category it counts against. */
+  category?: string;
 };
+
+/**
+ * A charge that comes every month but sends no notification (e.g. a
+ * subscription on a card): counted on its usual day until a real row for it
+ * turns up. `match` is the normalised statement description that confirms it.
+ */
+export type Recurring = { id: string; name: string; amount: number; day: number; category: string; match?: string };
 
 /**
  * A debt repaid from pay. Repayments are optional: `payment` is the usual
@@ -118,6 +135,8 @@ export type Profile = {
   startDate?: string;
   /** Money owed, repaid from pay each month (paid outside the budget buckets). */
   debts: Debt[];
+  /** Regular charges that send no notification. */
+  recurring: Recurring[];
   /** Cardholder names whose spending counts as the owner's own. */
   ownCardholders: string[];
   /** If non-empty, rows for any other cardholder are dropped at import. */
@@ -134,6 +153,7 @@ export const EMPTY_PROFILE: Profile = {
   targets: {},
   rules: {},
   debts: [],
+  recurring: [],
 };
 
 /** Uppercase, drop digit runs and punctuation, so store numbers and receipt
@@ -474,20 +494,24 @@ export type PeriodSummary = {
   txns: (Txn & { assignment: Assignment | "uncategorised" })[];
 };
 
+/** With `today`, regular charges due by then that nothing reported are counted too (see expectedCharges). */
 export function summarise(
   txns: Txn[],
   period: Period,
   profile: Profile,
   overrides: Record<string, string>,
+  today?: string,
 ): PeriodSummary {
   const byBucket: Record<string, number> = {};
   let spent = 0;
   let income = 0;
   let supplementary = 0;
   const rows: PeriodSummary["txns"] = [];
-  for (const t of txns) {
+  const all = today ? [...txns, ...expectedCharges(txns, period, profile, today)] : txns;
+  for (const t of all) {
     if (t.date < period.start || t.date > period.end) continue;
-    const assignment = t.kind === "spend" ? categorise(t, profile, overrides) : t.kind;
+    const assignment =
+      t.kind !== "spend" ? t.kind : t.expected ? (toAssignment(t.category) ?? "uncategorised") : categorise(t, profile, overrides);
     rows.push({ ...t, assignment: assignment as Assignment | "uncategorised" });
     if (t.kind === "income") income += -t.amount;
     else if (t.kind === "supplementary") supplementary += t.amount;
@@ -575,6 +599,22 @@ export function normaliseProfile(raw: unknown): Profile {
     emergencyTarget: nonNegative(p.emergencyTarget),
     interestRate: nonNegative(p.interestRate),
     startDate: typeof p.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.startDate) ? p.startDate : undefined,
+    recurring: Array.isArray(p.recurring)
+      ? p.recurring
+          .filter(
+            (r): r is Recurring =>
+              !!r && typeof r.id === "string" && typeof r.name === "string" && typeof r.amount === "number" &&
+              typeof r.day === "number" && typeof r.category === "string",
+          )
+          .map((r) => ({
+            id: r.id,
+            name: r.name,
+            amount: Math.max(0, r.amount),
+            day: Math.min(31, Math.max(1, Math.round(r.day))),
+            category: r.category,
+            ...(typeof r.match === "string" && r.match ? { match: r.match } : {}),
+          }))
+      : [],
     debts: uniqueNames(
       Array.isArray(p.debts)
         ? p.debts
@@ -663,6 +703,104 @@ export function project(opts: {
  * What has actually been left over (pay − debt repayments − spent) on average over the last
  * `n` finished pay periods — "if nothing changes" for the projection.
  */
+// ---------------------------------------------------------------------------
+// Regular charges that send no notification
+// ---------------------------------------------------------------------------
+
+const addDays = (date: string, n: number) => iso(new Date(utc(date).getTime() + n * 86_400_000));
+
+/** The date in `period` on day `day` of a month (a short month uses its last day), or null. */
+export function dayInPeriod(period: Period, day: number): string | null {
+  const s = utc(period.start);
+  for (const m of [0, 1]) {
+    const y = s.getUTCFullYear();
+    const mo = s.getUTCMonth() + m;
+    const last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    const d = iso(new Date(Date.UTC(y, mo, Math.min(day, last))));
+    if (d >= period.start && d <= period.end) return d;
+  }
+  return null;
+}
+
+/** Whether a real row (or a phone-captured one) accounts for a regular charge due on `date`. */
+function chargeSeen(r: Recurring, date: string, txns: Txn[]) {
+  const lo = addDays(date, -7);
+  const hi = addDays(date, 7);
+  const tolerance = Math.max(1, r.amount * 0.1);
+  return txns.some(
+    (t) =>
+      !t.expected &&
+      t.date >= lo &&
+      t.date <= hi &&
+      Math.abs(t.amount - r.amount) <= tolerance &&
+      (!r.match || t.provisional || normaliseDescription(t.description).includes(r.match)),
+  );
+}
+
+/** Regular charges due in `period` by `today` that no real row accounts for yet, as stand-in rows. */
+export function expectedCharges(txns: Txn[], period: Period, profile: Profile, today: string): Txn[] {
+  const out: Txn[] = [];
+  for (const r of profile.recurring ?? []) {
+    const date = dayInPeriod(period, r.day);
+    if (!date || date > today || !tracked({ date }, profile) || chargeSeen(r, date, txns)) continue;
+    out.push({
+      id: `expected|${r.id}|${date}`,
+      source: "expected",
+      date,
+      description: r.name,
+      amount: r.amount,
+      kind: "spend",
+      expected: true,
+      category: r.category,
+    });
+  }
+  return out;
+}
+
+/** Regular charges still to come in `period` after `today`. */
+export function upcomingCharges(period: Period, profile: Profile, today: string) {
+  return (profile.recurring ?? [])
+    .map((r) => ({ r, date: dayInPeriod(period, r.day) }))
+    .filter((x): x is { r: Recurring; date: string } => !!x.date && x.date > today)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Likely regular charges in the history: the same description in 3+ months,
+ * about once a month, at a steady amount (within 10%), not already listed.
+ */
+export function suggestRecurring(txns: Txn[], profile: Profile, overrides: Record<string, string>) {
+  const groups = new Map<string, Txn[]>();
+  for (const t of txns) {
+    if (t.kind !== "spend" || t.provisional || t.expected || t.amount <= 0) continue;
+    const k = normaliseDescription(t.description);
+    const list = groups.get(k) ?? [];
+    list.push(t);
+    groups.set(k, list);
+  }
+  const listed = new Set((profile.recurring ?? []).map((r) => r.match).filter(Boolean));
+  const out: Omit<Recurring, "id">[] = [];
+  for (const [k, list] of groups) {
+    if (listed.has(k)) continue;
+    const months = new Set(list.map((t) => t.date.slice(0, 7)));
+    if (months.size < 3 || list.length > months.size + 1) continue;
+    const amounts = list.map((t) => t.amount).sort((a, b) => a - b);
+    const median = amounts[Math.floor(amounts.length / 2)];
+    if (amounts.some((a) => Math.abs(a - median) > Math.max(1, median * 0.1))) continue;
+    const assignment = categorise(list[0], profile, overrides);
+    if (assignment === "transfer" || assignment === "ignore") continue;
+    const days = list.map((t) => Number(t.date.slice(8, 10))).sort((a, b) => a - b);
+    out.push({
+      name: merchantKey(list[0].description),
+      amount: Math.round(median * 100) / 100,
+      day: days[Math.floor(days.length / 2)],
+      category: assignment === "uncategorised" ? "subscriptions" : assignment,
+      match: k,
+    });
+  }
+  return out.sort((a, b) => b.amount - a.amount).slice(0, 12);
+}
+
 export function recentPace(
   txns: Txn[],
   profile: Profile,
@@ -675,7 +813,7 @@ export function recentPace(
   const results: number[] = [];
   for (let i = 1; i <= n; i++) {
     const p = shiftPeriod(current, -i, profile.payday);
-    const s = summarise(txns, p, profile, overrides);
+    const s = summarise(txns, p, profile, overrides, today);
     if (!s.txns.length) continue;
     results.push((s.income > 0 ? s.income : pay) - planFor(profile).debts - s.spent);
   }

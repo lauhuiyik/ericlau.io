@@ -33,10 +33,14 @@ import {
   summarise,
   topMerchants,
   tracked,
+  type Recurring,
+  suggestRecurring,
+  toAssignment,
+  upcomingCharges,
 } from "@/lib/finance";
 import { passphraseProblem, suggestPassphrase } from "@/lib/vault-crypto";
 import type { VaultOp } from "@/lib/vault-sync";
-import { type SaveState, type VaultStatus, isWrongPassphrase, useVault } from "./use-vault";
+import { type PhoneState, type SaveState, type VaultStatus, isWrongPassphrase, useVault } from "./use-vault";
 
 // The data lives in the owner's vault on the site, encrypted in this browser
 // with their passphrase (./use-vault.ts). Decrypted data is only ever in memory.
@@ -58,7 +62,14 @@ const ASSIGN_OPTIONS: { id: Assignment; label: string }[] = [
   { id: "transfer", label: "Transfer (not spending)" },
   { id: "ignore", label: "Ignore" },
 ];
-const SOURCE_LABEL: Record<string, string> = { amex: "Amex", nab: "NAB", commbank: "CommBank", other: "Other" };
+const SOURCE_LABEL: Record<string, string> = {
+  amex: "Amex",
+  nab: "NAB",
+  commbank: "CommBank",
+  other: "Other",
+  phone: "Phone",
+  expected: "Expected",
+};
 
 type PendingFile = { name: string; rows: string[][]; mapping: ColumnMapping };
 
@@ -88,7 +99,8 @@ export function FinanceApp() {
   const assign = (description: string, value: string) =>
     vault.apply({ t: "assign", entries: { [normaliseDescription(description)]: value } });
 
-  const summary = useMemo(() => summarise(txns, period, profile, overrides), [txns, period, profile, overrides]);
+  // Regular charges that send no notification are counted on their usual day (see expectedCharges).
+  const summary = useMemo(() => summarise(txns, period, profile, overrides, todayIso()), [txns, period, profile, overrides]);
   // Month by month: every pay period from the first transaction up to this one (or the one being viewed, if
   // later), 6 to 24 columns, none from before the "track from" date.
   const history = useMemo(() => {
@@ -100,7 +112,7 @@ export function FinanceApp() {
     const periods = Array.from({ length: count }, (_, i) => shiftPeriod(last, i - (count - 1), profile.payday));
     return periods
       .filter((p) => !profile.startDate || p.end >= profile.startDate)
-      .map((p) => ({ period: p, s: summarise(txns, p, profile, overrides) }));
+      .map((p) => ({ period: p, s: summarise(txns, p, profile, overrides, todayIso()) }));
   }, [txns, period, profile, overrides]);
   const atStart = !!profile.startDate && period.start <= profile.startDate;
   const fresh = useMemo(() => freshness(txns), [txns]);
@@ -377,6 +389,15 @@ export function FinanceApp() {
             />
           </section>
 
+          {isCurrent && upcomingCharges(period, profile, todayIso()).length > 0 && (
+            <p className="border-t border-rule px-6 sm:px-12 py-4 text-sm text-muted max-w-5xl">
+              Coming up:{" "}
+              {upcomingCharges(period, profile, todayIso())
+                .map(({ r, date }) => `${r.name} ${money(r.amount)} on ${short(date)}`)
+                .join(" · ")}
+            </p>
+          )}
+
           {profile.debts.length > 0 && <DebtsSection profile={profile} period={period} onChange={updateProfile} />}
 
           {/* Category allowances */}
@@ -470,6 +491,16 @@ export function FinanceApp() {
           onBackup={downloadBackup}
           earlierThan={(date) => txns.filter((t) => t.date < date).length}
         >
+          <RecurringSettings profile={profile} txns={txns} overrides={overrides} onChange={updateProfile} />
+          {vault.status.s === "unlocked" && (
+            <PhoneSettings
+              phone={vault.phone}
+              onConnect={vault.connectPhone}
+              onDisconnect={vault.disconnectPhone}
+              onDismiss={vault.dismissNote}
+              onCheck={vault.checkPhone}
+            />
+          )}
           {vault.status.s === "unlocked" && (
             <VaultSettings
               remembered={vault.remembered}
@@ -1403,6 +1434,240 @@ function BucketRow(props: {
   );
 }
 
+/** Charges that come every month without a notification (e.g. a subscription on a card). */
+function RecurringSettings({
+  profile,
+  txns,
+  overrides,
+  onChange,
+}: {
+  profile: Profile;
+  txns: Txn[];
+  overrides: Record<string, string>;
+  onChange: (p: Profile) => void;
+}) {
+  const list = profile.recurring ?? [];
+  const suggestions = useMemo(() => suggestRecurring(txns, profile, overrides), [txns, profile, overrides]);
+  const set = (next: Recurring[]) => onChange({ ...profile, recurring: next });
+  const update = (id: string, patch: Partial<Recurring>) => set(list.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const newId = () => (typeof crypto.randomUUID === "function" ? crypto.randomUUID() : String(Date.now()));
+  return (
+    <div className="mt-8">
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">Regular charges</h3>
+      <p className="mt-1 text-xs text-muted">
+        For charges that never send a notification, like a subscription on your card. Each one counts on its usual day
+        until the real charge shows up (from a statement), so nothing is counted twice.
+      </p>
+      {list.map((r) => (
+        <div key={r.id} className="mt-3 grid items-end gap-3 text-sm grid-cols-2 sm:grid-cols-5">
+          <label className="col-span-2 flex flex-col gap-1">
+            <span className="text-muted">Name</span>
+            <input
+              key={r.name}
+              className="rounded border border-rule bg-background px-3 py-2"
+              defaultValue={r.name}
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v && v !== r.name) update(r.id, { name: v });
+              }}
+            />
+          </label>
+          <Field
+            label="Amount"
+            value={r.amount}
+            onChange={(v) => {
+              const n = parseAmount(v);
+              if (n !== null && n >= 0) update(r.id, { amount: n });
+            }}
+          />
+          <Field
+            label="Day of month"
+            value={r.day}
+            onChange={(v) => {
+              const n = Math.round(Number(v));
+              if (n >= 1 && n <= 31) update(r.id, { day: n });
+            }}
+          />
+          <div className="flex items-end gap-2">
+            <select
+              className="flex-1 rounded border border-rule bg-background px-2 py-2 text-xs"
+              value={toBucket(r.category)}
+              onChange={(e) => update(r.id, { category: e.target.value })}
+              aria-label={`Category for ${r.name}`}
+            >
+              {BUCKETS.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+            <button
+              className="rounded border border-rule px-3 py-2 text-muted hover:border-muted"
+              onClick={() => set(list.filter((x) => x.id !== r.id))}
+              aria-label={`Remove ${r.name}`}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      ))}
+      <button
+        className="mt-3 rounded border border-rule px-3 py-2 text-sm hover:border-muted"
+        onClick={() => set([...list, { id: newId(), name: "New charge", amount: 0, day: 1, category: "subscriptions" }])}
+      >
+        Add a regular charge
+      </button>
+      {suggestions.length > 0 && (
+        <div className="mt-4 text-sm">
+          <p className="text-muted">Looks regular in your history:</p>
+          <ul className="mt-2 space-y-1">
+            {suggestions.map((sg) => (
+              <li key={sg.match} className="flex flex-wrap items-center gap-x-3">
+                <span className="text-foreground/90">{sg.name}</span>
+                <span className="text-muted">
+                  {money(sg.amount)} around the {sg.day}
+                  {ordinal(sg.day)} · {bucketLabel(toBucket(sg.category))}
+                </span>
+                <button className="underline text-muted hover:text-foreground" onClick={() => set([...list, { ...sg, id: newId() }])}>
+                  Add
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A category from the rules ("groceries") or a bucket id, as the bucket it counts against. */
+const toBucket = (category: string) => (BUCKETS.some((b) => b.id === category) ? category : (toAssignment(category) ?? "essentials"));
+
+/** Connecting the phone feed: Google Wallet, Amex, NAB and CommBank notifications, forwarded by MacroDroid. */
+function PhoneSettings({
+  phone,
+  onConnect,
+  onDisconnect,
+  onDismiss,
+  onCheck,
+}: {
+  phone: PhoneState;
+  onConnect: () => Promise<string>;
+  onDisconnect: () => Promise<void>;
+  onDismiss: (id: string) => Promise<void>;
+  onCheck: () => Promise<void>;
+}) {
+  const [phoneKey, setPhoneKey] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const endpoint = typeof window === "undefined" ? "/api/finance/notify" : `${window.location.origin}/api/finance/notify`;
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await fn();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const when = (iso?: string) =>
+    iso ? new Date(iso).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
+  const copy = (text: string) => void navigator.clipboard?.writeText(text).then(() => setMsg("Copied."));
+  return (
+    <div className="mt-8">
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">Your phone</h3>
+      <p className="mt-2 text-sm text-muted">
+        {phone.connected
+          ? `Connected${phone.connectedAt ? ` (key from ${when(phone.connectedAt)})` : ""}. Payments your phone reports appear here within a minute while this page is open.${phone.checkedAt ? ` Last checked ${when(phone.checkedAt)}${phone.filed ? `, ${phone.filed} new` : ""}.` : ""}`
+          : "Not connected. Your phone can send each payment notification (Google Wallet, Amex, NAB, CommBank) here as it happens, encrypted on arrival."}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-3 text-sm">
+        <button
+          className="rounded border border-rule px-4 py-2 hover:border-muted disabled:opacity-50"
+          disabled={busy}
+          onClick={() =>
+            run(async () => {
+              if (phone.connected && !window.confirm("Make a new phone key? The current one stops working until you put the new one in MacroDroid.")) return;
+              setPhoneKey(await onConnect());
+            })
+          }
+        >
+          {phone.connected ? "New phone key" : "Connect your phone"}
+        </button>
+        {phone.connected && (
+          <>
+            <button className="rounded border border-rule px-4 py-2 hover:border-muted disabled:opacity-50" disabled={busy} onClick={() => run(onCheck)}>
+              Check now
+            </button>
+            <button
+              className="rounded border border-rule px-4 py-2 hover:border-muted disabled:opacity-50"
+              disabled={busy}
+              onClick={() =>
+                run(async () => {
+                  if (!window.confirm("Disconnect your phone? Its key stops working and anything waiting is deleted.")) return;
+                  await onDisconnect();
+                  setPhoneKey(null);
+                })
+              }
+            >
+              Disconnect
+            </button>
+          </>
+        )}
+      </div>
+      {phoneKey && (
+        <div className="mt-4 max-w-2xl rounded border border-rule p-4 text-sm leading-relaxed">
+          <p className="text-foreground/80">Put these in MacroDroid&apos;s HTTP Request action. The key is shown only now.</p>
+          <dl className="mt-3 grid gap-2">
+            <dt className="text-muted">URL (method POST)</dt>
+            <dd className="flex flex-wrap items-center gap-2">
+              <code className="break-all font-mono text-xs">{endpoint}</code>
+              <button className="underline text-muted" onClick={() => copy(endpoint)}>
+                Copy
+              </button>
+            </dd>
+            <dt className="text-muted">Header: name Authorization, value</dt>
+            <dd className="flex flex-wrap items-center gap-2">
+              <code className="break-all font-mono text-xs select-all">Bearer {phoneKey}</code>
+              <button className="underline text-muted" onClick={() => copy(`Bearer ${phoneKey}`)}>
+                Copy
+              </button>
+            </dd>
+            <dt className="text-muted">Body (content type text/plain), using MacroDroid&apos;s magic text</dt>
+            <dd>
+              <code className="block whitespace-pre font-mono text-xs">{"app=[notification app name]\ntitle=[notification title]\ntext=[notification text]"}</code>
+            </dd>
+          </dl>
+          <p className="mt-3 text-muted">
+            Then switch the macro on, pay for something with your phone, and press Check now. Anyone with this key can add
+            to your drop box (never read from it): if it leaks, press New phone key.
+          </p>
+        </div>
+      )}
+      {phone.unreadable.length > 0 && (
+        <div className="mt-4 max-w-2xl text-sm">
+          <p className="text-foreground/80">Notifications with an amount that couldn&apos;t be filed ({phone.unreadable.length}):</p>
+          <ul className="mt-2 divide-y divide-rule">
+            {phone.unreadable.map((u) => (
+              <li key={u.id} className="flex flex-wrap items-start gap-x-3 py-2">
+                <span className="flex-1 min-w-[12rem] text-muted">
+                  <span className="text-foreground/90">{u.note.title}</span> {u.note.text} <span className="text-xs">({u.note.app})</span>
+                </span>
+                <button className="underline text-muted hover:text-foreground" onClick={() => run(() => onDismiss(u.id))}>
+                  Dismiss
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {msg && <p className="mt-3 text-sm text-foreground/80">{msg}</p>}
+    </div>
+  );
+}
+
 function TxnList({
   rows,
   onAssign,
@@ -1416,14 +1681,28 @@ function TxnList({
       {rows.slice(0, 300).map((t) => (
         <li key={t.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2">
           <span className="w-14 shrink-0 font-mono text-xs text-muted">{short(t.date)}</span>
-          <span className="flex-1 min-w-[10rem] truncate text-foreground/90">{t.description}</span>
+          <span className="flex-1 min-w-[10rem] truncate text-foreground/90">
+            {t.description}
+            {t.provisional && (
+              <span className="ml-2 font-mono text-[10px] uppercase text-muted" title={`From your phone (${t.via ?? "notification"}); replaced when the statement row arrives`}>
+                · phone
+              </span>
+            )}
+            {t.expected && (
+              <span className="ml-2 font-mono text-[10px] uppercase text-muted" title="A regular charge, counted on its usual day until the real one shows up">
+                · expected
+              </span>
+            )}
+          </span>
           <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-muted">
             {SOURCE_LABEL[t.source] ?? t.source}
           </span>
           <span className="w-24 shrink-0 text-right tabular-nums">
             {t.amount < 0 ? `+${aud2.format(-t.amount)}` : aud2.format(t.amount)}
           </span>
-          {t.kind === "spend" ? (
+          {t.expected ? (
+            <span className="w-44 shrink-0 text-xs text-muted">{bucketLabel(t.category ?? "")}</span>
+          ) : t.kind === "spend" ? (
             <select
               className="w-44 shrink-0 rounded border border-rule bg-background px-2 py-1 text-xs"
               value={t.assignment === "uncategorised" ? "" : t.assignment}

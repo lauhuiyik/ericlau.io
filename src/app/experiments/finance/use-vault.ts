@@ -4,6 +4,9 @@ import { useEffect, useState } from "react";
 import { MAX_CT_CHARS, type VaultEnvelope, type VaultKdf, parseEnvelope } from "@/lib/vault-envelope";
 import { WrongPassphraseError, deriveKey, newKdf, open, seal } from "@/lib/vault-crypto";
 import { forgetKey, forgetKeyFor, recallKey, rememberKey } from "@/lib/vault-device";
+import { newInboxKeys, newPhoneToken, openInbox, parseInboxEnvelope, sha256Hex } from "@/lib/vault-inbox";
+import { type PhoneNote, readNote } from "@/lib/phone-feed";
+import type { Txn } from "@/lib/finance";
 import {
   EMPTY_DATA,
   type VaultData,
@@ -46,6 +49,19 @@ export type SaveState = {
 };
 
 type Remote = { version: number; envelope: VaultEnvelope; updatedAt: string };
+
+/** The phone feed, as this page sees it. */
+export type PhoneState = {
+  connected: boolean;
+  connectedAt?: string;
+  /** Notifications with an amount that couldn't be filed: shown to the owner to sort or dismiss. */
+  unreadable: { id: string; note: PhoneNote; why: string }[];
+  /** How many payments the last check filed. */
+  filed?: number;
+  checkedAt?: string;
+};
+
+const PHONE_POLL_MS = 60_000;
 
 const ENDPOINT = "/experiments/finance/vault";
 const SAVE_DELAY_MS = 1200;
@@ -160,6 +176,7 @@ type Setters = {
   setSave: (s: SaveState) => void;
   setRemembered: (r: boolean) => void;
   setNotice: (n: string | null) => void;
+  setPhone: (p: PhoneState) => void;
 };
 
 /** The sync engine: plain closures over mutable state, created once per page. */
@@ -180,6 +197,8 @@ function createVault(ui: Setters) {
   let inflight: Promise<void> | null = null;
   let lastSaveFailed = false;
   let saveState: SaveState = { state: "idle" };
+  let phone: PhoneState = { connected: false, unreadable: [] };
+  let pulling: Promise<void> | null = null;
 
   const setSave = (s: SaveState) => {
     saveState = s;
@@ -188,6 +207,10 @@ function createVault(ui: Setters) {
   const show = (d: VaultData) => {
     data = d;
     ui.setData(d);
+  };
+  const setPhone = (p: PhoneState) => {
+    phone = p;
+    ui.setPhone(p);
   };
   const remember = async (k: CryptoKey, params: VaultKdf, yes: boolean) => {
     if (yes) ui.setRemembered(await rememberKey(k, params));
@@ -343,6 +366,93 @@ function createVault(ui: Setters) {
     setSave({ state: "idle", at: r.updatedAt });
     ui.setStatus({ s: "unlocked" });
     if (pending.length) schedule();
+    void pullInbox();
+  }
+
+  /** Apply edits now and queue what actually changed for the next save. */
+  function applyEdits(ops: VaultOp | VaultOp[]) {
+    let next = data;
+    const list: VaultOp[] = [];
+    for (const op of Array.isArray(ops) ? ops : [ops]) {
+      const real = minimiseOp(next, op);
+      if (!real) continue;
+      next = applyOp(next, real);
+      list.push(real);
+    }
+    if (!list.length) return;
+    show(next);
+    if (!pending.length) firstPendingAt = Date.now();
+    pending.push(...list);
+    lastSaveFailed = false;
+    schedule();
+  }
+
+  /**
+   * File what the phone sent: decrypt each drop-box entry with the vault's
+   * private key, read it into a provisional transaction, save, and only then
+   * delete the entries (a failed save leaves them to be read again; re-filing
+   * is a no-op because ids are stable).
+   */
+  async function pullInbox(): Promise<void> {
+    if (pulling) return pulling;
+    pulling = (async () => {
+      for (let round = 0; round < 5 && key; round++) {
+        let r: Record<string, unknown>;
+        try {
+          r = await api("GET", undefined, "/inbox");
+        } catch {
+          return;
+        }
+        const entries = (Array.isArray(r.entries) ? r.entries : []) as { id: string; envelope: unknown }[];
+        const base = { connected: !!r.connected, connectedAt: r.connectedAt as string | undefined, checkedAt: new Date().toISOString() };
+        const keys = data.phone;
+        if (!keys || !entries.length) {
+          setPhone({ ...phone, ...base, filed: 0 });
+          return;
+        }
+        const add: Txn[] = [];
+        const done: string[] = [];
+        const unreadable: PhoneState["unreadable"] = [];
+        for (const e of entries) {
+          const env = parseInboxEnvelope(e.envelope);
+          let note: PhoneNote | null = null;
+          if (env) {
+            try {
+              note = await openInbox<PhoneNote>(keys.privateJwk, env);
+            } catch {
+              // Sealed to a key this vault no longer has (the phone was reconnected): it can never be read.
+            }
+          }
+          if (!note) {
+            done.push(e.id);
+            continue;
+          }
+          const res = readNote(note);
+          if (res.kind === "txn") {
+            add.push(res.txn);
+            done.push(e.id);
+          } else if (res.kind === "ignore") done.push(e.id);
+          else unreadable.push({ id: e.id, note, why: res.why });
+        }
+        if (add.length) applyEdits({ t: "txns", add });
+        await flush();
+        const saved = !pending.length && !lastSaveFailed;
+        if (done.length && saved) {
+          try {
+            await api("DELETE", { ids: done }, "/inbox");
+          } catch {
+            // Left in the drop box: read (harmlessly) again next time.
+          }
+        }
+        setPhone({ ...base, unreadable, filed: add.length });
+        if (!r.more || !saved || !done.length) return;
+      }
+    })();
+    try {
+      await pulling;
+    } finally {
+      pulling = null;
+    }
   }
 
   async function load(isCancelled: () => boolean) {
@@ -418,6 +528,9 @@ function createVault(ui: Setters) {
     } catch (e) {
       // Offline: keep showing what we have. Login expired: say so now, before any edits.
       if (e instanceof SignIn) setSave({ state: "error", at: saveState.at, kind: "signin", error: saveError(e) });
+      return;
+    } finally {
+      if (key && !pending.length) void pullInbox();
     }
   }
 
@@ -436,31 +549,56 @@ function createVault(ui: Setters) {
       document.addEventListener("visibilitychange", onVisibility);
       window.addEventListener("online", onOnline);
       window.addEventListener("beforeunload", onBeforeUnload);
+      // While the page is open and visible, pick up new phone payments every minute.
+      const poll = setInterval(() => {
+        if (document.visibilityState === "visible" && key && !pending.length && !inflight) void pullInbox();
+      }, PHONE_POLL_MS);
       return () => {
         cancelled = true;
+        clearInterval(poll);
         document.removeEventListener("visibilitychange", onVisibility);
         window.removeEventListener("online", onOnline);
         window.removeEventListener("beforeunload", onBeforeUnload);
       };
     },
 
-    /** Apply edits now and queue what actually changed for the next save. */
-    apply(ops: VaultOp | VaultOp[]) {
-      let next = data;
-      const list: VaultOp[] = [];
-      for (const op of Array.isArray(ops) ? ops : [ops]) {
-        const real = minimiseOp(next, op);
-        if (!real) continue;
-        next = applyOp(next, real);
-        list.push(real);
+    apply: applyEdits,
+
+    /**
+     * Connect the phone (or issue a new phone key): make sure the vault holds
+     * drop-box keys (saved before the public half is published, so nothing is
+     * ever sealed to a key the vault lacks), then register the public key and
+     * the new phone key's hash. Returns the phone key, shown to the owner once.
+     */
+    async connectPhone(): Promise<string> {
+      if (!key) throw new Error("Unlock first.");
+      let keys = data.phone;
+      if (!keys) {
+        keys = { ...(await newInboxKeys()), connectedAt: new Date().toISOString() };
+        applyEdits({ t: "phone", keys });
+        await flush();
+        if (pending.length) throw new Error("Couldn't save the phone's drop-box key yet. Try again in a moment.");
       }
-      if (!list.length) return;
-      show(next);
-      if (!pending.length) firstPendingAt = Date.now();
-      pending.push(...list);
-      lastSaveFailed = false;
-      schedule();
+      const token = newPhoneToken();
+      const res = await api("PUT", { publicJwk: keys.publicJwk, tokenHash: await sha256Hex(token) }, "/inbox");
+      setPhone({ ...phone, connected: true, connectedAt: res.connectedAt as string });
+      return token;
     },
+
+    /** Stop accepting the phone key, delete what's waiting, and drop the drop-box keys. */
+    async disconnectPhone() {
+      await api("DELETE", undefined, "/inbox?disconnect=phone");
+      applyEdits({ t: "phone", keys: null });
+      await flush();
+      setPhone({ connected: false, unreadable: [] });
+    },
+
+    async dismissNote(id: string) {
+      await api("DELETE", { ids: [id] }, "/inbox");
+      setPhone({ ...phone, unreadable: phone.unreadable.filter((u) => u.id !== id) });
+    },
+
+    checkPhone: () => pullInbox(),
 
     async unlock(passphrase: string, rememberDevice: boolean) {
       // Fetch first: the passphrase may have been changed on another device since this page loaded.
@@ -595,6 +733,7 @@ function createVault(ui: Setters) {
       ui.setRemembered(false);
       show(EMPTY_DATA);
       setSave({ state: "idle" });
+      setPhone({ connected: false, unreadable: [] });
       ui.setNotice(null);
       ui.setStatus({ s: "setup" });
     },
@@ -622,9 +761,10 @@ export function useVault() {
   const [save, setSave] = useState<SaveState>({ state: "idle" });
   const [remembered, setRemembered] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [vault] = useState(() => createVault({ setStatus, setData, setSave, setRemembered, setNotice }));
+  const [phone, setPhone] = useState<PhoneState>({ connected: false, unreadable: [] });
+  const [vault] = useState(() => createVault({ setStatus, setData, setSave, setRemembered, setNotice, setPhone }));
   useEffect(() => vault.start(), [vault]);
-  return { status, data, save, remembered, notice, ...vault };
+  return { status, data, save, remembered, notice, phone, ...vault };
 }
 
 export const isWrongPassphrase = (e: unknown) => e instanceof WrongPassphraseError;

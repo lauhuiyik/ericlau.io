@@ -15,7 +15,6 @@ export const BUCKETS = [
   { id: "entertainment", label: "Entertainment" },
   { id: "others", label: "Others" },
   { id: "just_because", label: "Just because" },
-  { id: "travel", label: "Travel" },
 ] as const;
 
 export type Bucket = (typeof BUCKETS)[number]["id"];
@@ -31,6 +30,7 @@ export const bucketLabel = (id: string) =>
  * spending analysis, and the earlier seven buckets) and the bucket each rolls into.
  */
 const CATEGORY_ALIASES: Record<string, Assignment> = {
+  travel: "others",
   eating_out: "food",
   groceries: "food",
   subscriptions: "bills",

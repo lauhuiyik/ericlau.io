@@ -1833,7 +1833,7 @@ function RecurringSettings({
       ))}
       <button
         className="mt-3 rounded border border-rule px-3 py-2 text-sm hover:border-muted"
-        onClick={() => set([...list, { id: newId(), name: "New charge", amount: 0, day: 1, category: "subscriptions" }])}
+        onClick={() => set([...list, { id: newId(), name: "New charge", amount: 0, day: 1, category: "bills" }])}
       >
         Add a regular charge
       </button>
@@ -1861,7 +1861,7 @@ function RecurringSettings({
 }
 
 /** A category from the rules ("groceries") or a bucket id, as the bucket it counts against. */
-const toBucket = (category: string) => (BUCKETS.some((b) => b.id === category) ? category : (toAssignment(category) ?? "essentials"));
+const toBucket = (category: string) => (BUCKETS.some((b) => b.id === category) ? category : (toAssignment(category) ?? "others"));
 
 /** Connecting the phone feed: Google Wallet, Amex, NAB and CommBank notifications, forwarded by MacroDroid. */
 function PhoneSettings({

@@ -10,13 +10,11 @@
  */
 
 export const BUCKETS = [
-  { id: "eating_out", label: "Eating out" },
+  { id: "food", label: "Food" },
+  { id: "bills", label: "Subscriptions & bills" },
   { id: "entertainment", label: "Entertainment" },
-  { id: "just_because", label: "Just because" },
-  { id: "subscriptions", label: "Subscriptions" },
-  { id: "shopping", label: "Shopping" },
+  { id: "others", label: "Others" },
   { id: "travel", label: "Travel" },
-  { id: "essentials", label: "Bills & essentials" },
 ] as const;
 
 export type Bucket = (typeof BUCKETS)[number]["id"];
@@ -28,20 +26,24 @@ export const bucketLabel = (id: string) =>
   BUCKETS.find((b) => b.id === id)?.label ?? (id === "uncategorised" ? "Uncategorised" : id);
 
 /**
- * Finer categories (used by the built-in rules and by profiles made from the
- * original spending analysis) that roll up into "Bills & essentials".
+ * Finer categories (from the built-in rules, profiles made from the original
+ * spending analysis, and the earlier seven buckets) and the bucket each rolls into.
  */
 const CATEGORY_ALIASES: Record<string, Assignment> = {
-  groceries: "essentials",
-  bills: "essentials",
-  housing: "essentials",
-  transport: "essentials",
-  personal: "essentials",
-  personal_care: "essentials",
-  health: "essentials",
-  home: "essentials",
-  fees: "essentials",
-  other: "essentials",
+  eating_out: "food",
+  groceries: "food",
+  subscriptions: "bills",
+  housing: "bills",
+  shopping: "others",
+  just_because: "others",
+  essentials: "others",
+  transport: "others",
+  personal: "others",
+  personal_care: "others",
+  health: "others",
+  home: "others",
+  fees: "others",
+  other: "others",
 };
 
 export function toAssignment(category: string | undefined | null): Assignment | undefined {
@@ -203,7 +205,7 @@ const BUILTIN_RULES: [RegExp, string][] = [
   [/WOOLWORTHS|\bCOLES\b|\bALDI\b|\bIGA\b|HARRIS FARM|FOODWORKS|COSTCO|DAN MURPHY|\bBWS\b|LIQUORLAND|BUTCHER|GROCER/, "groceries"],
   [/QANTAS|VIRGIN AUSTRALIA|JETSTAR|AIRASIA|CATHAY|SINGAPORE AIRLINES|EMIRATES|AIRBNB|BOOKING\.COM|EXPEDIA|AGODA|HOTEL|MOTEL|KLOOK|AMEX TRAVEL|HERTZ|\bAVIS\b|THRIFTY|EUROPCAR|\bTURO\b/, "travel"],
   [/CHARGEFOX|\bEVIE\b|SUPERCHARG|AMPOL|\bBP\b|\bSHELL\b|CALTEX|LINKT|CITYLINK|EASTLINK|\bMYKI\b|\bPTV\b|\bUBER\b|DIDI|13CABS|PARKING|ORIKAN|PAYSTAY|GOGET|CAR ?WASH/, "transport"],
-  [/TELSTRA|OPTUS|VODAFONE|\bTPG\b|AUSSIE BROADBAND|AGL|ORIGIN ENERGY|ENERGYAUSTRALIA|LUMO|1ST ENERGY|RED ENERGY|ALINTA|SIMPLY ENERGY|WATER|COUNCIL|VICROADS|INSURANCE|MEDIBANK|\bBUPA\b|\bNIB\b|\bHCF\b|\bAAMI\b|\bRACV\b|BUDGET DIRECT|\bYOUI\b/, "bills"],
+  [/TELSTRA|OPTUS|VODAFONE|\bTPG\b|AUSSIE BROADBAND|LAUNTEL|YOODO|GLOBIRD|AGL|ORIGIN ENERGY|ENERGYAUSTRALIA|LUMO|1ST ENERGY|RED ENERGY|ALINTA|SIMPLY ENERGY|WATER|COUNCIL|VICROADS|INSURANCE|MEDIBANK|\bBUPA\b|\bNIB\b|\bHCF\b|\bAAMI\b|\bRACV\b|BUDGET DIRECT|\bYOUI\b/, "bills"],
   [/\bRENT\b|MORTGAGE|REAL ESTATE|STRATA|BODY CORP/, "housing"],
   [/FLORIST|FLOWER|MICHAEL HILL|PANDORA|PROUDS|LINDT|KOKO BLACK|\bGIFT/, "just_because"],
   [/HOYTS|CINEMA|TICKETEK|TICKETMASTER|MOSHTIX|OZTIX|ESCAPE|BOWL|KINGPIN|\bSTRIKE\b|TIMEZONE|LUNA PARK|STEAMGAMES|PLAYSTATION|NINTENDO|XBOX/, "entertainment"],
@@ -222,6 +224,13 @@ export function categorise(
   const fromProfile = toAssignment(profile.rules[key]);
   if (fromProfile) return fromProfile;
   const upper = txn.description.toUpperCase();
+  // A listed regular charge carries its own category.
+  for (const r of profile.recurring ?? []) {
+    if (r.match && upper.includes(r.match.toUpperCase())) {
+      const fromRecurring = toAssignment(r.category);
+      if (fromRecurring) return fromRecurring;
+    }
+  }
   for (const [re, category] of BUILTIN_RULES) if (re.test(upper)) return toAssignment(category) ?? "uncategorised";
   return "uncategorised";
 }
@@ -873,7 +882,7 @@ export function suggestRecurring(txns: Txn[], profile: Profile, overrides: Recor
       name: merchantKey(list[0].description),
       amount: Math.round(median * 100) / 100,
       day: days[Math.floor(days.length / 2)],
-      category: assignment === "uncategorised" ? "subscriptions" : assignment,
+      category: assignment === "uncategorised" ? "bills" : assignment,
       match: k,
     });
   }

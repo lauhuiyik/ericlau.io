@@ -14,6 +14,7 @@ export const BUCKETS = [
   { id: "bills", label: "Subscriptions & bills" },
   { id: "entertainment", label: "Entertainment" },
   { id: "others", label: "Others" },
+  { id: "just_because", label: "Just because" },
   { id: "travel", label: "Travel" },
 ] as const;
 
@@ -35,7 +36,6 @@ const CATEGORY_ALIASES: Record<string, Assignment> = {
   subscriptions: "bills",
   housing: "bills",
   shopping: "others",
-  just_because: "others",
   essentials: "others",
   transport: "others",
   personal: "others",
@@ -207,7 +207,7 @@ const BUILTIN_RULES: [RegExp, string][] = [
   [/CHARGEFOX|\bEVIE\b|SUPERCHARG|AMPOL|\bBP\b|\bSHELL\b|CALTEX|LINKT|CITYLINK|EASTLINK|\bMYKI\b|\bPTV\b|\bUBER\b|DIDI|13CABS|PARKING|ORIKAN|PAYSTAY|GOGET|CAR ?WASH/, "transport"],
   [/TELSTRA|OPTUS|VODAFONE|\bTPG\b|AUSSIE BROADBAND|LAUNTEL|YOODO|GLOBIRD|AGL|ORIGIN ENERGY|ENERGYAUSTRALIA|LUMO|1ST ENERGY|RED ENERGY|ALINTA|SIMPLY ENERGY|WATER|COUNCIL|VICROADS|INSURANCE|MEDIBANK|\bBUPA\b|\bNIB\b|\bHCF\b|\bAAMI\b|\bRACV\b|BUDGET DIRECT|\bYOUI\b/, "bills"],
   [/\bRENT\b|MORTGAGE|REAL ESTATE|STRATA|BODY CORP/, "housing"],
-  [/FLORIST|FLOWER|MICHAEL HILL|PANDORA|PROUDS|LINDT|KOKO BLACK|\bGIFT/, "just_because"],
+  [/FLORIST|FLOWER|FLORAL|MICHAEL HILL|PANDORA|PROUDS|LINDT|KOKO BLACK|\bGIFT/, "just_because"],
   [/HOYTS|CINEMA|TICKETEK|TICKETMASTER|MOSHTIX|OZTIX|ESCAPE|BOWL|KINGPIN|\bSTRIKE\b|TIMEZONE|LUNA PARK|STEAMGAMES|PLAYSTATION|NINTENDO|XBOX/, "entertainment"],
   [/CHEMIST|PHARMACY|PRICELINE|MEDICAL|DENTAL|PHYSIO|BARBER|\bHAIR|SALON|MASSAGE|\bSPA\b|SEPHORA|MECCA|BUNNINGS|\bIKEA\b|HARDWARE/, "personal"],
   [/AMAZON|AMZN|KMART|\bTARGET\b|BIG W|JB HI|HARVEY NORMAN|OFFICEWORKS|\bMYER\b|DAVID JONES|UNIQLO|EBAY|TEMU|SHEIN|\bREBEL\b/, "shopping"],

@@ -45,7 +45,7 @@ import {
   cashPosition,
 } from "@/lib/finance";
 import { passphraseProblem, suggestPassphrase } from "@/lib/vault-crypto";
-import type { VaultOp } from "@/lib/vault-sync";
+import type { PhoneLogEntry, VaultOp } from "@/lib/vault-sync";
 import { type PhoneState, type SaveState, type VaultStatus, isWrongPassphrase, useVault } from "./use-vault";
 
 // The data lives in the owner's vault on the site, encrypted in this browser
@@ -116,6 +116,10 @@ export function FinanceApp() {
   const updateProfile = (p: Profile) => vault.apply({ t: "profile", patch: p });
   const assign = (description: string, value: string) =>
     vault.apply({ t: "assign", entries: { [normaliseDescription(description)]: value } });
+  const removeTxn = (t: Txn) => {
+    if (window.confirm(`Remove "${t.description}" (${aud2.format(Math.abs(t.amount))})? Use this for phone notifications that weren't real payments.`))
+      vault.apply({ t: "remove", ids: [t.id] });
+  };
 
   // Regular charges that send no notification are counted on their usual day (see expectedCharges).
   const summary = useMemo(() => summarise(txns, period, profile, overrides, todayIso()), [txns, period, profile, overrides]);
@@ -516,7 +520,7 @@ export function FinanceApp() {
                 Needs a category ({uncategorised.length})
               </h2>
               <p className="mt-2 text-sm text-muted">Choosing a category applies to every transaction at that merchant.</p>
-              <TxnList rows={uncategorised} onAssign={assign} />
+              <TxnList rows={uncategorised} onAssign={assign} onRemove={removeTxn} />
             </section>
           )}
 
@@ -531,7 +535,7 @@ export function FinanceApp() {
                 </button>
               )}
             </div>
-            <TxnList rows={visibleTxns} onAssign={assign} />
+            <TxnList rows={visibleTxns} onAssign={assign} onRemove={removeTxn} />
           </section>
 
           {history.length > 0 && (
@@ -563,6 +567,9 @@ export function FinanceApp() {
           {vault.status.s === "unlocked" && (
             <PhoneSettings
               phone={vault.phone}
+              log={vault.data.phoneLog ?? []}
+              txns={txns}
+              onRemove={removeTxn}
               onConnect={vault.connectPhone}
               onDisconnect={vault.disconnectPhone}
               onDismiss={vault.dismissNote}
@@ -1870,8 +1877,14 @@ function PhoneSettings({
   onDisconnect,
   onDismiss,
   onCheck,
+  log,
+  txns,
+  onRemove,
 }: {
   phone: PhoneState;
+  log: PhoneLogEntry[];
+  txns: Txn[];
+  onRemove: (t: Txn) => void;
   onConnect: () => Promise<string>;
   onDisconnect: () => Promise<void>;
   onDismiss: (id: string) => Promise<void>;
@@ -1983,7 +1996,75 @@ function PhoneSettings({
           </ul>
         </div>
       )}
+      {log.length > 0 && <PhoneLog log={log} txns={txns} onRemove={onRemove} when={when} />}
       {msg && <p className="mt-3 text-sm text-foreground/80">{msg}</p>}
+    </div>
+  );
+}
+
+/** Everything the phone sent lately and what the page made of it, so a misread notification can be spotted and removed. */
+function PhoneLog({
+  log,
+  txns,
+  onRemove,
+  when,
+}: {
+  log: PhoneLogEntry[];
+  txns: Txn[];
+  onRemove: (t: Txn) => void;
+  when: (iso?: string) => string;
+}) {
+  const [show, setShow] = useState<"all" | "filed" | "skipped">("all");
+  const byId = useMemo(() => new Map(txns.map((t) => [t.id, t])), [txns]);
+  const rows = log.filter((e) => show === "all" || (show === "filed" ? e.result === "filed" : e.result !== "filed")).slice(0, 100);
+  const filed = log.filter((e) => e.result === "filed").length;
+  return (
+    <div className="mt-6 max-w-3xl text-sm">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <p className="text-foreground/80">
+          What your phone sent ({log.length}: {filed} filed, {log.length - filed} skipped)
+        </p>
+        {(["all", "filed", "skipped"] as const).map((k) => (
+          <button key={k} className={`text-xs ${show === k ? "text-foreground underline" : "text-muted hover:text-foreground"}`} onClick={() => setShow(k)}>
+            {k}
+          </button>
+        ))}
+      </div>
+      <ul className="mt-2 divide-y divide-rule">
+        {rows.map((e) => {
+          const t = e.txnId ? byId.get(e.txnId) : undefined;
+          return (
+            <li key={e.id} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2">
+              <span className="w-28 shrink-0 font-mono text-xs text-muted">{when(e.receivedAt)}</span>
+              <span className="flex-1 min-w-[12rem]">
+                <span className="text-xs text-muted">{e.app || "(no app name)"}</span>
+                <span className="block text-foreground/90">{e.title}</span>
+                <span className="block whitespace-pre-wrap break-words text-muted">{e.text}</span>
+              </span>
+              <span className="w-44 shrink-0 text-right text-xs">
+                {e.result === "filed" ? (
+                  t ? (
+                    <>
+                      <span className="text-foreground/80">
+                        Filed: {t.description} {aud2.format(Math.abs(t.amount))}
+                      </span>
+                      <button className="ml-2 underline text-muted hover:text-foreground" onClick={() => onRemove(t)}>
+                        Remove
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-muted">Filed (since replaced or removed)</span>
+                  )
+                ) : (
+                  <span className="text-muted">
+                    {e.result === "skipped" ? "Skipped" : "Couldn't read"}: {e.why}
+                  </span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -1991,9 +2072,11 @@ function PhoneSettings({
 function TxnList({
   rows,
   onAssign,
+  onRemove,
 }: {
   rows: (Txn & { assignment: string })[];
   onAssign: (description: string, value: string) => void;
+  onRemove?: (t: Txn) => void;
 }) {
   if (!rows.length) return <p className="mt-4 text-sm text-muted">Nothing here.</p>;
   return (
@@ -2014,6 +2097,16 @@ function TxnList({
               </span>
             )}
           </span>
+          {t.provisional && onRemove && (
+            <button
+              className="shrink-0 text-xs text-muted hover:text-foreground"
+              onClick={() => onRemove(t)}
+              aria-label={`Remove ${t.description}`}
+              title="Remove (not a real payment)"
+            >
+              ✕
+            </button>
+          )}
           <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-muted">
             {SOURCE_LABEL[t.source] ?? t.source}
           </span>

@@ -20,13 +20,30 @@ import { type Debt, EMPTY_PROFILE, type Profile, type Txn, mergeTxns, normaliseP
 /** The phone feed's drop-box keys (src/lib/vault-inbox.ts): the private half exists only in here. */
 export type PhoneKeys = { privateJwk: JsonWebKey; publicJwk: JsonWebKey; connectedAt: string };
 
-export type VaultData = { profile: Profile; overrides: Record<string, string>; txns: Txn[]; phone?: PhoneKeys };
+/** One notification the phone sent, with what the page made of it: kept so the owner can check the feed. */
+export type PhoneLogEntry = {
+  id: string;
+  receivedAt: string;
+  app?: string;
+  title?: string;
+  text?: string;
+  result: "filed" | "skipped" | "unreadable";
+  why?: string;
+  txnId?: string;
+};
+export const PHONE_LOG_MAX = 200;
+
+export type VaultData = { profile: Profile; overrides: Record<string, string>; txns: Txn[]; phone?: PhoneKeys; phoneLog?: PhoneLogEntry[] };
 
 export type VaultOp =
   | { t: "txns"; add: Txn[] }
   | { t: "assign"; entries: Record<string, string> }
   /** Connect (keys) or disconnect (null) the phone feed. */
   | { t: "phone"; keys: PhoneKeys | null }
+  /** Record what the phone sent (newest kept, up to PHONE_LOG_MAX). */
+  | { t: "phoneLog"; add: PhoneLogEntry[] }
+  /** Delete transactions (a phone notification that wasn't a real payment). */
+  | { t: "remove"; ids: string[] }
   /** The settings that changed (`patch`), and what they were before (`from`, filled in by minimiseOp). */
   | { t: "profile"; patch: Partial<Profile>; from?: Partial<Profile> };
 
@@ -36,7 +53,18 @@ export const EMPTY_DATA: VaultData = { profile: EMPTY_PROFILE, overrides: {}, tx
 export type VaultPlaintext = VaultData & { schema: 1; savedAt: string };
 
 export function toPlaintext(d: VaultData, savedAt: string): VaultPlaintext {
-  return { schema: 1, savedAt, profile: d.profile, overrides: d.overrides, txns: d.txns, ...(d.phone ? { phone: d.phone } : {}) };
+  return { schema: 1, savedAt, profile: d.profile, overrides: d.overrides, txns: d.txns, ...(d.phone ? { phone: d.phone } : {}), ...(d.phoneLog?.length ? { phoneLog: d.phoneLog } : {}) };
+}
+
+function isLogEntry(e: unknown): e is PhoneLogEntry {
+  const x = e as PhoneLogEntry;
+  return !!x && typeof x.id === "string" && typeof x.receivedAt === "string" && ["filed", "skipped", "unreadable"].includes(x.result);
+}
+
+function addToLog(log: PhoneLogEntry[], add: PhoneLogEntry[]): PhoneLogEntry[] {
+  const byId = new Map(log.map((e) => [e.id, e]));
+  for (const e of add) byId.set(e.id, e);
+  return [...byId.values()].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, PHONE_LOG_MAX);
 }
 
 function isPhoneKeys(k: unknown): k is PhoneKeys {
@@ -54,6 +82,7 @@ export function fromPlaintext(raw: unknown): VaultData {
     overrides,
     txns: Array.isArray(p.txns) ? p.txns.filter((t): t is Txn => isTxn(t) && tracked(t, profile)) : [],
     ...(isPhoneKeys(p.phone) ? { phone: p.phone } : {}),
+    ...(Array.isArray(p.phoneLog) ? { phoneLog: addToLog([], p.phoneLog.filter(isLogEntry)) } : {}),
   };
 }
 
@@ -198,7 +227,16 @@ export function applyOp(d: VaultData, op: VaultOp): VaultData {
       return { ...d, txns: mergeTxns(existing, accepted).txns };
     }
     case "phone":
-      return op.keys ? { ...d, phone: op.keys } : { profile: d.profile, overrides: d.overrides, txns: d.txns };
+      return op.keys
+        ? { ...d, phone: op.keys }
+        : { profile: d.profile, overrides: d.overrides, txns: d.txns, ...(d.phoneLog ? { phoneLog: d.phoneLog } : {}) };
+    case "phoneLog":
+      return { ...d, phoneLog: addToLog(d.phoneLog ?? [], op.add) };
+    case "remove": {
+      const ids = new Set(op.ids);
+      const txns = d.txns.filter((t) => !ids.has(t.id));
+      return txns.length === d.txns.length ? d : { ...d, txns };
+    }
     case "assign":
       return { ...d, overrides: { ...d.overrides, ...op.entries } };
     case "profile": {
@@ -226,6 +264,14 @@ export function minimiseOp(d: VaultData, op: VaultOp): VaultOp | null {
     }
     case "phone":
       return same(op.keys ?? null, d.phone ?? null) ? null : op;
+    case "phoneLog": {
+      const add = op.add.filter((e) => !(d.phoneLog ?? []).some((x) => same(x, e)));
+      return add.length ? { t: "phoneLog", add } : null;
+    }
+    case "remove": {
+      const ids = op.ids.filter((id) => d.txns.some((t) => t.id === id));
+      return ids.length ? { t: "remove", ids } : null;
+    }
     case "assign": {
       const entries = Object.fromEntries(Object.entries(op.entries).filter(([k, v]) => d.overrides[k] !== v));
       return Object.keys(entries).length ? { t: "assign", entries } : null;

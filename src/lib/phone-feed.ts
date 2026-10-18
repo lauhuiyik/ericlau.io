@@ -76,13 +76,18 @@ export function readNote(n: PhoneNote): ReadResult {
   const title = (n.title ?? "").trim();
   const text = (n.text ?? "").trim();
   const all = `${title}\n${text}`;
+  // Only payment apps count: email, shopping and other apps' notifications quote prices that aren't payments.
+  // An app name MacroDroid didn't fill in (empty, or its "[…]" placeholder) falls back to the text.
+  const appName = (n.app ?? "").trim();
+  const named = !!appName && !/^\[.*\]$/.test(appName);
+  const app = APPS.find((a) => a.re.test(appName)) ?? (named ? undefined : APPS.find((a) => a.re.test(all)));
+  if (!app) return { kind: "ignore", why: named ? `not a payment app (${appName})` : "no payment app named" };
   const m = all.match(MONEY);
   if (!m) return { kind: "ignore", why: "no amount" };
   if (NOT_A_TXN.test(all) && !/\b(spent|purchase|paid at|refund)\b/i.test(all)) return { kind: "ignore", why: "reminder or notice" };
 
-  const app = APPS.find((a) => a.re.test(n.app ?? "")) ?? APPS.find((a) => a.re.test(all));
-  const via = app?.via ?? (n.app || "Phone");
-  let source = app?.source ?? "phone";
+  const via = app.via;
+  let source = app.source;
   if (source === "phone") {
     if (/\b(amex|american express)\b/i.test(all)) source = "amex";
     else if (/\bnab\b/i.test(all)) source = "nab";

@@ -9,6 +9,7 @@ import { type PhoneNote, readNote } from "@/lib/phone-feed";
 import type { Txn } from "@/lib/finance";
 import {
   EMPTY_DATA,
+  type PhoneLogEntry,
   type VaultData,
   type VaultOp,
   applyOp,
@@ -413,6 +414,7 @@ function createVault(ui: Setters) {
         const add: Txn[] = [];
         const done: string[] = [];
         const unreadable: PhoneState["unreadable"] = [];
+        const log: PhoneLogEntry[] = [];
         for (const e of entries) {
           const env = parseInboxEnvelope(e.envelope);
           let note: PhoneNote | null = null;
@@ -428,6 +430,16 @@ function createVault(ui: Setters) {
             continue;
           }
           const res = readNote(note);
+          log.push({
+            id: e.id,
+            receivedAt: note.receivedAt,
+            app: note.app,
+            title: note.title,
+            text: note.text,
+            ...(res.kind === "txn"
+              ? { result: "filed" as const, txnId: res.txn.id }
+              : { result: res.kind === "ignore" ? ("skipped" as const) : ("unreadable" as const), why: res.why }),
+          });
           if (res.kind === "txn") {
             add.push(res.txn);
             done.push(e.id);
@@ -435,6 +447,7 @@ function createVault(ui: Setters) {
           else unreadable.push({ id: e.id, note, why: res.why });
         }
         if (add.length) applyEdits({ t: "txns", add });
+        if (log.length) applyEdits({ t: "phoneLog", add: log });
         await flush();
         const saved = !pending.length && !lastSaveFailed;
         if (done.length && saved) {

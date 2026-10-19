@@ -528,7 +528,7 @@ export function FinanceApp() {
                 Needs a category ({uncategorised.length})
               </h2>
               <p className="mt-2 text-sm text-muted">Choosing a category applies to every transaction at that merchant.</p>
-              <TxnList rows={uncategorised} onAssign={assign} onRemove={removeTxn} />
+              <TxnList rows={uncategorised} labels={profile.labels} onAssign={assign} onRemove={removeTxn} />
             </section>
           )}
 
@@ -543,7 +543,7 @@ export function FinanceApp() {
                 </button>
               )}
             </div>
-            <TxnList rows={visibleTxns} onAssign={assign} onRemove={removeTxn} />
+            <TxnList rows={visibleTxns} labels={profile.labels} onAssign={assign} onRemove={removeTxn} />
           </section>
 
           {history.length > 0 && (
@@ -2079,10 +2079,12 @@ function PhoneLog({
 
 function TxnList({
   rows,
+  labels,
   onAssign,
   onRemove,
 }: {
   rows: (Txn & { assignment: string })[];
+  labels?: Record<string, string>;
   onAssign: (description: string, value: string) => void;
   onRemove?: (t: Txn) => void;
 }) {
@@ -2093,7 +2095,11 @@ function TxnList({
         <li key={t.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2">
           <span className="w-14 shrink-0 font-mono text-xs text-muted">{short(t.date)}</span>
           <span className="flex-1 min-w-[10rem] truncate text-foreground/90">
-            {t.description}
+            {labels?.[normaliseDescription(t.description)] ? (
+              <span title={t.description}>{labels[normaliseDescription(t.description)]}</span>
+            ) : (
+              t.description
+            )}
             {t.provisional && (
               <span className="ml-2 font-mono text-[10px] uppercase text-muted" title={`From your phone (${t.via ?? "notification"}); replaced when the statement row arrives`}>
                 · phone

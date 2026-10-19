@@ -175,6 +175,8 @@ export type Profile = {
   targets: Partial<Record<Bucket, number>>;
   /** normaliseDescription(description) -> category/bucket. */
   rules: Record<string, string>;
+  /** normaliseDescription(description) -> the name to show instead (the bank's text is kept). */
+  labels?: Record<string, string>;
 };
 
 export const EMPTY_PROFILE: Profile = {
@@ -683,6 +685,8 @@ export function normaliseProfile(raw: unknown): Profile {
   }
   const rules: Record<string, string> = {};
   for (const [k, v] of Object.entries(p.rules ?? {})) if (typeof v === "string") rules[normaliseDescription(k)] = v;
+  const labels: Record<string, string> = {};
+  for (const [k, v] of Object.entries(p.labels ?? {})) if (typeof v === "string" && v.trim()) labels[normaliseDescription(k)] = v.trim();
   const payday = typeof p.payday === "number" && p.payday >= 1 && p.payday <= 31 ? Math.floor(p.payday) : 15;
   return {
     payday,
@@ -731,6 +735,7 @@ export function normaliseProfile(raw: unknown): Profile {
     allowedCardholders: strings(p.allowedCardholders),
     targets,
     rules,
+    ...(Object.keys(labels).length ? { labels } : {}),
   };
 }
 

@@ -24,6 +24,9 @@ const APPS: { re: RegExp; via: string; source: string }[] = [
   { re: /\bnab\b|au\.com\.nab/i, via: "NAB app", source: "nab" },
 ];
 
+/** Labels of the apps whose notifications are filed. A phone row from anything else was misread. */
+export const PAYMENT_VIAS: readonly string[] = APPS.map((a) => a.via);
+
 // A$12.50, AU$1,234, $5, AUD 12.50, -$3.20, +$100.00
 const MONEY = /([+\-−])?\s?(?:A\$|AU\$|AUD\s?\$?|\$)\s?(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?/i;
 const NOT_A_TXN =

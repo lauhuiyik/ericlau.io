@@ -5,7 +5,7 @@ import { MAX_CT_CHARS, type VaultEnvelope, type VaultKdf, parseEnvelope } from "
 import { WrongPassphraseError, deriveKey, newKdf, open, seal } from "@/lib/vault-crypto";
 import { forgetKey, forgetKeyFor, recallKey, rememberKey } from "@/lib/vault-device";
 import { newInboxKeys, newPhoneToken, openInbox, parseInboxEnvelope, sha256Hex } from "@/lib/vault-inbox";
-import { type PhoneNote, readNote } from "@/lib/phone-feed";
+import { PAYMENT_VIAS, type PhoneNote, readNote } from "@/lib/phone-feed";
 import type { Txn } from "@/lib/finance";
 import {
   EMPTY_DATA,
@@ -397,6 +397,9 @@ function createVault(ui: Setters) {
   async function pullInbox(): Promise<void> {
     if (pulling) return pulling;
     pulling = (async () => {
+      // Phone rows filed before only payment apps counted (an email or a shop's promotion): drop them.
+      const misread = data.txns.filter((t) => t.provisional && !PAYMENT_VIAS.includes(t.via ?? "")).map((t) => t.id);
+      if (misread.length && key) applyEdits({ t: "remove", ids: misread });
       for (let round = 0; round < 5 && key; round++) {
         let r: Record<string, unknown>;
         try {

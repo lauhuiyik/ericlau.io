@@ -414,7 +414,15 @@ export function FinanceApp() {
           {/* The plan: pay -> savings -> allowances, and what is actually left */}
           <section className="border-t border-rule px-6 sm:px-12 py-8 grid grid-cols-2 md:grid-cols-4 gap-6 max-w-5xl">
             <Tile label="Pay" value={money(pay)} note={summary.income > 0 ? "received this period" : "from settings"} />
-            <Tile label="Savings first" value={money(plan.savings)} note="set aside on payday" />
+            <Tile
+              label="Savings first"
+              value={money(plan.savings)}
+              note={
+                profile.savingsMatch?.length
+                  ? `${money(summary.saved)} saved so far, ${money(Math.max(0, plan.savings - summary.saved))} to go`
+                  : "set aside on payday"
+              }
+            />
             <Tile label="Spent so far" value={money(summary.spent)} note={`${summary.txns.length} transactions`} />
             <Tile
               label={canStillSpend >= 0 ? "Left before touching savings" : "Eating into savings"}
@@ -2297,6 +2305,18 @@ function Settings({
           value={profile.savingsTarget}
           onChange={(v) => onChange({ ...profile, savingsTarget: num(v) })}
         />
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted">Transfers that count as savings (comma-separated, e.g. Raiz)</span>
+          <input
+            key={(profile.savingsMatch ?? []).join(", ")}
+            className="rounded border border-rule bg-background px-3 py-2"
+            defaultValue={(profile.savingsMatch ?? []).join(", ")}
+            onBlur={(e) => {
+              const list = e.target.value.split(",").map((m) => m.trim()).filter(Boolean);
+              if (list.join(",") !== (profile.savingsMatch ?? []).join(",")) onChange({ ...profile, savingsMatch: list });
+            }}
+          />
+        </label>
         <Field
           label="Buffer (blank = one month of allowances)"
           value={profile.bufferTarget}

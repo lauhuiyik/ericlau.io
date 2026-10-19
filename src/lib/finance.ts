@@ -149,6 +149,8 @@ export type Profile = {
   payAmount?: number;
   /** Set aside on payday before any spending ("pay yourself first"). */
   savingsTarget?: number;
+  /** Transfers whose description contains one of these (e.g. "RAIZ") are money saved, counted against savingsTarget. */
+  savingsMatch?: string[];
   /** Savings already put away (the starting point for the projection). */
   startingSavings?: number;
   /** One month of spending held in reserve, so each month is paid from the
@@ -527,6 +529,8 @@ export type PeriodSummary = {
   byBucket: Record<string, number>; // includes "uncategorised"
   spent: number;
   income: number;
+  /** Moved to savings this period (transfers matching profile.savingsMatch). */
+  saved: number;
   /** Spending on supplementary cards: not in the budget (paid back), shown separately. */
   supplementary: number;
   supplementaryBy: Record<string, number>;
@@ -544,6 +548,8 @@ export function summarise(
   const byBucket: Record<string, number> = {};
   let spent = 0;
   let income = 0;
+  let saved = 0;
+  const savingsMatch = (profile.savingsMatch ?? []).map((m) => m.toUpperCase());
   let supplementary = 0;
   const supplementaryBy: Record<string, number> = {};
   const rows: PeriodSummary["txns"] = [];
@@ -554,6 +560,7 @@ export function summarise(
       t.kind !== "spend" ? t.kind : t.expected ? (toAssignment(t.category) ?? "uncategorised") : categorise(t, profile, overrides);
     rows.push({ ...t, assignment: assignment as Assignment | "uncategorised" });
     if (t.kind === "income") income += -t.amount;
+    else if (t.kind === "transfer" && savingsMatch.some((m) => t.description.toUpperCase().includes(m))) saved += t.amount;
     else if (t.kind === "supplementary") {
       supplementary += t.amount;
       const who = t.cardholder || "Supplementary card";
@@ -564,7 +571,7 @@ export function summarise(
       spent += t.amount;
     }
   }
-  return { byBucket, spent, income, supplementary, supplementaryBy, txns: rows };
+  return { byBucket, spent, income, saved, supplementary, supplementaryBy, txns: rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +688,9 @@ export function normaliseProfile(raw: unknown): Profile {
     payday,
     payAmount: typeof p.payAmount === "number" ? p.payAmount : undefined,
     savingsTarget: nonNegative(p.savingsTarget),
+    ...(Array.isArray(p.savingsMatch)
+      ? { savingsMatch: p.savingsMatch.filter((m): m is string => typeof m === "string" && !!m.trim()).map((m) => m.trim()) }
+      : {}),
     startingSavings: nonNegative(p.startingSavings),
     bufferTarget: nonNegative(p.bufferTarget),
     emergencyTarget: nonNegative(p.emergencyTarget),

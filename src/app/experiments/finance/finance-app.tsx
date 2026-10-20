@@ -531,15 +531,6 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
             </section>
           )}
 
-          {isCurrent && upcomingCharges(period, profile, todayIso()).length > 0 && (
-            <p className="border-t border-rule px-4 sm:px-12 py-4 text-sm text-muted max-w-5xl">
-              Coming up:{" "}
-              {upcomingCharges(period, profile, todayIso())
-                .map(({ r, date }) => `${r.name} ${money(r.amount)} on ${short(date)}`)
-                .join(" · ")}
-            </p>
-          )}
-
 
           {/* Category allowances */}
           <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
@@ -564,6 +555,13 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
                   onToggle={() => setFocus(focus === b.id ? null : b.id)}
                   merchants={topMerchants(summary.txns, b.id)}
                   daysLeft={isCurrent ? Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1 : undefined}
+                  predicted={
+                    isCurrent
+                      ? upcomingCharges(period, profile, todayIso())
+                          .filter(({ r }) => (toAssignment(r.category) ?? "bills") === b.id)
+                          .map(({ r, date }) => ({ name: r.name, amount: r.amount, date }))
+                      : []
+                  }
                 />
               ))}
             </ul>
@@ -1936,8 +1934,13 @@ function BucketRow(props: {
   merchants: { merchant: string; amount: number; count: number }[];
   /** This period only: days to payday (incl. today), to spread what's left evenly. */
   daysLeft?: number;
+  /** Regular charges in this bucket still to come before payday: counted as expected, not yet spent. */
+  predicted?: { name: string; amount: number; date: string }[];
 }) {
   const { label, spent, target, pace, open, onToggle, merchants, daysLeft } = props;
+  const predicted = props.predicted ?? [];
+  const expected = predicted.reduce((a, p) => a + p.amount, 0);
+  const afterExpected = target - spent - expected;
   const left = target - spent;
   const over = target > 0 && left < 0;
   const ratio = target > 0 ? Math.min(Math.max(spent / target, 0), 1) : 0;
@@ -1964,9 +1967,28 @@ function BucketRow(props: {
               className="absolute inset-y-0 left-0 rounded-full"
               style={{ width: `${ratio * 100}%`, background: over ? OVER : FILL }}
             />
+            {expected > 0 && !over && (
+              <div
+                className="absolute inset-y-0 rounded-full opacity-35"
+                title={`${money(expected)} expected before payday`}
+                style={{
+                  left: `${ratio * 100}%`,
+                  width: `${Math.min(expected / target, 1 - ratio) * 100}%`,
+                  background: FILL,
+                }}
+              />
+            )}
             {pace !== null && (
               <div className="absolute -inset-y-1 w-0.5 bg-muted" style={{ left: `calc(${pace * 100}% - 1px)` }} />
             )}
+          </div>
+        )}
+        {expected > 0 && target > 0 && (
+          <div className="mt-1.5 text-xs text-muted">
+            {money(expected)} predicted before payday ·{" "}
+            <span style={afterExpected < 0 ? { color: OVER } : undefined}>
+              {afterExpected < 0 ? `${money(-afterExpected)} short once they're paid` : `${money(afterExpected)} left once they're paid`}
+            </span>
           </div>
         )}
         {daysLeft !== undefined && daysLeft > 0 && target > 0 && left > 0 && props.id !== "bills" && (
@@ -1975,6 +1997,19 @@ function BucketRow(props: {
           </div>
         )}
       </button>
+      {predicted.length > 0 && (
+        <ul className="mt-3 space-y-1 text-sm">
+          {predicted.map((p) => (
+            <li key={`${p.name}-${p.date}`} className="flex items-baseline justify-between gap-4 text-muted">
+              <span className="truncate">
+                {p.name}{" "}
+                <span className="font-mono text-[10px] uppercase tracking-[0.12em]">· predicted · due {short(p.date)}</span>
+              </span>
+              <span className="shrink-0 tabular-nums">{money(p.amount)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {open && merchants.length > 0 && (
         <ul className="mt-3 ml-1 space-y-1 text-sm text-muted">
           {merchants.map((m) => (

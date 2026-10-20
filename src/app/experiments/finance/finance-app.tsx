@@ -63,6 +63,7 @@ const todayIso = () => {
 };
 
 const OVER = "#f87171"; // status: over budget (always paired with text + icon)
+const GOOD = "#4ade80"; // money in, and what's left
 const FILL = "#d6d3d1"; // spend so far
 const ASSIGN_OPTIONS: { id: Assignment; label: string }[] = [
   ...BUCKETS.map((b) => ({ id: b.id as Assignment, label: b.label })),
@@ -309,7 +310,6 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   );
   const uncategorised = summary.txns.filter((t) => t.assignment === "uncategorised");
   const pay = summary.income > 0 ? summary.income : plan.pay;
-  const debtsThisMonth = debtsForPeriod(profile, period);
   // Last period: did it end short (spending past pay − savings − debts), and were any repayments skipped?
   const prevPeriod = shift(period, -1);
   const prev = summarise(txns, prevPeriod, profile, overrides, todayIso());
@@ -317,7 +317,6 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   const hasPrev = prev.txns.length > 0 && !(profile.startDate && prevPeriod.end < profile.startDate);
   const carried = hasPrev && prevLeft < 0 ? -prevLeft : 0;
   const skipped = profile.debts.filter((d) => debtLogged(d, prevPeriod) === 0 && debtRemaining(d) > 0);
-  const canStillSpend = pay - plan.savings - debtsThisMonth - summary.spent - carried;
   const isCurrent = progress > 0 && progress < 1;
   const visibleTxns = summary.txns.filter((t) =>
     focus ? t.assignment === focus : t.kind === "spend" || t.kind === "income",
@@ -472,30 +471,23 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
 
           {tab === "overview" && (
           <>
-          {/* The plan: pay -> savings -> allowances, and what is actually left */}
-          <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6 max-w-5xl">
-            <Tile label="Pay" value={money(pay)} note={summary.income > 0 ? "received this period" : "from settings"} />
-            <Tile
-              label="Savings first"
-              value={money(plan.savings)}
-              note={
-                profile.savingsMatch?.length
-                  ? `${money(summary.saved)} saved so far, ${money(Math.max(0, plan.savings - summary.saved))} to go`
-                  : "set aside on payday"
-              }
-            />
-            <Tile label="Spent so far" value={money(summary.spent)} note={`${summary.txns.length} transactions`} />
-            <Tile
-              label={canStillSpend >= 0 ? "Left before touching savings" : "Eating into savings"}
-              value={money(Math.abs(canStillSpend))}
-              note={
-                canStillSpend >= 0
-                  ? `pay − savings − debts (${money(debtsThisMonth)}) − spent${carried ? ` − ${money(carried)} carried over` : ""}`
-                  : `⚠ spending is past pay minus savings and debts${carried ? ` (incl. ${money(carried)} carried over)` : ""}`
-              }
-              warn={canStillSpend < 0}
-            />
-          </section>
+          {/* The month as one sum: pay − everything that's gone out (buckets, savings, debts) = what's left */}
+          <PayEquation
+            pay={pay}
+            payNote={summary.income > 0 ? "received this period" : "from settings"}
+            buckets={summary.spent}
+            transactions={summary.txns.filter((t) => t.kind === "spend").length}
+            saved={summary.saved}
+            savingsTarget={plan.savings}
+            debts={profile.debts
+              .map((d) => {
+                const logged = debtLogged(d, period);
+                const left = debtRemaining(d);
+                return { name: d.name, amount: logged ?? (left > 0 ? Math.min(d.payment, left) : 0), planned: logged === undefined };
+              })
+              .filter((d) => d.amount > 0)}
+            carried={carried}
+          />
 
           {(carried > 0 || skipped.length > 0) && (
             <section className="border-t border-rule px-4 sm:px-12 py-4 max-w-5xl text-sm" role="note">
@@ -1804,6 +1796,83 @@ function CashPanel({
           </button>
         </form>
       )}
+    </section>
+  );
+}
+
+/** Pay − spent so far (buckets + money moved to savings + debt repayments) = remaining, as one equation. */
+function PayEquation({
+  pay,
+  payNote,
+  buckets,
+  transactions,
+  saved,
+  savingsTarget,
+  debts,
+  carried,
+}: {
+  pay: number;
+  payNote: string;
+  buckets: number;
+  transactions: number;
+  saved: number;
+  savingsTarget: number;
+  debts: { name: string; amount: number; planned: boolean }[];
+  carried: number;
+}) {
+  const parts = [
+    { label: `Buckets (${transactions} purchases)`, amount: buckets },
+    { label: `Savings${savingsTarget > 0 ? ` (of ${money(savingsTarget)} planned)` : ""}`, amount: saved },
+    ...debts.map((d) => ({ label: `${d.name}${d.planned ? " (planned)" : ""}`, amount: d.amount })),
+    ...(carried > 0 ? [{ label: "Carried over from last period", amount: carried }] : []),
+  ];
+  const out = parts.reduce((a, p) => a + p.amount, 0);
+  const left = pay - out;
+  const label = "font-mono text-[10px] uppercase tracking-[0.18em] text-muted";
+  const big = "mt-1 text-3xl font-semibold tracking-tight tabular-nums";
+  const op = "hidden md:block pt-6 text-2xl text-muted";
+  return (
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
+      <div className="grid gap-5 md:grid-cols-[auto_auto_minmax(0,1.6fr)_auto_auto] md:gap-6 items-start">
+        <div>
+          <div className={label}>Pay</div>
+          <div className={big} style={{ color: GOOD }}>
+            {money(pay)}
+          </div>
+          <div className="mt-1 text-xs text-muted">{payNote}</div>
+        </div>
+        <div className={op} aria-hidden>
+          −
+        </div>
+        <div>
+          <div className={label}>
+            <span className="md:hidden">− </span>Spent so far
+          </div>
+          <div className={big} style={{ color: OVER }}>
+            {money(out)}
+          </div>
+          <ul className="mt-2 space-y-0.5 text-xs">
+            {parts.map((p) => (
+              <li key={p.label} className="flex justify-between gap-4 text-muted">
+                <span>{p.label}</span>
+                <span className="tabular-nums text-foreground/80">{money(p.amount)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className={op} aria-hidden>
+          =
+        </div>
+        <div>
+          <div className={label}>
+            <span className="md:hidden">= </span>Remaining
+          </div>
+          <div className={big} style={{ color: left >= 0 ? GOOD : OVER }}>
+            {left < 0 ? `−${money(-left)}` : money(left)}
+          </div>
+          <div className="mt-1 text-xs text-muted">{left >= 0 ? "left of this pay until the next" : "⚠ more out than came in"}</div>
+        </div>
+      </div>
     </section>
   );
 }

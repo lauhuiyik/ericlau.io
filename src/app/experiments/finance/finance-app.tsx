@@ -487,6 +487,15 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
               })
               .filter((d) => d.amount > 0)}
             carried={carried}
+            runway={
+              isCurrent
+                ? {
+                    days: Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1,
+                    bills: upcomingCharges(period, profile, todayIso()).reduce((a, x) => a + x.r.amount, 0),
+                    savingsToGo: Math.max(0, plan.savings - summary.saved),
+                  }
+                : undefined
+            }
           />
 
           {(carried > 0 || skipped.length > 0) && (
@@ -554,6 +563,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
                   open={focus === b.id}
                   onToggle={() => setFocus(focus === b.id ? null : b.id)}
                   merchants={topMerchants(summary.txns, b.id)}
+                  daysLeft={isCurrent ? Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1 : undefined}
                 />
               ))}
             </ul>
@@ -1810,6 +1820,7 @@ function PayEquation({
   savingsTarget,
   debts,
   carried,
+  runway,
 }: {
   pay: number;
   payNote: string;
@@ -1819,6 +1830,8 @@ function PayEquation({
   savingsTarget: number;
   debts: { name: string; amount: number; planned: boolean }[];
   carried: number;
+  /** This period only: days left to payday (incl. today), regular charges still to come, savings still to move. */
+  runway?: { days: number; bills: number; savingsToGo: number };
 }) {
   const parts = [
     { label: `Buckets (${transactions} purchases)`, amount: buckets },
@@ -1871,6 +1884,29 @@ function PayEquation({
             {left < 0 ? `−${money(-left)}` : money(left)}
           </div>
           <div className="mt-1 text-xs text-muted">{left >= 0 ? "left of this pay until the next" : "⚠ more out than came in"}</div>
+          {runway && runway.days > 0 && (() => {
+            const free = left - runway.bills - runway.savingsToGo;
+            const perDay = free / runway.days;
+            return (
+              <div className="mt-3 rounded border border-rule px-3 py-2">
+                <div className="text-xl font-semibold tabular-nums" style={{ color: perDay >= 0 ? GOOD : OVER }}>
+                  {perDay < 0 ? `−${money(-perDay)}` : money(perDay)}
+                  <span className="text-sm font-normal text-muted"> a day</span>
+                </div>
+                <div className="text-xs text-muted">
+                  {runway.days} day{runway.days === 1 ? "" : "s"} to payday
+                  {runway.bills + runway.savingsToGo > 0 && (
+                    <>
+                      {" "}
+                      · after{runway.bills > 0 && ` ${money(runway.bills)} of bills still due`}
+                      {runway.bills > 0 && runway.savingsToGo > 0 && " and"}
+                      {runway.savingsToGo > 0 && ` ${money(runway.savingsToGo)} savings to go`}
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
     </section>
@@ -1898,8 +1934,10 @@ function BucketRow(props: {
   open: boolean;
   onToggle: () => void;
   merchants: { merchant: string; amount: number; count: number }[];
+  /** This period only: days to payday (incl. today), to spread what's left evenly. */
+  daysLeft?: number;
 }) {
-  const { label, spent, target, pace, open, onToggle, merchants } = props;
+  const { label, spent, target, pace, open, onToggle, merchants, daysLeft } = props;
   const left = target - spent;
   const over = target > 0 && left < 0;
   const ratio = target > 0 ? Math.min(Math.max(spent / target, 0), 1) : 0;
@@ -1929,6 +1967,11 @@ function BucketRow(props: {
             {pace !== null && (
               <div className="absolute -inset-y-1 w-0.5 bg-muted" style={{ left: `calc(${pace * 100}% - 1px)` }} />
             )}
+          </div>
+        )}
+        {daysLeft !== undefined && daysLeft > 0 && target > 0 && left > 0 && props.id !== "bills" && (
+          <div className="mt-1.5 text-xs text-muted">
+            ≈ <span className="text-foreground/90">{money(left / daysLeft)}</span> a day for {daysLeft} day{daysLeft === 1 ? "" : "s"}
           </div>
         )}
       </button>

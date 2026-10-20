@@ -81,7 +81,7 @@ export function readNote(n: PhoneNote): ReadResult {
   const text = (n.text ?? "").trim();
   const all = `${title}\n${text}`;
   // Only payment apps count: email, shopping and other apps' notifications quote prices that aren't payments.
-  // An app name MacroDroid didn't fill in (empty, or its "[…]" placeholder) falls back to the text.
+  // A note with no app name (or an unfilled "[…]" placeholder from an older sender) falls back to the text.
   const appName = (n.app ?? "").trim();
   const named = !!appName && !/^\[.*\]$/.test(appName);
   const app = APPS.find((a) => a.re.test(appName)) ?? (named ? undefined : APPS.find((a) => a.re.test(all)));
@@ -138,7 +138,7 @@ export function readNote(n: PhoneNote): ReadResult {
 }
 
 /**
- * MacroDroid sends plain text ("app=…\\ntitle=…\\ntext=…"), so a notification
+ * The Finance Feed app sends plain text ("app=…\\ntitle=…\\ntext=…"), so a notification
  * with quote marks can't break JSON. Everything after "text=" is the text.
  * JSON bodies are accepted too.
  */

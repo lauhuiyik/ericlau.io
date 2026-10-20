@@ -3,8 +3,8 @@ import { parseNoteBody } from "@/lib/phone-feed";
 import { sameDigest, sealToInbox, sha256Hex } from "@/lib/vault-inbox";
 
 /**
- * Where the owner's phone forwards payment notifications (MacroDroid's HTTP
- * Request action): POST with `Authorization: Bearer <phone key>` and a short
+ * Where the owner's phone forwards payment notifications (the Finance Feed
+ * Android app): POST with `Authorization: Bearer <phone key>` and a short
  * plain-text (or JSON) body with the notification's app, title and text.
  *
  * Not behind Cloudflare Access (the phone can't log in): the phone key is the

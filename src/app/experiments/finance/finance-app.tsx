@@ -1909,7 +1909,7 @@ function RecurringSettings({
 /** A category from the rules ("groceries") or a bucket id, as the bucket it counts against. */
 const toBucket = (category: string) => (BUCKETS.some((b) => b.id === category) ? category : (toAssignment(category) ?? "others"));
 
-/** Connecting the phone feed: Google Wallet, Amex, NAB and CommBank notifications, forwarded by MacroDroid. */
+/** Connecting the phone feed: Google Wallet, Amex, NAB, CommBank and ING notifications, sent by the Finance Feed app. */
 function PhoneSettings({
   phone,
   onConnect,
@@ -1953,7 +1953,7 @@ function PhoneSettings({
       <p className="mt-2 text-sm text-muted">
         {phone.connected
           ? `Connected${phone.connectedAt ? ` (key from ${when(phone.connectedAt)})` : ""}. Payments your phone reports appear here within a minute while this page is open.${phone.checkedAt ? ` Last checked ${when(phone.checkedAt)}${phone.filed ? `, ${phone.filed} new` : ""}.` : ""}`
-          : "Not connected. Your phone can send each payment notification (Google Wallet, Amex, NAB, CommBank) here as it happens, encrypted on arrival."}
+          : "Not connected. The Finance Feed app on your phone can send each payment notification (Google Wallet, Amex, NAB, CommBank, ING) here as it happens, encrypted on arrival."}
       </p>
       <div className="mt-3 flex flex-wrap gap-3 text-sm">
         <button
@@ -1961,7 +1961,7 @@ function PhoneSettings({
           disabled={busy}
           onClick={() =>
             run(async () => {
-              if (phone.connected && !window.confirm("Make a new phone key? The current one stops working until you put the new one in MacroDroid.")) return;
+              if (phone.connected && !window.confirm("Make a new phone key? The current one stops working until you put the new one in the Finance Feed app.")) return;
               setPhoneKey(await onConnect());
             })
           }
@@ -1991,30 +1991,19 @@ function PhoneSettings({
       </div>
       {phoneKey && (
         <div className="mt-4 max-w-2xl rounded border border-rule p-4 text-sm leading-relaxed">
-          <p className="text-foreground/80">Put these in MacroDroid&apos;s HTTP Request action. The key is shown only now.</p>
-          <dl className="mt-3 grid gap-2">
-            <dt className="text-muted">URL (method POST)</dt>
-            <dd className="flex flex-wrap items-center gap-2">
-              <code className="break-all font-mono text-xs">{endpoint}</code>
-              <button className="underline text-muted" onClick={() => copy(endpoint)}>
-                Copy
-              </button>
-            </dd>
-            <dt className="text-muted">Header: name Authorization, value</dt>
-            <dd className="flex flex-wrap items-center gap-2">
-              <code className="break-all font-mono text-xs select-all">Bearer {phoneKey}</code>
-              <button className="underline text-muted" onClick={() => copy(`Bearer ${phoneKey}`)}>
-                Copy
-              </button>
-            </dd>
-            <dt className="text-muted">Body (content type text/plain), using MacroDroid&apos;s magic text</dt>
-            <dd>
-              <code className="block whitespace-pre font-mono text-xs">{"app=[notification app name]\ntitle=[notification title]\ntext=[notification text]"}</code>
-            </dd>
-          </dl>
+          <p className="text-foreground/80">
+            In the Finance Feed app on your phone, open the Feed tab, paste this key into Phone key and tap Save. The key is
+            shown only now.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <code className="break-all font-mono text-xs select-all">{phoneKey}</code>
+            <button className="underline text-muted" onClick={() => copy(phoneKey)}>
+              Copy
+            </button>
+          </div>
           <p className="mt-3 text-muted">
-            Then switch the macro on, pay for something with your phone, and press Check now. Anyone with this key can add
-            to your drop box (never read from it): if it leaks, press New phone key.
+            The app sends to {endpoint} by default. Tap Send a test in the app, then press Check now here. Anyone with this
+            key can add to your drop box (never read from it): if it leaks, press New phone key.
           </p>
         </div>
       )}

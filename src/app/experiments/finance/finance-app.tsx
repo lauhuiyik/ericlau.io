@@ -140,6 +140,25 @@ export function FinanceApp() {
   const atStart = !!profile.startDate && period.start <= profile.startDate;
   const fresh = useMemo(() => freshness(txns), [txns]);
   const pace = useMemo(() => recentPace(txns, profile, overrides, todayIso()), [txns, profile, overrides]);
+  // What's left of each pay is savings: every finished pay period since "track from" adds pay − debts − spent
+  // (a short month takes it back), and the current period's leftover joins when it ends.
+  const fromPay = useMemo(() => {
+    const today = todayIso();
+    const now = payPeriodFor(today, profile, pays);
+    const left = (p: Period) => {
+      const s = summarise(txns, p, profile, overrides, today);
+      return (s.income > 0 ? s.income : (profile.payAmount ?? 0)) - debtsForPeriod(profile, p) - s.spent;
+    };
+    let rolled = 0;
+    if (profile.startDate) {
+      let p = payPeriodFor(profile.startDate, profile, pays);
+      for (let i = 0; i < 120 && p.start < now.start; i++) {
+        if (p.start >= profile.startDate) rolled += left(p);
+        p = shiftPayPeriod(p, 1, profile, pays);
+      }
+    }
+    return { rolled: Math.round(rolled * 100) / 100, current: Math.round(left(now) * 100) / 100, currentEnd: now.end };
+  }, [txns, profile, overrides, pays]);
   const plan = planFor(profile);
   const progress = periodProgress(period, todayIso());
 
@@ -521,7 +540,7 @@ export function FinanceApp() {
             </div>
           </section>
 
-          <SavingsSection profile={profile} onChange={updateProfile} pace={pace} />
+          <SavingsSection profile={profile} onChange={updateProfile} pace={pace} fromPay={fromPay} />
 
           {uncategorised.length > 0 && (
             <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
@@ -1124,10 +1143,13 @@ function SavingsSection({
   profile,
   onChange,
   pace,
+  fromPay,
 }: {
   profile: Profile;
   onChange: (p: Profile) => void;
   pace: number | null;
+  /** Leftover pay rolled into savings so far, and this period's leftover (it joins when the period ends). */
+  fromPay?: { rolled: number; current: number; currentEnd: string };
 }) {
   const plan = planFor(profile);
   const goals = savingsGoals(profile);
@@ -1135,7 +1157,7 @@ function SavingsSection({
   const [months, setMonths] = useState(24);
   const [rollover, setRollover] = useState(true);
   const hasDebt = profile.debts.some((d) => debtRemaining(d) > 0);
-  const start = profile.startingSavings ?? 0;
+  const start = (profile.startingSavings ?? 0) + Math.max(0, fromPay?.rolled ?? 0);
   const proj = project({
     start,
     monthly,
@@ -1178,11 +1200,19 @@ function SavingsSection({
             style={{ width: `${goals.buffer ? (bufferHave / goals.buffer) * 100 : 0}%`, background: LINE }}
           />
         </div>
+        {fromPay && (
+          <p className="mt-2 text-sm text-muted">
+            Whatever is left of each pay becomes savings.
+            {fromPay.rolled !== 0 && ` ${money(fromPay.rolled)} so far from past pay periods.`} This period:{" "}
+            {fromPay.current >= 0 ? `${money(fromPay.current)} left now` : `${money(-fromPay.current)} over`}; what&apos;s
+            left on {short(fromPay.currentEnd)} rolls in.
+          </p>
+        )}
       </div>
 
       <div className="mt-6 grid gap-4 sm:grid-cols-4 text-sm">
         <label className="flex flex-col gap-1">
-          <span className="text-muted">Saved so far</span>
+          <span className="text-muted">{fromPay ? "Saved before tracking" : "Saved so far"}</span>
           <input
             inputMode="decimal"
             className="rounded border border-rule bg-background px-3 py-2"

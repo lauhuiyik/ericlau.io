@@ -1,6 +1,6 @@
 /**
  * Reads payment notifications forwarded from the owner's phone (Google
- * Wallet, and the Amex, NAB and CommBank apps) into provisional transactions.
+ * Wallet, and the Amex, NAB, CommBank and ING apps) into provisional transactions.
  *
  * Runs in the browser after the page decrypts the drop box, so changing how a
  * notification is read never needs the phone to resend anything. Heuristic by
@@ -22,6 +22,7 @@ const APPS: { re: RegExp; via: string; source: string }[] = [
   { re: /americanexpress|american express|\bamex\b/i, via: "Amex app", source: "amex" },
   { re: /commbank|netbank|commonwealth/i, via: "CommBank app", source: "commbank" },
   { re: /\bnab\b|au\.com\.nab/i, via: "NAB app", source: "nab" },
+  { re: /^ing$|\bing (australia|direct|app)\b|ingdirect/i, via: "ING app", source: "ing" },
 ];
 
 /** Labels of the apps whose notifications are filed. A phone row from anything else was misread. */
@@ -95,6 +96,7 @@ export function readNote(n: PhoneNote): ReadResult {
     if (/\b(amex|american express)\b/i.test(all)) source = "amex";
     else if (/\bnab\b/i.test(all)) source = "nab";
     else if (/commbank|commonwealth/i.test(all)) source = "commbank";
+    else if (/\bing (australia|direct)\b/i.test(all)) source = "ing";
   }
 
   const value = Number(m[2].replace(/,/g, "") + (m[3] ?? ""));
@@ -107,6 +109,8 @@ export function readNote(n: PhoneNote): ReadResult {
   let amount = isIn ? -value : value;
   if (isIn && isCard && CARD_REPAYMENT.test(all)) kind = "transfer"; // paying the card off
   else if (isIn && source === "commbank") kind = "income"; // pay or other money in
+  else if (isIn && source === "ing") kind = "transfer"; // savings moved in, not a refund
+  else if (!isIn && source === "ing" && /\btransfer(red)?\b/i.test(all)) kind = "transfer"; // to your own accounts
   else if (!isIn && source === "commbank" && /\b(american express|amex|nab card|credit card)\b/i.test(all)) kind = "transfer";
   if (kind === "transfer") amount = Math.abs(amount);
 

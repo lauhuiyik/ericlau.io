@@ -73,6 +73,7 @@ const SOURCE_LABEL: Record<string, string> = {
   amex: "Amex",
   nab: "NAB",
   commbank: "CommBank",
+  ing: "ING",
   other: "Other",
   phone: "Phone",
   expected: "Expected",

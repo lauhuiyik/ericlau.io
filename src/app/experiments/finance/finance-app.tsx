@@ -69,6 +69,14 @@ const ASSIGN_OPTIONS: { id: Assignment; label: string }[] = [
   { id: "transfer", label: "Transfer (not spending)" },
   { id: "ignore", label: "Ignore" },
 ];
+const TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "transactions", label: "Transactions" },
+  { id: "savings", label: "Savings" },
+  { id: "settings", label: "Settings" },
+] as const;
+type Tab = (typeof TABS)[number]["id"];
+
 const SOURCE_LABEL: Record<string, string> = {
   amex: "Amex",
   nab: "NAB",
@@ -81,12 +89,25 @@ const SOURCE_LABEL: Record<string, string> = {
 
 type PendingFile = { name: string; rows: string[][]; mapping: ColumnMapping };
 
-export function FinanceApp() {
+export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   const vault = useVault();
   const { txns, profile, overrides } = vault.data;
   const ready = vault.status.s === "setup" || vault.status.s === "unlocked";
   const [period, setPeriod] = useState<Period>(() => periodFor(todayIso(), 15));
   const [focus, setFocus] = useState<string | null>(null);
+  // One part of the page at a time (kept in the URL hash), so it isn't one long scroll on a phone.
+  // Nothing tab-dependent renders on the server (the page waits for the vault), so reading the hash here is safe.
+  const [tab, setTabState] = useState<Tab>(() => {
+    const fromHash = typeof window === "undefined" ? "" : window.location.hash.slice(1);
+    return TABS.find((t) => t.id === fromHash)?.id ?? "overview";
+  });
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    try {
+      window.history.replaceState(null, "", `#${t}`);
+    } catch {}
+    window.scrollTo({ top: 0 });
+  };
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingFile[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -304,7 +325,8 @@ export function FinanceApp() {
 
   return (
     <div className="flex flex-1 flex-col">
-      <header className="flex items-center justify-between px-6 py-6 sm:px-12">
+      {!inApp && (
+      <header className="flex items-center justify-between px-4 py-4 sm:px-12 sm:py-6">
         {/* A full page load, not next/link: the finance page's CSP must not follow the user onto other pages. */}
         <a
           href="/experiments"
@@ -314,14 +336,17 @@ export function FinanceApp() {
         </a>
         <div className="font-mono text-xs uppercase tracking-[0.18em] text-muted">Finance · private</div>
       </header>
+      )}
 
-      <section className="px-6 sm:px-12 pt-8 pb-6 max-w-5xl">
-        <h1 className="text-4xl sm:text-5xl font-semibold tracking-[-0.02em]">Spending</h1>
+      <section className="px-4 sm:px-12 pt-4 sm:pt-8 pb-4 sm:pb-6 max-w-5xl">
+        <h1 className="text-3xl sm:text-5xl font-semibold tracking-[-0.02em]">Spending</h1>
+        {txns.length === 0 && (
         <p className="mt-3 max-w-2xl text-sm text-muted leading-relaxed">
           Drop in CSV exports from CommBank, NAB and Amex. They are read in this browser, encrypted with your
           passphrase and saved to your site, so every device you unlock sees the same data. Nobody can read it without
           the passphrase — not even the site.
         </p>
+        )}
         {ready && (
           <div className="mt-5 flex flex-wrap items-center gap-3">
             <label className="cursor-pointer rounded border border-rule px-4 py-2 text-sm hover:border-muted">
@@ -376,8 +401,28 @@ export function FinanceApp() {
         />
       ))}
 
+      {ready && txns.length > 0 && (
+        <nav className="sticky top-0 z-10 border-y border-rule bg-background/95 backdrop-blur px-2 sm:px-12" aria-label="Sections">
+          <div className="flex max-w-5xl">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                className={`flex-1 sm:flex-none sm:px-5 py-3 text-sm ${tab === t.id ? "text-foreground font-medium border-b-2 border-foreground" : "text-muted hover:text-foreground border-b-2 border-transparent"}`}
+                onClick={() => setTab(t.id)}
+                aria-current={tab === t.id ? "page" : undefined}
+              >
+                {t.label}
+                {t.id === "transactions" && uncategorised.length > 0 && (
+                  <span className="ml-1 rounded-full bg-foreground/10 px-1.5 text-[10px]">{uncategorised.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </nav>
+      )}
+
       {!ready ? null : txns.length === 0 ? (
-        <section className="border-t border-rule px-6 sm:px-12 py-12 max-w-3xl text-sm text-muted leading-relaxed">
+        <section className="border-t border-rule px-4 sm:px-12 py-12 max-w-3xl text-sm text-muted leading-relaxed">
           <p>
             No data yet. Import your profile file first (it holds your merchant rules and monthly allowances), then
             your exports. Re-importing an overlapping export is safe — transactions already stored are skipped.
@@ -386,17 +431,10 @@ export function FinanceApp() {
         </section>
       ) : (
         <>
-          <CashPanel
-            txns={txns}
-            profile={profile}
-            onChange={updateProfile}
-            nextPay={shift(here(todayIso()), 1).start}
-            planned={debtsForPeriod(profile, shift(here(todayIso()), 1)) + plan.savings}
-            pay={plan.pay}
-          />
 
           {/* Month (pay period) navigation */}
-          <section className="border-t border-rule px-6 sm:px-12 py-6 flex flex-wrap items-center gap-4">
+          {(tab === "overview" || tab === "transactions") && (
+          <section className="border-t border-rule px-4 sm:px-12 py-6 flex flex-wrap items-center gap-4">
             <button
               className="rounded border border-rule px-3 py-1 text-sm hover:border-muted disabled:opacity-40 disabled:hover:border-rule"
               onClick={() => setPeriod(shift(period, -1))}
@@ -430,9 +468,12 @@ export function FinanceApp() {
               {isCurrent && ` · ${Math.round(progress * 100)}% through`}
             </span>
           </section>
+          )}
 
+          {tab === "overview" && (
+          <>
           {/* The plan: pay -> savings -> allowances, and what is actually left */}
-          <section className="border-t border-rule px-6 sm:px-12 py-8 grid grid-cols-2 md:grid-cols-4 gap-6 max-w-5xl">
+          <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6 max-w-5xl">
             <Tile label="Pay" value={money(pay)} note={summary.income > 0 ? "received this period" : "from settings"} />
             <Tile
               label="Savings first"
@@ -457,7 +498,7 @@ export function FinanceApp() {
           </section>
 
           {(carried > 0 || skipped.length > 0) && (
-            <section className="border-t border-rule px-6 sm:px-12 py-4 max-w-5xl text-sm" role="note">
+            <section className="border-t border-rule px-4 sm:px-12 py-4 max-w-5xl text-sm" role="note">
               {carried > 0 && (
                 <p style={{ color: OVER }}>
                   ⚠ Carried over from {short(prevPeriod.start)} – {short(prevPeriod.end)}: that period spent {money(carried)} more
@@ -474,7 +515,7 @@ export function FinanceApp() {
           )}
 
           {summary.supplementary > 0 && (
-            <section className="border-t border-rule px-6 sm:px-12 py-4 max-w-5xl text-sm">
+            <section className="border-t border-rule px-4 sm:px-12 py-4 max-w-5xl text-sm">
               <p>
                 <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">Supplementary cards</span>{" "}
                 <span className="font-medium">{money(summary.supplementary)}</span> this period, not in your budget (to be
@@ -490,7 +531,7 @@ export function FinanceApp() {
           )}
 
           {isCurrent && upcomingCharges(period, profile, todayIso()).length > 0 && (
-            <p className="border-t border-rule px-6 sm:px-12 py-4 text-sm text-muted max-w-5xl">
+            <p className="border-t border-rule px-4 sm:px-12 py-4 text-sm text-muted max-w-5xl">
               Coming up:{" "}
               {upcomingCharges(period, profile, todayIso())
                 .map(({ r, date }) => `${r.name} ${money(r.amount)} on ${short(date)}`)
@@ -498,10 +539,9 @@ export function FinanceApp() {
             </p>
           )}
 
-          {profile.debts.length > 0 && <DebtsSection profile={profile} period={period} onChange={updateProfile} />}
 
           {/* Category allowances */}
-          <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+          <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
             <div className="flex items-baseline justify-between">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
                 Where it went · left in each category
@@ -540,10 +580,36 @@ export function FinanceApp() {
             </div>
           </section>
 
-          <SavingsSection profile={profile} onChange={updateProfile} pace={pace} fromPay={fromPay} />
-
           {uncategorised.length > 0 && (
-            <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+            <p className="border-t border-rule px-4 sm:px-12 py-4 text-sm max-w-5xl">
+              <button className="underline" onClick={() => setTab("transactions")}>
+                {uncategorised.length} transaction{uncategorised.length === 1 ? "" : "s"} need a category →
+              </button>
+            </p>
+          )}
+
+          <CashPanel
+            txns={txns}
+            profile={profile}
+            onChange={updateProfile}
+            nextPay={shift(here(todayIso()), 1).start}
+            planned={debtsForPeriod(profile, shift(here(todayIso()), 1)) + plan.savings}
+            pay={plan.pay}
+          />
+          </>
+          )}
+
+          {tab === "savings" && (
+            <>
+              <SavingsSection profile={profile} onChange={updateProfile} pace={pace} fromPay={fromPay} />
+              {profile.debts.length > 0 && <DebtsSection profile={profile} period={period} onChange={updateProfile} />}
+            </>
+          )}
+
+          {tab === "transactions" && (
+          <>
+          {uncategorised.length > 0 && (
+            <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
                 Needs a category ({uncategorised.length})
               </h2>
@@ -552,7 +618,7 @@ export function FinanceApp() {
             </section>
           )}
 
-          <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+          <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
             <div className="flex items-baseline justify-between">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
                 {focus ? `${bucketLabel(focus)} transactions` : "All transactions this period"}
@@ -573,9 +639,11 @@ export function FinanceApp() {
               current={period}
               onOpen={(p) => {
                 setPeriod(p);
-                window.scrollTo({ top: 0, behavior: "smooth" });
+                setTab("overview");
               }}
             />
+          )}
+          </>
           )}
         </>
       )}
@@ -584,11 +652,12 @@ export function FinanceApp() {
         <SavingsSection profile={profile} onChange={updateProfile} pace={null} />
       )}
 
-      {ready && (
+      {ready && (txns.length === 0 || tab === "settings") && (
         <Settings
           profile={profile}
           onChange={updateProfile}
           onBackup={downloadBackup}
+          open={txns.length > 0}
           earlierThan={(date) => txns.filter((t) => t.date < date).length}
         >
           <RecurringSettings profile={profile} txns={txns} overrides={overrides} onChange={updateProfile} />
@@ -754,11 +823,11 @@ function VaultPanel({
   const [error, setError] = useState<string | null>(null);
 
   if (status.s === "loading") {
-    return <p className="border-t border-rule px-6 sm:px-12 py-8 text-sm text-muted">Loading your data…</p>;
+    return <p className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 text-sm text-muted">Loading your data…</p>;
   }
   if (status.s === "unavailable") {
     return (
-      <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-2xl text-sm">
+      <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-2xl text-sm">
         <p role="alert" style={{ color: OVER }}>⚠ Couldn&apos;t load your data. {status.error}</p>
         <div className="mt-4 flex flex-wrap gap-3">
           <button className="rounded border border-rule px-4 py-2 hover:border-muted" onClick={() => location.reload()}>
@@ -795,7 +864,7 @@ function VaultPanel({
   }
 
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-2xl">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-2xl">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
         {setup ? "Save to your site" : "Unlock your data"}
       </h2>
@@ -1008,7 +1077,7 @@ function DebtsSection({ profile, period, onChange }: { profile: Profile; period:
   const [other, setOther] = useState<Record<number, string>>({});
   const setDebt = (i: number, d: Debt) => onChange({ ...profile, debts: profile.debts.map((x, j) => (j === i ? d : x)) });
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Debts · flexible this month</h2>
       <p className="mt-2 max-w-2xl text-sm text-muted">
         Repayments are planned, not fixed. In a tight month, pay less or skip — the balance only drops by what you
@@ -1178,7 +1247,7 @@ function SavingsSection({
   const bufferHave = Math.min(start, goals.buffer);
 
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Savings &amp; buffer</h2>
       <p className="mt-2 max-w-2xl text-sm text-muted leading-relaxed">
         Step 1 is a buffer of one month&apos;s spending ({money(goals.buffer)}). Once it&apos;s full, each payday&apos;s
@@ -1504,6 +1573,7 @@ function CashPanel({
   const c = cashPosition(txns, profile, today);
   const cash = profile.cash ?? {};
   const [editing, setEditing] = useState(!cash.bank);
+  const [details, setDetails] = useState(false);
   const blankCard = (k: string) => ({
     owed: cash.cards?.[k]?.amount?.toString() ?? "",
     statement: cash.cards?.[k]?.statement?.toString() ?? "",
@@ -1554,14 +1624,14 @@ function CashPanel({
   const afterPay = ready ? c.net! + pay - planned : 0;
   const input = "rounded border border-rule bg-background px-3 py-2";
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
       {/* The number that matters most: after paying every statement that's due, how short (or how much spare). */}
       {ready && (
         <div className="mb-5">
           <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
             {(c.usable ?? 0) < 0 ? "After paying what's due, you'd still be short by" : "After paying what's due, you'd have spare"}
           </p>
-          <p className="mt-1 text-5xl sm:text-6xl font-semibold tracking-tight tabular-nums" style={(c.usable ?? 0) < 0 ? { color: OVER } : undefined}>
+          <p className="mt-1 text-4xl sm:text-6xl font-semibold tracking-tight tabular-nums" style={(c.usable ?? 0) < 0 ? { color: OVER } : undefined}>
             {money(Math.abs(c.usable ?? 0))}
           </p>
           <p className="mt-1 text-sm text-muted">
@@ -1598,11 +1668,13 @@ function CashPanel({
           );
         })}
       {ready && c.dues.length === 0 && (
-        <p className="mb-3 rounded border border-rule px-4 py-3 text-sm">✓ Every card statement is paid. Nothing due right now.</p>
+        <p className="mb-3 text-sm text-muted">✓ Every card statement is paid. Nothing due right now.</p>
       )}
 
-      <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Cash position · right now</h2>
-      {ready ? (
+      {ready && !details ? null : (
+        <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Cash position · right now</h2>
+      )}
+      {ready && !details ? null : ready ? (
         <>
           <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-6">
             <Tile
@@ -1642,9 +1714,16 @@ function CashPanel({
           Enter the cash you have now (add each account or stash; they&apos;re summed) and, for each card, what the app shows: total owed and the statement amount still to pay. Due dates follow each card&apos;s statement cycle (closing day + 14 days).
         </p>
       )}
-      <button className="mt-4 text-sm text-muted underline hover:text-foreground" onClick={() => setEditing(!editing)}>
-        {editing ? "Cancel" : "Update balances"}
-      </button>
+      <div className="mt-2 flex flex-wrap gap-x-5 text-sm">
+        {ready && (
+          <button className="text-muted underline hover:text-foreground" onClick={() => setDetails(!details)}>
+            {details ? "Hide cash details" : "Cash details"}
+          </button>
+        )}
+        <button className="text-muted underline hover:text-foreground" onClick={() => setEditing(!editing)}>
+          {editing ? "Cancel" : "Update balances"}
+        </button>
+      </div>
       {editing && (
         <form
           className="mt-4 grid gap-4 text-sm sm:grid-cols-3 max-w-4xl"
@@ -2195,7 +2274,7 @@ function History({
     (b) => (profile.targets[b.id] ?? 0) > 0 || rows.some((r) => Math.abs(r.s.byBucket[b.id] ?? 0) > 0.005),
   );
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Month by month</h2>
       <p className="mt-1 text-xs text-muted">Tap a month to open it.</p>
       {/* Only the table scrolls sideways; the category column stays in view. */}
@@ -2297,11 +2376,14 @@ function Settings({
   onChange,
   onBackup,
   earlierThan,
+  open,
   children,
 }: {
   profile: Profile;
   onChange: (p: Profile) => void;
   onBackup: () => void;
+  /** Start expanded (on the Settings tab). */
+  open?: boolean;
   /** How many stored transactions fall before a date (for the "track from" warning). */
   earlierThan?: (date: string) => number;
   children?: ReactNode;
@@ -2312,7 +2394,7 @@ function Settings({
   };
   const plan = planFor(profile);
   return (
-    <details className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+    <details open={open} className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
       <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
         Plan & settings
       </summary>
@@ -2501,7 +2583,7 @@ function MappingForm({
     </label>
   );
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-6 max-w-5xl text-sm">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 max-w-5xl text-sm">
       <p className="text-foreground/90">
         {file.name}: I don&apos;t recognise this layout. Which columns are which?
       </p>

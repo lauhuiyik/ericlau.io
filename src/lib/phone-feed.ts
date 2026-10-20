@@ -102,7 +102,9 @@ export function readNote(n: PhoneNote): ReadResult {
   const value = Number(m[2].replace(/,/g, "") + (m[3] ?? ""));
   if (!(value > 0)) return { kind: "unreadable", why: "amount is zero" };
   const sign = m[1];
-  const isIn = sign === "+" || (sign !== "-" && sign !== "−" && MONEY_IN.test(all) && !/\b(spent|purchase)\b/i.test(all));
+  // "Credit card" / "credit account" name the account, not money coming in.
+  const forIn = all.replace(/\bcredit (card|account|limit)s?\b/gi, "card");
+  const isIn = sign === "+" || (sign !== "-" && sign !== "−" && MONEY_IN.test(forIn) && !/\b(spent|purchase)\b/i.test(forIn));
   const isCard = source === "amex" || source === "nab";
 
   let kind: Txn["kind"] = "spend";

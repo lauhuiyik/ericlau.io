@@ -400,6 +400,26 @@ function createVault(ui: Setters) {
       // Phone rows filed before only payment apps counted (an email or a shop's promotion): drop them.
       const misread = data.txns.filter((t) => t.provisional && !PAYMENT_VIAS.includes(t.via ?? "")).map((t) => t.id);
       if (misread.length && key) applyEdits({ t: "remove", ids: misread });
+      // Phone rows still waiting for their statement row are re-read from the saved notification text, so a
+      // fix to how notifications are read (e.g. a purchase taken for a refund) corrects them too.
+      if (key) {
+        const byId = new Map(data.txns.map((t) => [t.id, t]));
+        const fixes: VaultOp[] = [];
+        for (const e of data.phoneLog ?? []) {
+          const old = e.result === "filed" && e.txnId ? byId.get(e.txnId) : undefined;
+          if (!old?.provisional) continue;
+          const res = readNote({ app: e.app, title: e.title, text: e.text, receivedAt: e.receivedAt, postedAt: old.at });
+          if (res.kind === "txn") {
+            const now = res.txn;
+            if (now.amount === old.amount && now.kind === old.kind && now.source === old.source) continue;
+            fixes.push({ t: "remove", ids: [old.id] }, { t: "txns", add: [now] }, { t: "phoneLog", add: [{ ...e, txnId: now.id }] });
+          } else {
+            const result = res.kind === "ignore" ? ("skipped" as const) : ("unreadable" as const);
+            fixes.push({ t: "remove", ids: [old.id] }, { t: "phoneLog", add: [{ ...e, result, why: res.why, txnId: undefined }] });
+          }
+        }
+        if (fixes.length) applyEdits(fixes);
+      }
       for (let round = 0; round < 5 && key; round++) {
         let r: Record<string, unknown>;
         try {

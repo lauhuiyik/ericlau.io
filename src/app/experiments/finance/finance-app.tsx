@@ -554,6 +554,11 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
                   open={focus === b.id}
                   onToggle={() => setFocus(focus === b.id ? null : b.id)}
                   merchants={topMerchants(summary.txns, b.id)}
+                  charges={summary.txns
+                    .filter((t) => t.assignment === b.id)
+                    .sort((x, y) => y.date.localeCompare(x.date) || (y.at ?? "").localeCompare(x.at ?? ""))}
+                  labels={profile.labels}
+                  onShowAll={() => setTab("transactions")}
                   daysLeft={isCurrent ? Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1 : undefined}
                   predicted={
                     isCurrent
@@ -1936,6 +1941,10 @@ function BucketRow(props: {
   daysLeft?: number;
   /** Regular charges in this bucket still to come before payday: counted as expected, not yet spent. */
   predicted?: { name: string; amount: number; date: string }[];
+  /** This bucket's transactions this period, newest first (shown when the row is open). */
+  charges?: Txn[];
+  labels?: Record<string, string>;
+  onShowAll?: () => void;
 }) {
   const { label, spent, target, pace, open, onToggle, merchants, daysLeft } = props;
   const predicted = props.predicted ?? [];
@@ -2010,17 +2019,44 @@ function BucketRow(props: {
           ))}
         </ul>
       )}
-      {open && merchants.length > 0 && (
-        <ul className="mt-3 ml-1 space-y-1 text-sm text-muted">
-          {merchants.map((m) => (
-            <li key={m.merchant} className="flex justify-between gap-4">
-              <span className="truncate">
-                {m.merchant} <span className="text-xs">×{m.count}</span>
-              </span>
-              <span className="text-foreground/80 shrink-0">{money(m.amount)}</span>
-            </li>
-          ))}
-        </ul>
+      {open && (
+        <div className="mt-3">
+          {merchants.length > 0 && (
+            <p className="mb-2 text-xs text-muted">
+              Most: {merchants.slice(0, 3).map((m) => `${m.merchant} ${money(m.amount)}${m.count > 1 ? ` ×${m.count}` : ""}`).join(" · ")}
+            </p>
+          )}
+          <div className="mb-1 flex items-baseline justify-between text-xs text-muted">
+            <span>
+              {(props.charges ?? []).length} charge{(props.charges ?? []).length === 1 ? "" : "s"} · newest first
+            </span>
+            {props.onShowAll && (
+              <button className="underline hover:text-foreground" onClick={props.onShowAll}>
+                Edit in Transactions
+              </button>
+            )}
+          </div>
+          {(props.charges ?? []).length === 0 ? (
+            <p className="text-sm text-muted">Nothing yet this period.</p>
+          ) : (
+            <ul className="max-h-80 overflow-y-auto overscroll-contain rounded border border-rule divide-y divide-rule">
+              {(props.charges ?? []).map((t) => (
+                <li key={t.id} className="flex items-baseline gap-3 px-3 py-2 text-sm">
+                  <span className="w-12 shrink-0 font-mono text-xs text-muted">{short(t.date)}</span>
+                  <span className="min-w-0 flex-1 truncate text-foreground/90">
+                    {props.labels?.[normaliseDescription(t.description)] ?? t.description}
+                    {t.provisional && <span className="ml-1.5 font-mono text-[10px] uppercase text-muted">· phone</span>}
+                    {t.expected && <span className="ml-1.5 font-mono text-[10px] uppercase text-muted">· expected</span>}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] uppercase text-muted">{SOURCE_LABEL[t.source] ?? t.source}</span>
+                  <span className="w-20 shrink-0 text-right tabular-nums">
+                    {t.amount < 0 ? `+${aud2.format(-t.amount)}` : aud2.format(t.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </li>
   );

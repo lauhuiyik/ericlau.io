@@ -17,6 +17,7 @@ import {
   fromPlaintext,
   isBlankProfile,
   legacyOps,
+  repeatedPhoneRows,
   minimiseOp,
   toPlaintext,
 } from "@/lib/vault-sync";
@@ -398,7 +399,10 @@ function createVault(ui: Setters) {
     if (pulling) return pulling;
     pulling = (async () => {
       // Phone rows filed before only payment apps counted (an email or a shop's promotion): drop them.
-      const misread = data.txns.filter((t) => t.provisional && !PAYMENT_VIAS.includes(t.via ?? "")).map((t) => t.id);
+      const misread = [
+        ...data.txns.filter((t) => t.provisional && !PAYMENT_VIAS.includes(t.via ?? "")).map((t) => t.id),
+        ...repeatedPhoneRows(data.txns),
+      ];
       if (misread.length && key) applyEdits({ t: "remove", ids: misread });
       // Phone rows still waiting for their statement row are re-read from the saved notification text, so a
       // fix to how notifications are read (e.g. a purchase taken for a refund) corrects them too.

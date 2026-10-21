@@ -15,7 +15,7 @@
  * applyOp itself, so every path (imports, legacy copies, replays) obeys it.
  */
 
-import { type Debt, EMPTY_PROFILE, type Profile, type Txn, mergeTxns, normaliseProfile, tracked } from "./finance";
+import { type Debt, EMPTY_PROFILE, type Profile, type Txn, mergeTxns, normaliseDescription, normaliseProfile, tracked } from "./finance";
 
 /** The phone feed's drop-box keys (src/lib/vault-inbox.ts): the private half exists only in here. */
 export type PhoneKeys = { privateJwk: JsonWebKey; publicJwk: JsonWebKey; connectedAt: string };
@@ -209,8 +209,31 @@ function covered(p: Txn, txns: Txn[]) {
           sameCard(p, t) &&
           !!t.at &&
           !!p.at &&
-          Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 10 * 60_000)),
+          Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 10 * 60_000) ||
+        // The same app re-reporting one purchase within half an hour with the amount nudged by a cent or so
+        // (a pre-authorisation, then the final amount).
+        (t.provisional &&
+          t.via === p.via &&
+          sameCard(p, t) &&
+          normaliseDescription(t.description) === normaliseDescription(p.description) &&
+          Math.abs(t.amount - p.amount) > 0 &&
+          Math.abs(t.amount - p.amount) <= Math.max(0.05, Math.abs(p.amount) * 0.01) &&
+          !!t.at &&
+          !!p.at &&
+          Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 30 * 60_000)),
   );
+}
+
+/** Phone rows that repeat an earlier phone row (filed before the repeat check existed): safe to drop. */
+export function repeatedPhoneRows(txns: Txn[]): string[] {
+  const phone = txns.filter((t) => t.provisional && t.at).sort((a, b) => a.at!.localeCompare(b.at!));
+  const kept: Txn[] = [];
+  const drop: string[] = [];
+  for (const t of phone) {
+    if (covered(t, kept)) drop.push(t.id);
+    else kept.push(t);
+  }
+  return drop;
 }
 
 export function applyOp(d: VaultData, op: VaultOp): VaultData {

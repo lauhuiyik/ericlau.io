@@ -1844,74 +1844,56 @@ function PayEquation({
   ];
   const out = parts.reduce((a, p) => a + p.amount, 0);
   const left = pay - out;
+  const signed = (n: number) => (n < 0 ? `−${money(-n)}` : money(n));
+  const free = runway ? left - runway.bills - runway.savingsToGo : left;
+  const perDay = runway && runway.days > 0 ? free / runway.days : null;
   const label = "font-mono text-[10px] uppercase tracking-[0.18em] text-muted";
-  const big = "mt-1 text-3xl font-semibold tracking-tight tabular-nums";
-  const op = "hidden md:block pt-6 text-2xl text-muted";
   return (
     <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
-      <div className="grid gap-5 md:grid-cols-[auto_auto_minmax(0,1.6fr)_auto_auto] md:gap-6 items-start">
+      {/* The headline: what can still be spent before payday, and what that is per day. */}
+      <div className="flex flex-wrap items-end gap-x-10 gap-y-4">
         <div>
-          <div className={label}>Pay</div>
-          <div className={big} style={{ color: GOOD }}>
-            {money(pay)}
+          <div className={label}>{runway ? "Left to spend until payday" : "Remaining"}</div>
+          <div className="mt-1 text-5xl sm:text-6xl font-semibold tracking-tight tabular-nums" style={{ color: free >= 0 ? GOOD : OVER }}>
+            {signed(free)}
           </div>
-          <div className="mt-1 text-xs text-muted">{payNote}</div>
         </div>
-        <div className={op} aria-hidden>
-          −
-        </div>
-        <div>
-          <div className={label}>
-            <span className="md:hidden">− </span>Spent so far
+        {perDay !== null && (
+          <div>
+            <div className={label}>{runway!.days} day{runway!.days === 1 ? "" : "s"} to payday</div>
+            <div className="mt-1 text-4xl sm:text-5xl font-semibold tracking-tight tabular-nums" style={{ color: perDay >= 0 ? GOOD : OVER }}>
+              {signed(perDay)}
+              <span className="text-lg font-normal text-muted"> / day</span>
+            </div>
           </div>
-          <div className={big} style={{ color: OVER }}>
-            {money(out)}
-          </div>
-          <ul className="mt-2 space-y-0.5 text-xs">
-            {parts.map((p) => (
-              <li key={p.label} className="flex justify-between gap-4 text-muted">
-                <span>{p.label}</span>
-                <span className="tabular-nums text-foreground/80">{money(p.amount)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div className={op} aria-hidden>
-          =
-        </div>
-        <div>
-          <div className={label}>
-            <span className="md:hidden">= </span>Remaining
-          </div>
-          <div className={big} style={{ color: left >= 0 ? GOOD : OVER }}>
-            {left < 0 ? `−${money(-left)}` : money(left)}
-          </div>
-          <div className="mt-1 text-xs text-muted">{left >= 0 ? "left of this pay until the next" : "⚠ more out than came in"}</div>
-          {runway && runway.days > 0 && (() => {
-            const free = left - runway.bills - runway.savingsToGo;
-            const perDay = free / runway.days;
-            return (
-              <div className="mt-3 rounded border border-rule px-3 py-2">
-                <div className="text-xl font-semibold tabular-nums" style={{ color: perDay >= 0 ? GOOD : OVER }}>
-                  {perDay < 0 ? `−${money(-perDay)}` : money(perDay)}
-                  <span className="text-sm font-normal text-muted"> a day</span>
-                </div>
-                <div className="text-xs text-muted">
-                  {runway.days} day{runway.days === 1 ? "" : "s"} to payday
-                  {runway.bills + runway.savingsToGo > 0 && (
-                    <>
-                      {" "}
-                      · after{runway.bills > 0 && ` ${money(runway.bills)} of bills still due`}
-                      {runway.bills > 0 && runway.savingsToGo > 0 && " and"}
-                      {runway.savingsToGo > 0 && ` ${money(runway.savingsToGo)} savings to go`}
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
-        </div>
+        )}
       </div>
+      {runway && runway.bills + runway.savingsToGo > 0 && (
+        <p className="mt-2 text-sm text-muted">
+          {money(left)} left of your pay
+          {runway.bills > 0 && ` − ${money(runway.bills)} of bills still due`}
+          {runway.savingsToGo > 0 && ` − ${money(runway.savingsToGo)} savings still to move`}
+        </p>
+      )}
+      {free < 0 && <p className="mt-1 text-sm" style={{ color: OVER }}>⚠ More is committed than is left of this pay.</p>}
+
+      {/* Where the pay went, as a small statement. */}
+      <ul className="mt-5 max-w-md rounded border border-rule px-4 py-3 text-sm tabular-nums">
+        <li className="flex justify-between gap-4">
+          <span className="text-muted">Pay {payNote}</span>
+          <span style={{ color: GOOD }}>{money(pay)}</span>
+        </li>
+        {parts.map((p) => (
+          <li key={p.label} className="flex justify-between gap-4 text-muted">
+            <span>− {p.label}</span>
+            <span className="text-foreground/80">{money(p.amount)}</span>
+          </li>
+        ))}
+        <li className="mt-1 flex justify-between gap-4 border-t border-rule pt-1 font-medium">
+          <span>= Remaining of pay</span>
+          <span style={{ color: left >= 0 ? GOOD : OVER }}>{signed(left)}</span>
+        </li>
+      </ul>
     </section>
   );
 }

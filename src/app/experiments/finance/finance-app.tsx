@@ -45,6 +45,7 @@ import {
   cashPosition,
 } from "@/lib/finance";
 import { passphraseProblem, suggestPassphrase } from "@/lib/vault-crypto";
+import { MANUAL_VIA } from "@/lib/phone-feed";
 import type { PhoneLogEntry, VaultOp } from "@/lib/vault-sync";
 import { type PhoneState, type SaveState, type VaultStatus, isWrongPassphrase, useVault } from "./use-vault";
 
@@ -77,6 +78,10 @@ const TABS = [
   { id: "settings", label: "Settings" },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
+
+/** A correction file ({ "fix": … }): rows to add or remove, merchant categories, and balances. */
+type FixMatch = { source?: string; date?: string; amount?: number; description?: string };
+type FixFile = { add?: Txn[]; remove?: FixMatch[]; assign?: Record<string, string>; cash?: unknown };
 
 const SOURCE_LABEL: Record<string, string> = {
   amex: "Amex",
@@ -200,7 +205,41 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
       if (file.name.toLowerCase().endsWith(".json")) {
         try {
           const data = JSON.parse(text);
-          if (Array.isArray(data.txns)) {
+          if (data && typeof data.fix === "object" && data.fix) {
+            // A fix file: corrections prepared outside the page (missing payments, a reversed hold, categories,
+            // balances), applied in one go.
+            const fix = data.fix as FixFile;
+            const matches = (t: Txn, m: FixMatch) =>
+              (!m.source || t.source === m.source) &&
+              (!m.date || t.date === m.date) &&
+              (typeof m.amount !== "number" || Math.abs(t.amount - m.amount) < 0.005) &&
+              (!m.description || normaliseDescription(t.description).includes(normaliseDescription(m.description)));
+            const removeIds = txnsNow.filter((t) => (fix.remove ?? []).some((m) => matches(t, m))).map((t) => t.id);
+            if (removeIds.length) {
+              ops.push({ t: "remove", ids: removeIds });
+              txnsNow = txnsNow.filter((t) => !removeIds.includes(t.id));
+            }
+            const add: Txn[] = (fix.add ?? [])
+              .filter((t) => t && typeof t.date === "string" && typeof t.amount === "number" && typeof t.description === "string")
+              .map((t) => ({
+                ...t,
+                id: t.id ?? `manual|${t.source}|${t.date}|${t.amount.toFixed(2)}|${normaliseDescription(t.description)}`,
+                kind: t.kind ?? "spend",
+                provisional: true,
+                via: MANUAL_VIA,
+                at: t.at ?? `${t.date}T01:00:00.000Z`,
+              }));
+            const merged = mergeTxns(txnsNow, add.filter((t) => tracked(t, profileNow)));
+            txnsNow = merged.txns;
+            const assign = Object.fromEntries(
+              Object.entries(fix.assign ?? {}).filter(([, v]) => typeof v === "string").map(([k, v]) => [normaliseDescription(k), v]),
+            );
+            if (Object.keys(assign).length) ops.push({ t: "assign", entries: assign });
+            if (fix.cash) profileNow = { ...profileNow, cash: normaliseProfile({ cash: fix.cash }).cash };
+            messages.push(
+              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}.`,
+            );
+          } else if (Array.isArray(data.txns)) {
             // A backup made by "Download backup". One from before "track from" was set keeps the date set here.
             const restored = normaliseProfile(data.profile);
             profileNow = { ...restored, startDate: restored.startDate ?? profileNow.startDate };
@@ -2027,7 +2066,9 @@ function BucketRow(props: {
                   <span className="w-12 shrink-0 font-mono text-xs text-muted">{short(t.date)}</span>
                   <span className="min-w-0 flex-1 truncate text-foreground/90">
                     {props.labels?.[normaliseDescription(t.description)] ?? t.description}
-                    {t.provisional && <span className="ml-1.5 font-mono text-[10px] uppercase text-muted">· phone</span>}
+                    {t.provisional && (
+                      <span className="ml-1.5 font-mono text-[10px] uppercase text-muted">· {t.via === MANUAL_VIA ? "added" : "phone"}</span>
+                    )}
                     {t.expected && <span className="ml-1.5 font-mono text-[10px] uppercase text-muted">· expected</span>}
                   </span>
                   <span className="shrink-0 font-mono text-[10px] uppercase text-muted">{SOURCE_LABEL[t.source] ?? t.source}</span>
@@ -2365,8 +2406,8 @@ function TxnList({
               t.description
             )}
             {t.provisional && (
-              <span className="ml-2 font-mono text-[10px] uppercase text-muted" title={`From your phone (${t.via ?? "notification"}); replaced when the statement row arrives`}>
-                · phone
+              <span className="ml-2 font-mono text-[10px] uppercase text-muted" title={`${t.via === MANUAL_VIA ? "Added by hand" : `From your phone (${t.via ?? "notification"})`}; replaced when the statement row arrives`}>
+                · {t.via === MANUAL_VIA ? "added" : "phone"}
               </span>
             )}
             {t.expected && (

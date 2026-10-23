@@ -25,6 +25,9 @@ const APPS: { re: RegExp; via: string; source: string }[] = [
   { re: /^ing$|\bing (australia|direct|app)\b|ingdirect/i, via: "ING app", source: "ing" },
 ];
 
+/** Rows added from a fix file (a payment that sent no notification): kept until a statement row replaces them. */
+export const MANUAL_VIA = "Added by hand";
+
 /** Labels of the apps whose notifications are filed. A phone row from anything else was misread. */
 export const PAYMENT_VIAS: readonly string[] = APPS.map((a) => a.via);
 

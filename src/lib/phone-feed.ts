@@ -34,6 +34,8 @@ const NOT_A_TXN =
   /\b(statement|balance|due|overdue|available|limit|reminder|points|offer|reward|cashback offer|minimum|upcoming|scheduled|will be (debited|charged)|direct debit (is )?coming)\b/i;
 const MONEY_IN = /\b(received|deposit(ed)?|credit(ed)?|refund(ed)?|incoming|paid you|you('ve| have) been paid|salary|reversal|returned)\b/i;
 const MONEY_OUT = /\b(spent|purchase[ds]?|paid|payment|debit(ed)?|charged|transaction|withdrawal|withdrew|sent|transfer(red)? to|tap(ped)?)\b/i;
+/** CommBank money in at least this big is treated as pay; anything smaller is money moved in. */
+const PAY_SIZED = 3000;
 /** On a card app, money in that is the owner paying the card off, not a refund. */
 const CARD_REPAYMENT = /\b(payment (received|of)|thanks? for (your|the) payment|received your payment|repayment)\b/i;
 
@@ -63,6 +65,9 @@ function cleanMerchant(s: string) {
 
 /** Who the money went to or came from, from "at X", "to X", "from X", or a title without an amount. */
 function merchantOf(title: string, text: string): string {
+  // Bank alerts that label it ("Description: LAGOTTO   FITZROY NOR", NAB) say exactly who.
+  const labelled = text.match(/^\s*(?:description|merchant|payee|to)\s*:\s*(.+)$/im);
+  if (labelled && cleanMerchant(labelled[1])) return cleanMerchant(labelled[1]);
   for (const line of [title, text, `${title} ${text}`]) {
     const m = line.match(
       /\b(?:at|to|from)\s+(.+?)(?:\s+(?:on|using|with|for|via|has|have|had|was|is|were|been|credited|debited)\b|[.,!\n]|$)/i,
@@ -71,7 +76,7 @@ function merchantOf(title: string, text: string): string {
   }
   if (title && !MONEY.test(title)) {
     const t = cleanMerchant(title);
-    if (t && !APPS.some((a) => a.re.test(t)) && !/^(google wallet|wallet|payment complete|payment made)$/i.test(t)) return t;
+    if (t && !APPS.some((a) => a.re.test(t)) && !/^(google wallet|wallet|commbank|nab|amex|ing|payment complete|payment made|payment successful|successful|transaction|purchase)$/i.test(t)) return t;
   }
   return cleanMerchant(text.replace(MONEY_OUT, " ").replace(MONEY_IN, " "));
 }
@@ -110,13 +115,19 @@ export function readNote(n: PhoneNote): ReadResult {
   let kind: Txn["kind"] = "spend";
   let amount = isIn ? -value : value;
   if (isIn && isCard && CARD_REPAYMENT.test(all)) kind = "transfer"; // paying the card off
-  else if (isIn && source === "commbank") kind = "income"; // pay or other money in
+  // CommBank says "You've been paid" for pay and for any other money in (a savings withdrawal, a friend paying
+  // back). Only a pay-sized amount counts as income; smaller ones are moves that don't add to the pay.
+  else if (isIn && source === "commbank") kind = value >= PAY_SIZED ? "income" : "transfer";
   else if (isIn && source === "ing") kind = "transfer"; // savings moved in, not a refund
   else if (!isIn && source === "ing" && /\btransfer(red)?\b/i.test(all)) kind = "transfer"; // to your own accounts
   else if (!isIn && source === "commbank" && /\b(american express|amex|nab card|credit card)\b/i.test(all)) kind = "transfer";
-  if (kind === "transfer") amount = Math.abs(amount);
+  // A card repayment is filed as a positive transfer (cashPosition reads it that way); a move into a bank
+  // account keeps its sign, so money in adds to the balance.
+  if (kind === "transfer" && isCard) amount = Math.abs(amount);
 
-  const merchant = merchantOf(title, text);
+  // Money in with nobody named ("You've been paid $631.04 into your account") is still worth filing.
+  const namesNobody = /\byou('ve| have) been paid\b/i.test(all) && !/\bfrom\b/i.test(all);
+  const merchant = (namesNobody ? "" : merchantOf(title, text)) || (isIn ? `Money in (${via})` : "");
   if (!merchant) return { kind: "unreadable", why: "no merchant" };
 
   const when = whenOf(n);

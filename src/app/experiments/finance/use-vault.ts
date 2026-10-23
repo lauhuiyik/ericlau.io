@@ -415,7 +415,7 @@ function createVault(ui: Setters) {
           const res = readNote({ app: e.app, title: e.title, text: e.text, receivedAt: e.receivedAt, postedAt: old.at });
           if (res.kind === "txn") {
             const now = res.txn;
-            if (now.amount === old.amount && now.kind === old.kind && now.source === old.source) continue;
+            if (now.amount === old.amount && now.kind === old.kind && now.source === old.source && now.description === old.description) continue;
             fixes.push({ t: "remove", ids: [old.id] }, { t: "txns", add: [now] }, { t: "phoneLog", add: [{ ...e, txnId: now.id }] });
           } else {
             const result = res.kind === "ignore" ? ("skipped" as const) : ("unreadable" as const);

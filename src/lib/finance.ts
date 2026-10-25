@@ -74,6 +74,8 @@ export type Txn = {
   expected?: boolean;
   /** For expected charges: the bucket or category it counts against. */
   category?: string;
+  /** Money moved into savings (recorded from a bank screenshot by the Finance Feed app's Verify): counts toward the savings target whatever its description says. */
+  savings?: boolean;
 };
 
 /**
@@ -562,7 +564,7 @@ export function summarise(
       t.kind !== "spend" ? t.kind : t.expected ? (toAssignment(t.category) ?? "uncategorised") : categorise(t, profile, overrides);
     rows.push({ ...t, assignment: assignment as Assignment | "uncategorised" });
     if (t.kind === "income") income += -t.amount;
-    else if (t.kind === "transfer" && savingsMatch.some((m) => t.description.toUpperCase().includes(m))) saved += t.amount;
+    else if (t.kind === "transfer" && (t.savings || savingsMatch.some((m) => t.description.toUpperCase().includes(m)))) saved += t.amount;
     else if (t.kind === "supplementary") {
       supplementary += t.amount;
       const who = t.cardholder || "Supplementary card";

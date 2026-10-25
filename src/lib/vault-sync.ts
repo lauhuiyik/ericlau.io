@@ -186,15 +186,20 @@ function confirms(c: Txn, p: Txn) {
   return !c.provisional && !c.expected && sameMoney(c, p) && daysApart(c.date, p.date) <= 3 && sameCard(p, c);
 }
 
-/** Remove the phone rows that these confirmed rows account for (each confirms at most one). */
-function settleProvisional(txns: Txn[], confirmed: Txn[]): Txn[] {
-  if (!confirmed.length || !txns.some((t) => t.provisional)) return txns;
+/**
+ * Remove the phone rows that these confirmed rows account for (each confirms at most one). A confirmed row
+ * that replaces one recorded as savings keeps that mark, so savings already counted stay counted.
+ */
+function settleProvisional(txns: Txn[], confirmed: Txn[]): { txns: Txn[]; confirmed: Txn[] } {
+  if (!confirmed.length || !txns.some((t) => t.provisional)) return { txns, confirmed };
   const drop = new Set<string>();
-  for (const c of confirmed) {
+  const marked = confirmed.map((c) => {
     const p = txns.find((t) => t.provisional && !drop.has(t.id) && confirms(c, t));
-    if (p) drop.add(p.id);
-  }
-  return drop.size ? txns.filter((t) => !drop.has(t.id)) : txns;
+    if (!p) return c;
+    drop.add(p.id);
+    return p.savings && !c.savings ? { ...c, savings: true } : c;
+  });
+  return { txns: drop.size ? txns.filter((t) => !drop.has(t.id)) : txns, confirmed: marked };
 }
 
 /** A phone row is already covered by a confirmed row, or by another app's notification of the same tap. */
@@ -242,10 +247,15 @@ export function applyOp(d: VaultData, op: VaultOp): VaultData {
       const add = op.add.filter((t) => tracked(t, d.profile));
       if (!add.length) return d;
       // Statement (or feed) rows replace the phone-captured rows they confirm.
-      const existing = settleProvisional(d.txns, add.filter((t) => !t.provisional));
+      const settled = settleProvisional(d.txns, add.filter((t) => !t.provisional));
+      const existing = settled.txns;
+      const marked = new Map(settled.confirmed.map((t) => [t.id, t]));
       // Phone rows already covered (by a statement row, or by another app's notification of the same tap) are skipped.
       const accepted: Txn[] = [];
-      for (const t of add) if (!t.provisional || !covered(t, [...existing, ...accepted])) accepted.push(t);
+      for (const t0 of add) {
+        const t = marked.get(t0.id) ?? t0;
+        if (!t.provisional || !covered(t, [...existing, ...accepted])) accepted.push(t);
+      }
       if (!accepted.length && existing === d.txns) return d;
       return { ...d, txns: mergeTxns(existing, accepted).txns };
     }

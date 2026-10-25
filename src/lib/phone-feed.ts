@@ -37,6 +37,11 @@ const NOT_A_TXN =
   /\b(statement|balance|due|overdue|available|limit|reminder|points|offer|reward|cashback offer|minimum|upcoming|scheduled|will be (debited|charged)|direct debit (is )?coming)\b/i;
 const MONEY_IN = /\b(received|deposit(ed)?|credit(ed)?|refund(ed)?|incoming|paid you|you('ve| have) been paid|salary|reversal|returned)\b/i;
 const MONEY_OUT = /\b(spent|purchase[ds]?|paid|payment|debit(ed)?|charged|transaction|withdrawal|withdrew|sent|transfer(red)? to|tap(ped)?)\b/i;
+/**
+ * "Savings moved: $550.00" — the Finance Feed app's Verify, recording a transfer into savings it saw on a bank
+ * screenshot (banks don't notify transfers you make). Money out of the account, counted as saved.
+ */
+const SAVINGS_MOVED = /\bsavings moved\b/i;
 /** CommBank money in at least this big is treated as pay; anything smaller is money moved in. */
 const PAY_SIZED = 3000;
 /** On a card app, money in that is the owner paying the card off, not a refund. */
@@ -127,6 +132,11 @@ export function readNote(n: PhoneNote): ReadResult {
   // A card repayment is filed as a positive transfer (cashPosition reads it that way); a move into a bank
   // account keeps its sign, so money in adds to the balance.
   if (kind === "transfer" && isCard) amount = Math.abs(amount);
+  const savings = SAVINGS_MOVED.test(all);
+  if (savings) {
+    kind = "transfer";
+    amount = value;
+  }
 
   // Money in with nobody named ("You've been paid $631.04 into your account") is still worth filing.
   const namesNobody = /\byou('ve| have) been paid\b/i.test(all) && !/\bfrom\b/i.test(all);
@@ -149,6 +159,7 @@ export function readNote(n: PhoneNote): ReadResult {
       provisional: true,
       at,
       via,
+      ...(savings ? { savings: true } : {}),
     },
   };
 }

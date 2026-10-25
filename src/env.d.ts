@@ -11,6 +11,8 @@ declare global {
     FINANCE_ALLOWED_EMAILS?: string;
     /** The password for /tools/* (see src/lib/tools-auth.ts). Unset = tools locked. */
     TOOLS_PASSWORD?: string;
+    /** The password for /experiments/lau-family (see src/lib/private-pages.ts). Unset = locked. */
+    LAU_FAMILY_PASSWORD?: string;
   }
 }
 

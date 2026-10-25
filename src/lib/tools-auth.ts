@@ -41,17 +41,27 @@ function fromB64url(s: string): Uint8Array<ArrayBuffer> {
 const hmacKey = (secret: string) =>
   crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 
-const sessionMessage = (exp: number) => enc.encode(`tools-session:v1:${exp}`);
+// The scope keeps a session for one gate (the tools, or one private page) from opening another.
+const sessionMessage = (exp: number, scope: string) => enc.encode(`${scope}-session:v1:${exp}`);
 
 /** Cookie value for a fresh session: "<expiry unix seconds>.<HMAC>". */
-export async function signSession(password: string, now = Date.now()): Promise<{ value: string; maxAge: number }> {
+export async function signSession(
+  password: string,
+  now = Date.now(),
+  scope = "tools",
+): Promise<{ value: string; maxAge: number }> {
   const maxAge = SESSION_DAYS * 24 * 60 * 60;
   const exp = Math.floor(now / 1000) + maxAge;
-  const sig = await crypto.subtle.sign("HMAC", await hmacKey(password), sessionMessage(exp));
+  const sig = await crypto.subtle.sign("HMAC", await hmacKey(password), sessionMessage(exp, scope));
   return { value: `${exp}.${b64url(sig)}`, maxAge };
 }
 
-export async function verifySession(value: string | undefined, password: string | undefined, now = Date.now()) {
+export async function verifySession(
+  value: string | undefined,
+  password: string | undefined,
+  now = Date.now(),
+  scope = "tools",
+) {
   if (!value || !password) return false;
   const m = /^(\d{1,12})\.([A-Za-z0-9_-]{20,100})$/.exec(value);
   if (!m) return false;
@@ -59,7 +69,7 @@ export async function verifySession(value: string | undefined, password: string 
   if (exp * 1000 < now) return false;
   try {
     // subtle.verify compares in constant time.
-    return await crypto.subtle.verify("HMAC", await hmacKey(password), fromB64url(m[2]), sessionMessage(exp));
+    return await crypto.subtle.verify("HMAC", await hmacKey(password), fromB64url(m[2]), sessionMessage(exp, scope));
   } catch {
     return false;
   }

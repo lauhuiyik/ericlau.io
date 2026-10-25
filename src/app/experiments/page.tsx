@@ -17,6 +17,12 @@ const entries: { slug: string; title: string; note: string; href?: string }[] = 
     note: "A private trip itinerary — Tokyo & Osaka, Aug 2026. Login required.",
   },
   {
+    slug: "lau-family",
+    title: "The Lau family record",
+    note: "A 1972 handwritten genealogy (劉氏家譜), transcribed and translated. Password required.",
+    href: "/experiments/lau-family",
+  },
+  {
     slug: "hello",
     title: "Hello, world",
     note: "A demo of dropping a raw HTML file into the site.",

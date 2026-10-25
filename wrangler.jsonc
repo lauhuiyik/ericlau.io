@@ -42,7 +42,10 @@
     // The self-hosted media bucket (media.ericlau.io). The Worker only writes
     // the doorbell files under status/ (src/lib/doorbell.ts) that the home PC
     // and the energy cron Worker read, so they don't have to poll this Worker.
-    { "binding": "MEDIA_BUCKET", "bucket_name": "ericlau-media" }
+    { "binding": "MEDIA_BUCKET", "bucket_name": "ericlau-media" },
+    // Password-gated pages (src/lib/private-pages.ts). No public domain: the
+    // only way in is the Worker, after the page's password.
+    { "binding": "PRIVATE_BUCKET", "bucket_name": "ericlau-private" }
   ],
   // Turning energy Live mode on asks the cron Worker for a reading right away,
   // instead of waiting for its next 5-minute tick.

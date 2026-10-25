@@ -29,14 +29,25 @@ import {
   project,
   recentPace,
   savingsGoals,
-  shiftPeriod,
   summarise,
   topMerchants,
   tracked,
+  type Recurring,
+  suggestRecurring,
+  toAssignment,
+  upcomingCharges,
+  payDates,
+  payPeriodFor,
+  shiftPayPeriod,
+  CARD_LABELS,
+  CARD_DEFAULTS,
+  type CashAnchors,
+  cashPosition,
 } from "@/lib/finance";
 import { passphraseProblem, suggestPassphrase } from "@/lib/vault-crypto";
-import type { VaultOp } from "@/lib/vault-sync";
-import { type SaveState, type VaultStatus, isWrongPassphrase, useVault } from "./use-vault";
+import { MANUAL_VIA } from "@/lib/phone-feed";
+import type { PhoneLogEntry, VaultOp } from "@/lib/vault-sync";
+import { type PhoneState, type SaveState, type VaultStatus, isWrongPassphrase, useVault } from "./use-vault";
 
 // The data lives in the owner's vault on the site, encrypted in this browser
 // with their passphrase (./use-vault.ts). Decrypted data is only ever in memory.
@@ -44,6 +55,7 @@ import { type SaveState, type VaultStatus, isWrongPassphrase, useVault } from ".
 const aud0 = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD", maximumFractionDigits: 0 });
 const aud2 = new Intl.NumberFormat("en-AU", { style: "currency", currency: "AUD" });
 const money = (n: number) => aud0.format(Math.round(n));
+const titleCase = (name: string) => name.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const short = (iso: string) =>
   new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-AU", { day: "numeric", month: "short", timeZone: "UTC" });
 const todayIso = () => {
@@ -52,22 +64,56 @@ const todayIso = () => {
 };
 
 const OVER = "#f87171"; // status: over budget (always paired with text + icon)
+const GOOD = "#4ade80"; // money in, and what's left
 const FILL = "#d6d3d1"; // spend so far
 const ASSIGN_OPTIONS: { id: Assignment; label: string }[] = [
   ...BUCKETS.map((b) => ({ id: b.id as Assignment, label: b.label })),
   { id: "transfer", label: "Transfer (not spending)" },
   { id: "ignore", label: "Ignore" },
 ];
-const SOURCE_LABEL: Record<string, string> = { amex: "Amex", nab: "NAB", commbank: "CommBank", other: "Other" };
+const TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "transactions", label: "Transactions" },
+  { id: "savings", label: "Savings" },
+  { id: "settings", label: "Settings" },
+] as const;
+type Tab = (typeof TABS)[number]["id"];
+
+/** A correction file ({ "fix": … }): rows to add or remove, merchant categories, and balances. */
+type FixMatch = { source?: string; date?: string; amount?: number; description?: string };
+type FixFile = { add?: Txn[]; remove?: FixMatch[]; assign?: Record<string, string>; cash?: unknown };
+
+const SOURCE_LABEL: Record<string, string> = {
+  amex: "Amex",
+  nab: "NAB",
+  commbank: "CommBank",
+  ing: "ING",
+  other: "Other",
+  phone: "Phone",
+  expected: "Expected",
+};
 
 type PendingFile = { name: string; rows: string[][]; mapping: ColumnMapping };
 
-export function FinanceApp() {
+export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   const vault = useVault();
   const { txns, profile, overrides } = vault.data;
   const ready = vault.status.s === "setup" || vault.status.s === "unlocked";
   const [period, setPeriod] = useState<Period>(() => periodFor(todayIso(), 15));
   const [focus, setFocus] = useState<string | null>(null);
+  // One part of the page at a time (kept in the URL hash), so it isn't one long scroll on a phone.
+  // Nothing tab-dependent renders on the server (the page waits for the vault), so reading the hash here is safe.
+  const [tab, setTabState] = useState<Tab>(() => {
+    const fromHash = typeof window === "undefined" ? "" : window.location.hash.slice(1);
+    return TABS.find((t) => t.id === fromHash)?.id ?? "overview";
+  });
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    try {
+      window.history.replaceState(null, "", `#${t}`);
+    } catch {}
+    window.scrollTo({ top: 0 });
+  };
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingFile[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -76,7 +122,7 @@ export function FinanceApp() {
   // Locked: clear import messages and half-mapped files, which show real transactions.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setPeriod(periodFor(todayIso(), vault.data.profile.payday));
+    setPeriod(payPeriodFor(todayIso(), vault.data.profile, payDates(vault.data.txns, vault.data.profile)));
     if (!ready) {
       setPending([]);
       setNotice(null);
@@ -84,27 +130,62 @@ export function FinanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vault.status.s]);
 
+  // Pay periods start the day salary lands (or on the payday, if none is recorded nearby).
+  const pays = useMemo(() => payDates(txns, profile), [txns, profile]);
+  const here = (date: string) => payPeriodFor(date, profile, pays);
+  const shift = (p: Period, by: number) => shiftPayPeriod(p, by, profile, pays);
+  // When pay lands (or moves), the period being viewed takes its real dates.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPeriod((p) => shiftPayPeriod(p, 0, profile, pays));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pays.join(), profile.payday]);
+
   const updateProfile = (p: Profile) => vault.apply({ t: "profile", patch: p });
   const assign = (description: string, value: string) =>
     vault.apply({ t: "assign", entries: { [normaliseDescription(description)]: value } });
+  const removeTxn = (t: Txn) => {
+    if (window.confirm(`Remove "${t.description}" (${aud2.format(Math.abs(t.amount))})? Use this for phone notifications that weren't real payments.`))
+      vault.apply({ t: "remove", ids: [t.id] });
+  };
 
-  const summary = useMemo(() => summarise(txns, period, profile, overrides), [txns, period, profile, overrides]);
+  // Regular charges that send no notification are counted on their usual day (see expectedCharges).
+  const summary = useMemo(() => summarise(txns, period, profile, overrides, todayIso()), [txns, period, profile, overrides]);
   // Month by month: every pay period from the first transaction up to this one (or the one being viewed, if
   // later), 6 to 24 columns, none from before the "track from" date.
   const history = useMemo(() => {
-    const now = periodFor(todayIso(), profile.payday);
+    const now = payPeriodFor(todayIso(), profile, pays);
     const last = period.start > now.start ? period : now;
     const first = txns.reduce((min, t) => (t.date < min ? t.date : min), period.start);
     let count = 6;
-    while (count < 24 && shiftPeriod(last, -(count - 1), profile.payday).start > first) count++;
-    const periods = Array.from({ length: count }, (_, i) => shiftPeriod(last, i - (count - 1), profile.payday));
+    while (count < 24 && shiftPayPeriod(last, -(count - 1), profile, pays).start > first) count++;
+    const periods = Array.from({ length: count }, (_, i) => shiftPayPeriod(last, i - (count - 1), profile, pays));
     return periods
       .filter((p) => !profile.startDate || p.end >= profile.startDate)
-      .map((p) => ({ period: p, s: summarise(txns, p, profile, overrides) }));
-  }, [txns, period, profile, overrides]);
+      .map((p) => ({ period: p, s: summarise(txns, p, profile, overrides, todayIso()) }));
+  }, [txns, period, profile, overrides, pays]);
   const atStart = !!profile.startDate && period.start <= profile.startDate;
   const fresh = useMemo(() => freshness(txns), [txns]);
   const pace = useMemo(() => recentPace(txns, profile, overrides, todayIso()), [txns, profile, overrides]);
+  // What's left of each pay is savings: every finished pay period since "track from" adds pay − debts − spent
+  // (a short month takes it back), and the current period's leftover joins when it ends.
+  const fromPay = useMemo(() => {
+    const today = todayIso();
+    const now = payPeriodFor(today, profile, pays);
+    const left = (p: Period) => {
+      const s = summarise(txns, p, profile, overrides, today);
+      return (s.income > 0 ? s.income : (profile.payAmount ?? 0)) - debtsForPeriod(profile, p) - s.spent;
+    };
+    let rolled = 0;
+    if (profile.startDate) {
+      let p = payPeriodFor(profile.startDate, profile, pays);
+      for (let i = 0; i < 120 && p.start < now.start; i++) {
+        if (p.start >= profile.startDate) rolled += left(p);
+        p = shiftPayPeriod(p, 1, profile, pays);
+      }
+    }
+    return { rolled: Math.round(rolled * 100) / 100, current: Math.round(left(now) * 100) / 100, currentEnd: now.end };
+  }, [txns, profile, overrides, pays]);
   const plan = planFor(profile);
   const progress = periodProgress(period, todayIso());
 
@@ -124,7 +205,41 @@ export function FinanceApp() {
       if (file.name.toLowerCase().endsWith(".json")) {
         try {
           const data = JSON.parse(text);
-          if (Array.isArray(data.txns)) {
+          if (data && typeof data.fix === "object" && data.fix) {
+            // A fix file: corrections prepared outside the page (missing payments, a reversed hold, categories,
+            // balances), applied in one go.
+            const fix = data.fix as FixFile;
+            const matches = (t: Txn, m: FixMatch) =>
+              (!m.source || t.source === m.source) &&
+              (!m.date || t.date === m.date) &&
+              (typeof m.amount !== "number" || Math.abs(t.amount - m.amount) < 0.005) &&
+              (!m.description || normaliseDescription(t.description).includes(normaliseDescription(m.description)));
+            const removeIds = txnsNow.filter((t) => (fix.remove ?? []).some((m) => matches(t, m))).map((t) => t.id);
+            if (removeIds.length) {
+              ops.push({ t: "remove", ids: removeIds });
+              txnsNow = txnsNow.filter((t) => !removeIds.includes(t.id));
+            }
+            const add: Txn[] = (fix.add ?? [])
+              .filter((t) => t && typeof t.date === "string" && typeof t.amount === "number" && typeof t.description === "string")
+              .map((t) => ({
+                ...t,
+                id: t.id ?? `manual|${t.source}|${t.date}|${t.amount.toFixed(2)}|${normaliseDescription(t.description)}`,
+                kind: t.kind ?? "spend",
+                provisional: true,
+                via: MANUAL_VIA,
+                at: t.at ?? `${t.date}T01:00:00.000Z`,
+              }));
+            const merged = mergeTxns(txnsNow, add.filter((t) => tracked(t, profileNow)));
+            txnsNow = merged.txns;
+            const assign = Object.fromEntries(
+              Object.entries(fix.assign ?? {}).filter(([, v]) => typeof v === "string").map(([k, v]) => [normaliseDescription(k), v]),
+            );
+            if (Object.keys(assign).length) ops.push({ t: "assign", entries: assign });
+            if (fix.cash) profileNow = { ...profileNow, cash: normaliseProfile({ cash: fix.cash }).cash };
+            messages.push(
+              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}.`,
+            );
+          } else if (Array.isArray(data.txns)) {
             // A backup made by "Download backup". One from before "track from" was set keeps the date set here.
             const restored = normaliseProfile(data.profile);
             profileNow = { ...restored, startDate: restored.startDate ?? profileNow.startDate };
@@ -185,7 +300,7 @@ export function FinanceApp() {
     }
     if (profileNow !== profile) {
       ops.unshift({ t: "profile", patch: profileNow });
-      setPeriod(periodFor(todayIso(), profileNow.payday));
+      setPeriod(payPeriodFor(todayIso(), profileNow, payDates(txnsNow, profileNow)));
     }
     const ids = new Set(txns.map((t) => t.id));
     const added = txnsNow.filter((t) => !ids.has(t.id));
@@ -234,8 +349,13 @@ export function FinanceApp() {
   );
   const uncategorised = summary.txns.filter((t) => t.assignment === "uncategorised");
   const pay = summary.income > 0 ? summary.income : plan.pay;
-  const debtsThisMonth = debtsForPeriod(profile, period);
-  const canStillSpend = pay - plan.savings - debtsThisMonth - summary.spent;
+  // Last period: did it end short (spending past pay − savings − debts), and were any repayments skipped?
+  const prevPeriod = shift(period, -1);
+  const prev = summarise(txns, prevPeriod, profile, overrides, todayIso());
+  const prevLeft = (prev.income > 0 ? prev.income : plan.pay) - plan.savings - debtsForPeriod(profile, prevPeriod) - prev.spent;
+  const hasPrev = prev.txns.length > 0 && !(profile.startDate && prevPeriod.end < profile.startDate);
+  const carried = hasPrev && prevLeft < 0 ? -prevLeft : 0;
+  const skipped = profile.debts.filter((d) => debtLogged(d, prevPeriod) === 0 && debtRemaining(d) > 0);
   const isCurrent = progress > 0 && progress < 1;
   const visibleTxns = summary.txns.filter((t) =>
     focus ? t.assignment === focus : t.kind === "spend" || t.kind === "income",
@@ -243,7 +363,8 @@ export function FinanceApp() {
 
   return (
     <div className="flex flex-1 flex-col">
-      <header className="flex items-center justify-between px-6 py-6 sm:px-12">
+      {!inApp && (
+      <header className="flex items-center justify-between px-4 py-4 sm:px-12 sm:py-6">
         {/* A full page load, not next/link: the finance page's CSP must not follow the user onto other pages. */}
         <a
           href="/experiments"
@@ -253,14 +374,17 @@ export function FinanceApp() {
         </a>
         <div className="font-mono text-xs uppercase tracking-[0.18em] text-muted">Finance · private</div>
       </header>
+      )}
 
-      <section className="px-6 sm:px-12 pt-8 pb-6 max-w-5xl">
-        <h1 className="text-4xl sm:text-5xl font-semibold tracking-[-0.02em]">Spending</h1>
+      <section className="px-4 sm:px-12 pt-4 sm:pt-8 pb-4 sm:pb-6 max-w-5xl">
+        <h1 className="text-3xl sm:text-5xl font-semibold tracking-[-0.02em]">Spending</h1>
+        {txns.length === 0 && (
         <p className="mt-3 max-w-2xl text-sm text-muted leading-relaxed">
           Drop in CSV exports from CommBank, NAB and Amex. They are read in this browser, encrypted with your
           passphrase and saved to your site, so every device you unlock sees the same data. Nobody can read it without
           the passphrase — not even the site.
         </p>
+        )}
         {ready && (
           <div className="mt-5 flex flex-wrap items-center gap-3">
             <label className="cursor-pointer rounded border border-rule px-4 py-2 text-sm hover:border-muted">
@@ -315,8 +439,28 @@ export function FinanceApp() {
         />
       ))}
 
+      {ready && txns.length > 0 && (
+        <nav className="sticky top-0 z-10 border-y border-rule bg-background/95 backdrop-blur px-2 sm:px-12" aria-label="Sections">
+          <div className="flex max-w-5xl">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                className={`flex-1 sm:flex-none sm:px-5 py-3 text-sm ${tab === t.id ? "text-foreground font-medium border-b-2 border-foreground" : "text-muted hover:text-foreground border-b-2 border-transparent"}`}
+                onClick={() => setTab(t.id)}
+                aria-current={tab === t.id ? "page" : undefined}
+              >
+                {t.label}
+                {t.id === "transactions" && uncategorised.length > 0 && (
+                  <span className="ml-1 rounded-full bg-foreground/10 px-1.5 text-[10px]">{uncategorised.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </nav>
+      )}
+
       {!ready ? null : txns.length === 0 ? (
-        <section className="border-t border-rule px-6 sm:px-12 py-12 max-w-3xl text-sm text-muted leading-relaxed">
+        <section className="border-t border-rule px-4 sm:px-12 py-12 max-w-3xl text-sm text-muted leading-relaxed">
           <p>
             No data yet. Import your profile file first (it holds your merchant rules and monthly allowances), then
             your exports. Re-importing an overlapping export is safe — transactions already stored are skipped.
@@ -325,11 +469,13 @@ export function FinanceApp() {
         </section>
       ) : (
         <>
+
           {/* Month (pay period) navigation */}
-          <section className="border-t border-rule px-6 sm:px-12 py-6 flex flex-wrap items-center gap-4">
+          {(tab === "overview" || tab === "transactions") && (
+          <section className="border-t border-rule px-4 sm:px-12 py-6 flex flex-wrap items-center gap-4">
             <button
               className="rounded border border-rule px-3 py-1 text-sm hover:border-muted disabled:opacity-40 disabled:hover:border-rule"
-              onClick={() => setPeriod(shiftPeriod(period, -1, profile.payday))}
+              onClick={() => setPeriod(shift(period, -1))}
               disabled={atStart}
               aria-label="Previous month"
             >
@@ -340,7 +486,7 @@ export function FinanceApp() {
             </div>
             <button
               className="rounded border border-rule px-3 py-1 text-sm hover:border-muted"
-              onClick={() => setPeriod(shiftPeriod(period, 1, profile.payday))}
+              onClick={() => setPeriod(shift(period, 1))}
               aria-label="Next month"
             >
               →
@@ -348,39 +494,85 @@ export function FinanceApp() {
             {!isCurrent && (
               <button
                 className="text-sm text-muted underline hover:text-foreground"
-                onClick={() => setPeriod(periodFor(todayIso(), profile.payday))}
+                onClick={() => setPeriod(here(todayIso()))}
               >
                 This month
               </button>
             )}
             <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">
-              Pay period starting on payday (the {profile.payday}
-              {ordinal(profile.payday)})
+              {pays.includes(period.start)
+                ? `Pay period from the day your pay landed (${short(period.start)})`
+                : `Pay period from payday (the ${profile.payday}${ordinal(profile.payday)}) until your pay lands`}
               {isCurrent && ` · ${Math.round(progress * 100)}% through`}
             </span>
           </section>
+          )}
 
-          {/* The plan: pay -> savings -> allowances, and what is actually left */}
-          <section className="border-t border-rule px-6 sm:px-12 py-8 grid grid-cols-2 md:grid-cols-4 gap-6 max-w-5xl">
-            <Tile label="Pay" value={money(pay)} note={summary.income > 0 ? "received this period" : "from settings"} />
-            <Tile label="Savings first" value={money(plan.savings)} note="set aside on payday" />
-            <Tile label="Spent so far" value={money(summary.spent)} note={`${summary.txns.length} transactions`} />
-            <Tile
-              label={canStillSpend >= 0 ? "Left before touching savings" : "Eating into savings"}
-              value={money(Math.abs(canStillSpend))}
-              note={
-                canStillSpend >= 0
-                  ? `pay − savings − debts (${money(debtsThisMonth)}) − spent`
-                  : "⚠ spending is past pay minus savings and debts"
-              }
-              warn={canStillSpend < 0}
-            />
-          </section>
+          {tab === "overview" && (
+          <>
+          {/* The month as one sum: pay − everything that's gone out (buckets, savings, debts) = what's left */}
+          <PayEquation
+            pay={pay}
+            payNote={summary.income > 0 ? "received this period" : "from settings"}
+            buckets={summary.spent}
+            transactions={summary.txns.filter((t) => t.kind === "spend").length}
+            saved={summary.saved}
+            savingsTarget={plan.savings}
+            debts={profile.debts
+              .map((d) => {
+                const logged = debtLogged(d, period);
+                const left = debtRemaining(d);
+                return { name: d.name, amount: logged ?? (left > 0 ? Math.min(d.payment, left) : 0), planned: logged === undefined };
+              })
+              .filter((d) => d.amount > 0)}
+            carried={carried}
+            runway={
+              isCurrent
+                ? {
+                    days: Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1,
+                    bills: upcomingCharges(period, profile, todayIso()).reduce((a, x) => a + x.r.amount, 0),
+                    savingsToGo: Math.max(0, plan.savings - summary.saved),
+                  }
+                : undefined
+            }
+          />
 
-          {profile.debts.length > 0 && <DebtsSection profile={profile} period={period} onChange={updateProfile} />}
+          {(carried > 0 || skipped.length > 0) && (
+            <section className="border-t border-rule px-4 sm:px-12 py-4 max-w-5xl text-sm" role="note">
+              {carried > 0 && (
+                <p style={{ color: OVER }}>
+                  ⚠ Carried over from {short(prevPeriod.start)} – {short(prevPeriod.end)}: that period spent {money(carried)} more
+                  than pay minus savings and debts, so it comes off what&apos;s left this period.
+                </p>
+              )}
+              {skipped.length > 0 && (
+                <p className="mt-1 text-foreground/80">
+                  Skipped last period: {skipped.map((d) => `${d.name} (${money(d.payment)})`).join(", ")}. The balance
+                  didn&apos;t drop, so the payoff date moved out.
+                </p>
+              )}
+            </section>
+          )}
+
+          {summary.supplementary > 0 && (
+            <section className="border-t border-rule px-4 sm:px-12 py-4 max-w-5xl text-sm">
+              <p>
+                <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">Supplementary cards</span>{" "}
+                <span className="font-medium">{money(summary.supplementary)}</span> this period, not in your budget (to be
+                paid back):{" "}
+                <span className="text-muted">
+                  {Object.entries(summary.supplementaryBy)
+                    .sort((x, y) => y[1] - x[1])
+                    .map(([who, amt]) => `${titleCase(who)} ${money(amt)}`)
+                    .join(" · ")}
+                </span>
+              </p>
+            </section>
+          )}
+
 
           {/* Category allowances */}
-          <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+          <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
             <div className="flex items-baseline justify-between">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
                 Where it went · left in each category
@@ -401,6 +593,19 @@ export function FinanceApp() {
                   open={focus === b.id}
                   onToggle={() => setFocus(focus === b.id ? null : b.id)}
                   merchants={topMerchants(summary.txns, b.id)}
+                  charges={summary.txns
+                    .filter((t) => t.assignment === b.id)
+                    .sort((x, y) => y.date.localeCompare(x.date) || (y.at ?? "").localeCompare(x.at ?? ""))}
+                  labels={profile.labels}
+                  onShowAll={() => setTab("transactions")}
+                  daysLeft={isCurrent ? Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1 : undefined}
+                  predicted={
+                    isCurrent
+                      ? upcomingCharges(period, profile, todayIso())
+                          .filter(({ r }) => (toAssignment(r.category) ?? "bills") === b.id)
+                          .map(({ r, date }) => ({ name: r.name, amount: r.amount, date }))
+                      : []
+                  }
                 />
               ))}
             </ul>
@@ -419,19 +624,45 @@ export function FinanceApp() {
             </div>
           </section>
 
-          <SavingsSection profile={profile} onChange={updateProfile} pace={pace} />
-
           {uncategorised.length > 0 && (
-            <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+            <p className="border-t border-rule px-4 sm:px-12 py-4 text-sm max-w-5xl">
+              <button className="underline" onClick={() => setTab("transactions")}>
+                {uncategorised.length} transaction{uncategorised.length === 1 ? "" : "s"} need a category →
+              </button>
+            </p>
+          )}
+
+          <CashPanel
+            txns={txns}
+            profile={profile}
+            onChange={updateProfile}
+            nextPay={shift(here(todayIso()), 1).start}
+            planned={debtsForPeriod(profile, shift(here(todayIso()), 1)) + plan.savings}
+            pay={plan.pay}
+          />
+          </>
+          )}
+
+          {tab === "savings" && (
+            <>
+              <SavingsSection profile={profile} onChange={updateProfile} pace={pace} fromPay={fromPay} />
+              {profile.debts.length > 0 && <DebtsSection profile={profile} period={period} onChange={updateProfile} />}
+            </>
+          )}
+
+          {tab === "transactions" && (
+          <>
+          {uncategorised.length > 0 && (
+            <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
                 Needs a category ({uncategorised.length})
               </h2>
               <p className="mt-2 text-sm text-muted">Choosing a category applies to every transaction at that merchant.</p>
-              <TxnList rows={uncategorised} onAssign={assign} />
+              <TxnList rows={uncategorised} labels={profile.labels} onAssign={assign} onRemove={removeTxn} />
             </section>
           )}
 
-          <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+          <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
             <div className="flex items-baseline justify-between">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
                 {focus ? `${bucketLabel(focus)} transactions` : "All transactions this period"}
@@ -442,7 +673,7 @@ export function FinanceApp() {
                 </button>
               )}
             </div>
-            <TxnList rows={visibleTxns} onAssign={assign} />
+            <TxnList rows={visibleTxns} labels={profile.labels} onAssign={assign} onRemove={removeTxn} />
           </section>
 
           {history.length > 0 && (
@@ -452,9 +683,11 @@ export function FinanceApp() {
               current={period}
               onOpen={(p) => {
                 setPeriod(p);
-                window.scrollTo({ top: 0, behavior: "smooth" });
+                setTab("overview");
               }}
             />
+          )}
+          </>
           )}
         </>
       )}
@@ -463,13 +696,27 @@ export function FinanceApp() {
         <SavingsSection profile={profile} onChange={updateProfile} pace={null} />
       )}
 
-      {ready && (
+      {ready && (txns.length === 0 || tab === "settings") && (
         <Settings
           profile={profile}
           onChange={updateProfile}
           onBackup={downloadBackup}
+          open={txns.length > 0}
           earlierThan={(date) => txns.filter((t) => t.date < date).length}
         >
+          <RecurringSettings profile={profile} txns={txns} overrides={overrides} onChange={updateProfile} />
+          {vault.status.s === "unlocked" && (
+            <PhoneSettings
+              phone={vault.phone}
+              log={vault.data.phoneLog ?? []}
+              txns={txns}
+              onRemove={removeTxn}
+              onConnect={vault.connectPhone}
+              onDisconnect={vault.disconnectPhone}
+              onDismiss={vault.dismissNote}
+              onCheck={vault.checkPhone}
+            />
+          )}
           {vault.status.s === "unlocked" && (
             <VaultSettings
               remembered={vault.remembered}
@@ -620,11 +867,11 @@ function VaultPanel({
   const [error, setError] = useState<string | null>(null);
 
   if (status.s === "loading") {
-    return <p className="border-t border-rule px-6 sm:px-12 py-8 text-sm text-muted">Loading your data…</p>;
+    return <p className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 text-sm text-muted">Loading your data…</p>;
   }
   if (status.s === "unavailable") {
     return (
-      <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-2xl text-sm">
+      <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-2xl text-sm">
         <p role="alert" style={{ color: OVER }}>⚠ Couldn&apos;t load your data. {status.error}</p>
         <div className="mt-4 flex flex-wrap gap-3">
           <button className="rounded border border-rule px-4 py-2 hover:border-muted" onClick={() => location.reload()}>
@@ -661,7 +908,7 @@ function VaultPanel({
   }
 
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-2xl">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-2xl">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
         {setup ? "Save to your site" : "Unlock your data"}
       </h2>
@@ -874,7 +1121,7 @@ function DebtsSection({ profile, period, onChange }: { profile: Profile; period:
   const [other, setOther] = useState<Record<number, string>>({});
   const setDebt = (i: number, d: Debt) => onChange({ ...profile, debts: profile.debts.map((x, j) => (j === i ? d : x)) });
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Debts · flexible this month</h2>
       <p className="mt-2 max-w-2xl text-sm text-muted">
         Repayments are planned, not fixed. In a tight month, pay less or skip — the balance only drops by what you
@@ -1009,10 +1256,13 @@ function SavingsSection({
   profile,
   onChange,
   pace,
+  fromPay,
 }: {
   profile: Profile;
   onChange: (p: Profile) => void;
   pace: number | null;
+  /** Leftover pay rolled into savings so far, and this period's leftover (it joins when the period ends). */
+  fromPay?: { rolled: number; current: number; currentEnd: string };
 }) {
   const plan = planFor(profile);
   const goals = savingsGoals(profile);
@@ -1020,7 +1270,7 @@ function SavingsSection({
   const [months, setMonths] = useState(24);
   const [rollover, setRollover] = useState(true);
   const hasDebt = profile.debts.some((d) => debtRemaining(d) > 0);
-  const start = profile.startingSavings ?? 0;
+  const start = (profile.startingSavings ?? 0) + Math.max(0, fromPay?.rolled ?? 0);
   const proj = project({
     start,
     monthly,
@@ -1041,7 +1291,7 @@ function SavingsSection({
   const bufferHave = Math.min(start, goals.buffer);
 
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Savings &amp; buffer</h2>
       <p className="mt-2 max-w-2xl text-sm text-muted leading-relaxed">
         Step 1 is a buffer of one month&apos;s spending ({money(goals.buffer)}). Once it&apos;s full, each payday&apos;s
@@ -1063,11 +1313,19 @@ function SavingsSection({
             style={{ width: `${goals.buffer ? (bufferHave / goals.buffer) * 100 : 0}%`, background: LINE }}
           />
         </div>
+        {fromPay && (
+          <p className="mt-2 text-sm text-muted">
+            Whatever is left of each pay becomes savings.
+            {fromPay.rolled !== 0 && ` ${money(fromPay.rolled)} so far from past pay periods.`} This period:{" "}
+            {fromPay.current >= 0 ? `${money(fromPay.current)} left now` : `${money(-fromPay.current)} over`}; what&apos;s
+            left on {short(fromPay.currentEnd)} rolls in.
+          </p>
+        )}
       </div>
 
       <div className="mt-6 grid gap-4 sm:grid-cols-4 text-sm">
         <label className="flex flex-col gap-1">
-          <span className="text-muted">Saved so far</span>
+          <span className="text-muted">{fromPay ? "Saved before tracking" : "Saved so far"}</span>
           <input
             inputMode="decimal"
             className="rounded border border-rule bg-background px-3 py-2"
@@ -1332,6 +1590,353 @@ function ordinal(n: number) {
   return ["th", "st", "nd", "rd"][n % 10] ?? "th";
 }
 
+const longDay = (iso: string) =>
+  new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+const inDays = (n: number) => (n === 0 ? "today" : n === 1 ? "tomorrow" : n < 0 ? `${-n} day${n === -1 ? "" : "s"} ago` : `in ${n} days`);
+
+/**
+ * Bank balance against the cards: what's still owed on each statement and when it's due (paying the
+ * statement in full by then avoids interest), whether the bank covers it, and what's building up next.
+ */
+function CashPanel({
+  txns,
+  profile,
+  onChange,
+  nextPay,
+  planned,
+  pay,
+}: {
+  txns: Txn[];
+  profile: Profile;
+  onChange: (p: Profile) => void;
+  nextPay: string;
+  planned: number;
+  pay: number;
+}) {
+  const today = todayIso();
+  const c = cashPosition(txns, profile, today);
+  const cash = profile.cash ?? {};
+  const [editing, setEditing] = useState(!cash.bank);
+  const [details, setDetails] = useState(false);
+  const blankCard = (k: string) => ({
+    owed: cash.cards?.[k]?.amount?.toString() ?? "",
+    statement: cash.cards?.[k]?.statement?.toString() ?? "",
+    due: cash.cards?.[k]?.due ?? "",
+    closeDay: String(cash.cards?.[k]?.closeDay ?? CARD_DEFAULTS[k]?.closeDay ?? 1),
+  });
+  const [form, setForm] = useState(() => ({
+    pockets: (cash.pockets?.length
+      ? cash.pockets.map((x) => ({ name: x.name, amount: x.amount.toString() }))
+      : [{ name: "CommBank", amount: cash.bank?.amount?.toString() ?? "" }]) as { name: string; amount: string }[],
+    owedToYou: cash.owedToYou?.toString() ?? "",
+    cards: { nab: blankCard("nab"), amex: blankCard("amex") } as Record<string, ReturnType<typeof blankCard>>,
+  }));
+  const setCard = (k: string, patch: Partial<ReturnType<typeof blankCard>>) =>
+    setForm((f) => ({ ...f, cards: { ...f.cards, [k]: { ...f.cards[k], ...patch } } }));
+  function save() {
+    const num = (v: string) => {
+      const n = parseAmount(v);
+      return n === null ? undefined : Math.abs(n);
+    };
+    const next: CashAnchors = { cards: {} };
+    const pockets = form.pockets
+      .map((x) => ({ name: x.name.trim() || "Cash", amount: parseAmount(x.amount) }))
+      .filter((x): x is { name: string; amount: number } => x.amount !== null);
+    if (pockets.length) {
+      next.bank = { amount: Math.round(pockets.reduce((t, x) => t + x.amount, 0) * 100) / 100, asOf: today };
+      next.pockets = pockets;
+    }
+    for (const [k, v] of Object.entries(form.cards)) {
+      const owed = num(v.owed);
+      if (owed === undefined) continue;
+      const st = num(v.statement);
+      const day = Math.round(Number(v.closeDay));
+      next.cards![k] = {
+        amount: owed,
+        asOf: today,
+        ...(st !== undefined ? { statement: st } : {}),
+        ...(day >= 1 && day <= 31 ? { closeDay: day } : {}),
+      };
+    }
+    const owedToYou = num(form.owedToYou);
+    if (owedToYou) next.owedToYou = owedToYou;
+    onChange({ ...profile, cash: next });
+    setEditing(false);
+  }
+  const signed = (n: number) => (n < 0 ? `−${money(-n)}` : money(n));
+  const ready = !!c.bank && c.cards.length > 0;
+  const afterPay = ready ? c.net! + pay - planned : 0;
+  const input = "rounded border border-rule bg-background px-3 py-2";
+  return (
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
+      {/* The number that matters most: after paying every statement that's due, how short (or how much spare). */}
+      {ready && (
+        <div className="mb-5">
+          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
+            {(c.usable ?? 0) < 0 ? "After paying what's due, you'd still be short by" : "After paying what's due, you'd have spare"}
+          </p>
+          <p className="mt-1 text-4xl sm:text-6xl font-semibold tracking-tight tabular-nums" style={(c.usable ?? 0) < 0 ? { color: OVER } : undefined}>
+            {money(Math.abs(c.usable ?? 0))}
+          </p>
+          <p className="mt-1 text-sm text-muted">
+            {money(c.bank!.now)} cash − {money(c.dues.reduce((x, d) => x + d.amount, 0))} in statements due
+            {c.owedToYou > 0 && `. If you're paid back the ${money(c.owedToYou)} owed to you: ${(c.usable ?? 0) + c.owedToYou < 0 ? `short by ${money(-((c.usable ?? 0) + c.owedToYou))}` : `${money((c.usable ?? 0) + c.owedToYou)} spare`}`}
+          </p>
+        </div>
+      )}
+
+      {/* The warning that matters most: what's still owed on each statement, by when, and whether the bank covers it. */}
+      {ready &&
+        c.dues.map((d) => {
+          const isShort = d.bankAfter !== undefined && d.bankAfter < 0;
+          const urgent = d.overdue || isShort || d.daysLeft <= 3;
+          return (
+            <div
+              key={d.source}
+              role="alert"
+              className="mb-3 rounded border px-4 py-3"
+              style={{ borderColor: urgent ? OVER : "#f59e0b", background: urgent ? "rgba(248,113,113,0.08)" : "rgba(245,158,11,0.08)" }}
+            >
+              <p className="text-base font-medium" style={{ color: urgent ? OVER : "#f59e0b" }}>
+                {d.overdue ? "⚠ Overdue: " : "⚠ "}Still owe {money(d.amount)} to {CARD_LABELS[d.source] ?? d.source} — due{" "}
+                {longDay(d.due)} ({inDays(d.daysLeft)}){!d.overdue && d.due < nextPay ? `, before your next pay on ${short(nextPay)}` : ""}
+              </p>
+              <p className="mt-1 text-sm text-foreground/80">
+                {d.overdue
+                  ? "Interest is now being charged on this statement. Pay it as soon as you can."
+                  : isShort
+                    ? `Your cash can't cover this: ${money(-d.bankAfter!)} short. Pay the full amount by the due date to avoid interest.`
+                    : `Your cash covers it, leaving ${money(d.bankAfter ?? 0)} after this payment. Pay in full by the due date to stay interest-free.`}
+              </p>
+            </div>
+          );
+        })}
+      {ready && c.dues.length === 0 && (
+        <p className="mb-3 text-sm text-muted">✓ Every card statement is paid. Nothing due right now.</p>
+      )}
+
+      {ready && !details ? null : (
+        <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Cash position · right now</h2>
+      )}
+      {ready && !details ? null : ready ? (
+        <>
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-6">
+            <Tile
+              label="Cash I have now"
+              value={money(c.bank!.now)}
+              note={`${(profile.cash?.pockets ?? []).map((x) => `${x.name} ${money(x.amount)}`).join(" + ") || "entered"} on ${short(c.bank!.asOf)}${c.bank!.moved ? `, ${signed(c.bank!.moved)} since` : ""}`}
+            />
+            <Tile
+              label="Due on statements"
+              value={money(c.dues.reduce((x, d) => x + d.amount, 0))}
+              note={c.dues.length ? c.dues.map((d) => `${CARD_LABELS[d.source] ?? d.source} by ${short(d.due)}`).join(" · ") : "all paid"}
+            />
+            <Tile
+              label="Owed on cards in total"
+              value={money(c.owed)}
+              note={c.net! >= 0 ? `your cash covers it all, ${money(c.net!)} spare` : `${money(-c.net!)} more than you have, incl. next statements`}
+              warn={c.net! < 0}
+            />
+            <Tile label="After next pay" value={signed(afterPay)} note={`if everything owed is paid · pay ${money(pay)} − repayments & savings ${money(planned)}`} warn={afterPay < 0} />
+          </div>
+          <ul className="mt-4 space-y-1 text-sm text-muted">
+            {c.cards.map((x) => (
+              <li key={x.source}>
+                <span className="text-foreground/90">{CARD_LABELS[x.source] ?? x.source}</span>: {money(x.owed)} owed ·{" "}
+                {x.statement > 0.005 ? `${money(x.statement)} due ${short(x.due)}` : "statement paid"} · next statement (closes{" "}
+                {short(x.next.closes)}, due {short(x.next.due)}): {money(x.next.amount)} so far
+              </li>
+            ))}
+            <li className="text-xs">
+              Paying each statement in full by its due date keeps the card interest-free; spending after a statement closes is due on the next one.
+              New spending and repayments since {short(c.bank!.asOf)} come in from your phone and imports. Update balances whenever you check your apps.
+            </li>
+          </ul>
+        </>
+      ) : (
+        <p className="mt-3 text-sm text-muted">
+          Enter the cash you have now (add each account or stash; they&apos;re summed) and, for each card, what the app shows: total owed and the statement amount still to pay. Due dates follow each card&apos;s statement cycle (closing day + 14 days).
+        </p>
+      )}
+      <div className="mt-2 flex flex-wrap gap-x-5 text-sm">
+        {ready && (
+          <button className="text-muted underline hover:text-foreground" onClick={() => setDetails(!details)}>
+            {details ? "Hide cash details" : "Cash details"}
+          </button>
+        )}
+        <button className="text-muted underline hover:text-foreground" onClick={() => setEditing(!editing)}>
+          {editing ? "Cancel" : "Update balances"}
+        </button>
+      </div>
+      {editing && (
+        <form
+          className="mt-4 grid gap-4 text-sm sm:grid-cols-3 max-w-4xl"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save();
+          }}
+        >
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-2">
+              <span className="text-muted">Cash I have now (each account or stash)</span>
+              {form.pockets.map((x, i) => (
+                <div key={i} className="flex gap-2">
+                  <input
+                    className={`${input} w-28`}
+                    value={x.name}
+                    placeholder="Where"
+                    onChange={(e) => setForm({ ...form, pockets: form.pockets.map((y, j) => (j === i ? { ...y, name: e.target.value } : y)) })}
+                  />
+                  <input
+                    inputMode="decimal"
+                    className={`${input} min-w-0 flex-1`}
+                    value={x.amount}
+                    placeholder="0.00"
+                    onChange={(e) => setForm({ ...form, pockets: form.pockets.map((y, j) => (j === i ? { ...y, amount: e.target.value } : y)) })}
+                  />
+                  {form.pockets.length > 1 && (
+                    <button
+                      type="button"
+                      className="text-muted hover:text-foreground"
+                      aria-label={`Remove ${x.name || "this"}`}
+                      onClick={() => setForm({ ...form, pockets: form.pockets.filter((_, j) => j !== i) })}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              ))}
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  className="text-muted underline hover:text-foreground"
+                  onClick={() => setForm({ ...form, pockets: [...form.pockets, { name: "", amount: "" }] })}
+                >
+                  + Add another
+                </button>
+                <span>
+                  Total{" "}
+                  <span className="font-medium">
+                    {money(form.pockets.reduce((t, x) => t + (parseAmount(x.amount) ?? 0), 0))}
+                  </span>
+                </span>
+              </div>
+            </div>
+            <label className="flex flex-col gap-1">
+              <span className="text-muted">Owed to you (e.g. supplementary cards)</span>
+              <input inputMode="decimal" className={input} value={form.owedToYou} onChange={(e) => setForm({ ...form, owedToYou: e.target.value })} />
+            </label>
+          </div>
+          {(["nab", "amex"] as const).map((k) => (
+            <div key={k} className="flex flex-col gap-3">
+              <label className="flex flex-col gap-1">
+                <span className="text-muted">{CARD_LABELS[k]}: total owed today (incl. pending)</span>
+                <input inputMode="decimal" className={input} value={form.cards[k].owed} onChange={(e) => setCard(k, { owed: e.target.value })} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-muted">{CARD_LABELS[k]}: statement still to pay (0 if paid)</span>
+                <input inputMode="decimal" className={input} value={form.cards[k].statement} onChange={(e) => setCard(k, { statement: e.target.value })} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-muted">{CARD_LABELS[k]}: statement closes on day (due 14 days later)</span>
+                <input inputMode="numeric" className={input} value={form.cards[k].closeDay} onChange={(e) => setCard(k, { closeDay: e.target.value })} />
+              </label>
+            </div>
+          ))}
+          <button type="submit" className="self-end rounded border border-rule px-4 py-2 hover:border-muted sm:col-span-3 sm:justify-self-start">
+            Save balances (as of today) and recalculate
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
+
+/** Pay − spent so far (buckets + money moved to savings + debt repayments) = remaining, as one equation. */
+function PayEquation({
+  pay,
+  payNote,
+  buckets,
+  transactions,
+  saved,
+  savingsTarget,
+  debts,
+  carried,
+  runway,
+}: {
+  pay: number;
+  payNote: string;
+  buckets: number;
+  transactions: number;
+  saved: number;
+  savingsTarget: number;
+  debts: { name: string; amount: number; planned: boolean }[];
+  carried: number;
+  /** This period only: days left to payday (incl. today), regular charges still to come, savings still to move. */
+  runway?: { days: number; bills: number; savingsToGo: number };
+}) {
+  const parts = [
+    { label: `Buckets (${transactions} purchases)`, amount: buckets },
+    { label: `Savings${savingsTarget > 0 ? ` (of ${money(savingsTarget)} planned)` : ""}`, amount: saved },
+    ...debts.map((d) => ({ label: `${d.name}${d.planned ? " (planned)" : ""}`, amount: d.amount })),
+    ...(carried > 0 ? [{ label: "Carried over from last period", amount: carried }] : []),
+  ];
+  const out = parts.reduce((a, p) => a + p.amount, 0);
+  const left = pay - out;
+  const signed = (n: number) => (n < 0 ? `−${money(-n)}` : money(n));
+  const free = runway ? left - runway.bills - runway.savingsToGo : left;
+  const perDay = runway && runway.days > 0 ? free / runway.days : null;
+  const label = "font-mono text-[10px] uppercase tracking-[0.18em] text-muted";
+  return (
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
+      {/* The headline: what can still be spent before payday, and what that is per day. */}
+      <div className="flex flex-wrap items-end gap-x-10 gap-y-4">
+        <div>
+          <div className={label}>{runway ? "Left to spend until payday" : "Remaining"}</div>
+          <div className="mt-1 text-5xl sm:text-6xl font-semibold tracking-tight tabular-nums" style={{ color: free >= 0 ? GOOD : OVER }}>
+            {signed(free)}
+          </div>
+        </div>
+        {perDay !== null && (
+          <div>
+            <div className={label}>{runway!.days} day{runway!.days === 1 ? "" : "s"} to payday</div>
+            <div className="mt-1 text-4xl sm:text-5xl font-semibold tracking-tight tabular-nums" style={{ color: perDay >= 0 ? GOOD : OVER }}>
+              {signed(perDay)}
+              <span className="text-lg font-normal text-muted"> / day</span>
+            </div>
+          </div>
+        )}
+      </div>
+      {runway && runway.bills + runway.savingsToGo > 0 && (
+        <p className="mt-2 text-sm text-muted">
+          {money(left)} left of your pay
+          {runway.bills > 0 && ` − ${money(runway.bills)} of bills still due`}
+          {runway.savingsToGo > 0 && ` − ${money(runway.savingsToGo)} savings still to move`}
+        </p>
+      )}
+      {free < 0 && <p className="mt-1 text-sm" style={{ color: OVER }}>⚠ More is committed than is left of this pay.</p>}
+
+      {/* Where the pay went, as a small statement. */}
+      <ul className="mt-5 max-w-md rounded border border-rule px-4 py-3 text-sm tabular-nums">
+        <li className="flex justify-between gap-4">
+          <span className="text-muted">Pay {payNote}</span>
+          <span style={{ color: GOOD }}>{money(pay)}</span>
+        </li>
+        {parts.map((p) => (
+          <li key={p.label} className="flex justify-between gap-4 text-muted">
+            <span>− {p.label}</span>
+            <span className="text-foreground/80">{money(p.amount)}</span>
+          </li>
+        ))}
+        <li className="mt-1 flex justify-between gap-4 border-t border-rule pt-1 font-medium">
+          <span>= Remaining of pay</span>
+          <span style={{ color: left >= 0 ? GOOD : OVER }}>{signed(left)}</span>
+        </li>
+      </ul>
+    </section>
+  );
+}
+
 function Tile({ label, value, note, warn }: { label: string; value: string; note: string; warn?: boolean }) {
   return (
     <div>
@@ -1353,8 +1958,19 @@ function BucketRow(props: {
   open: boolean;
   onToggle: () => void;
   merchants: { merchant: string; amount: number; count: number }[];
+  /** This period only: days to payday (incl. today), to spread what's left evenly. */
+  daysLeft?: number;
+  /** Regular charges in this bucket still to come before payday: counted as expected, not yet spent. */
+  predicted?: { name: string; amount: number; date: string }[];
+  /** This bucket's transactions this period, newest first (shown when the row is open). */
+  charges?: Txn[];
+  labels?: Record<string, string>;
+  onShowAll?: () => void;
 }) {
-  const { label, spent, target, pace, open, onToggle, merchants } = props;
+  const { label, spent, target, pace, open, onToggle, merchants, daysLeft } = props;
+  const predicted = props.predicted ?? [];
+  const expected = predicted.reduce((a, p) => a + p.amount, 0);
+  const afterExpected = target - spent - expected;
   const left = target - spent;
   const over = target > 0 && left < 0;
   const ratio = target > 0 ? Math.min(Math.max(spent / target, 0), 1) : 0;
@@ -1381,34 +1997,401 @@ function BucketRow(props: {
               className="absolute inset-y-0 left-0 rounded-full"
               style={{ width: `${ratio * 100}%`, background: over ? OVER : FILL }}
             />
+            {expected > 0 && !over && (
+              <div
+                className="absolute inset-y-0 rounded-full opacity-35"
+                title={`${money(expected)} expected before payday`}
+                style={{
+                  left: `${ratio * 100}%`,
+                  width: `${Math.min(expected / target, 1 - ratio) * 100}%`,
+                  background: FILL,
+                }}
+              />
+            )}
             {pace !== null && (
               <div className="absolute -inset-y-1 w-0.5 bg-muted" style={{ left: `calc(${pace * 100}% - 1px)` }} />
             )}
           </div>
         )}
+        {expected > 0 && target > 0 && (
+          <div className="mt-1.5 text-xs text-muted">
+            {money(expected)} predicted before payday ·{" "}
+            <span style={afterExpected < 0 ? { color: OVER } : undefined}>
+              {afterExpected < 0 ? `${money(-afterExpected)} short once they're paid` : `${money(afterExpected)} left once they're paid`}
+            </span>
+          </div>
+        )}
+        {daysLeft !== undefined && daysLeft > 0 && target > 0 && left > 0 && props.id !== "bills" && (
+          <div className="mt-1.5 text-xs text-muted">
+            ≈ <span className="text-foreground/90">{money(left / daysLeft)}</span> a day for {daysLeft} day{daysLeft === 1 ? "" : "s"}
+          </div>
+        )}
       </button>
-      {open && merchants.length > 0 && (
-        <ul className="mt-3 ml-1 space-y-1 text-sm text-muted">
-          {merchants.map((m) => (
-            <li key={m.merchant} className="flex justify-between gap-4">
+      {predicted.length > 0 && (
+        <ul className="mt-3 space-y-1 text-sm">
+          {predicted.map((p) => (
+            <li key={`${p.name}-${p.date}`} className="flex items-baseline justify-between gap-4 text-muted">
               <span className="truncate">
-                {m.merchant} <span className="text-xs">×{m.count}</span>
+                {p.name}{" "}
+                <span className="font-mono text-[10px] uppercase tracking-[0.12em]">· predicted · due {short(p.date)}</span>
               </span>
-              <span className="text-foreground/80 shrink-0">{money(m.amount)}</span>
+              <span className="shrink-0 tabular-nums">{money(p.amount)}</span>
             </li>
           ))}
         </ul>
+      )}
+      {open && (
+        <div className="mt-3">
+          {merchants.length > 0 && (
+            <p className="mb-2 text-xs text-muted">
+              Most: {merchants.slice(0, 3).map((m) => `${m.merchant} ${money(m.amount)}${m.count > 1 ? ` ×${m.count}` : ""}`).join(" · ")}
+            </p>
+          )}
+          <div className="mb-1 flex items-baseline justify-between text-xs text-muted">
+            <span>
+              {(props.charges ?? []).length} charge{(props.charges ?? []).length === 1 ? "" : "s"} · newest first
+            </span>
+            {props.onShowAll && (
+              <button className="underline hover:text-foreground" onClick={props.onShowAll}>
+                Edit in Transactions
+              </button>
+            )}
+          </div>
+          {(props.charges ?? []).length === 0 ? (
+            <p className="text-sm text-muted">Nothing yet this period.</p>
+          ) : (
+            <ul className="max-h-80 overflow-y-auto overscroll-contain rounded border border-rule divide-y divide-rule">
+              {(props.charges ?? []).map((t) => (
+                <li key={t.id} className="flex items-baseline gap-3 px-3 py-2 text-sm">
+                  <span className="w-12 shrink-0 font-mono text-xs text-muted">{short(t.date)}</span>
+                  <span className="min-w-0 flex-1 truncate text-foreground/90">
+                    {props.labels?.[normaliseDescription(t.description)] ?? t.description}
+                    {t.provisional && (
+                      <span className="ml-1.5 font-mono text-[10px] uppercase text-muted">· {t.via === MANUAL_VIA ? "added" : "phone"}</span>
+                    )}
+                    {t.expected && <span className="ml-1.5 font-mono text-[10px] uppercase text-muted">· expected</span>}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] uppercase text-muted">{SOURCE_LABEL[t.source] ?? t.source}</span>
+                  <span className="w-20 shrink-0 text-right tabular-nums">
+                    {t.amount < 0 ? `+${aud2.format(-t.amount)}` : aud2.format(t.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </li>
   );
 }
 
+/** Charges that come every month without a notification (e.g. a subscription on a card). */
+function RecurringSettings({
+  profile,
+  txns,
+  overrides,
+  onChange,
+}: {
+  profile: Profile;
+  txns: Txn[];
+  overrides: Record<string, string>;
+  onChange: (p: Profile) => void;
+}) {
+  const list = profile.recurring ?? [];
+  const suggestions = useMemo(() => suggestRecurring(txns, profile, overrides), [txns, profile, overrides]);
+  const set = (next: Recurring[]) => onChange({ ...profile, recurring: next });
+  const update = (id: string, patch: Partial<Recurring>) => set(list.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const newId = () => (typeof crypto.randomUUID === "function" ? crypto.randomUUID() : String(Date.now()));
+  return (
+    <div className="mt-8">
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">Regular charges</h3>
+      <p className="mt-1 text-xs text-muted">
+        For charges that never send a notification, like a subscription on your card. Each one counts on its usual day
+        until the real charge shows up (from a statement), so nothing is counted twice.
+      </p>
+      {list.map((r) => (
+        <div key={r.id} className="mt-3 grid items-end gap-3 text-sm grid-cols-2 sm:grid-cols-5">
+          <label className="col-span-2 flex flex-col gap-1">
+            <span className="text-muted">Name</span>
+            <input
+              key={r.name}
+              className="rounded border border-rule bg-background px-3 py-2"
+              defaultValue={r.name}
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v && v !== r.name) update(r.id, { name: v });
+              }}
+            />
+          </label>
+          <Field
+            label="Amount"
+            value={r.amount}
+            onChange={(v) => {
+              const n = parseAmount(v);
+              if (n !== null && n >= 0) update(r.id, { amount: n });
+            }}
+          />
+          <Field
+            label="Day of month"
+            value={r.day}
+            onChange={(v) => {
+              const n = Math.round(Number(v));
+              if (n >= 1 && n <= 31) update(r.id, { day: n });
+            }}
+          />
+          <div className="flex items-end gap-2">
+            <select
+              className="flex-1 rounded border border-rule bg-background px-2 py-2 text-xs"
+              value={toBucket(r.category)}
+              onChange={(e) => update(r.id, { category: e.target.value })}
+              aria-label={`Category for ${r.name}`}
+            >
+              {BUCKETS.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+            <button
+              className="rounded border border-rule px-3 py-2 text-muted hover:border-muted"
+              onClick={() => set(list.filter((x) => x.id !== r.id))}
+              aria-label={`Remove ${r.name}`}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      ))}
+      <button
+        className="mt-3 rounded border border-rule px-3 py-2 text-sm hover:border-muted"
+        onClick={() => set([...list, { id: newId(), name: "New charge", amount: 0, day: 1, category: "bills" }])}
+      >
+        Add a regular charge
+      </button>
+      {suggestions.length > 0 && (
+        <div className="mt-4 text-sm">
+          <p className="text-muted">Looks regular in your history:</p>
+          <ul className="mt-2 space-y-1">
+            {suggestions.map((sg) => (
+              <li key={sg.match} className="flex flex-wrap items-center gap-x-3">
+                <span className="text-foreground/90">{sg.name}</span>
+                <span className="text-muted">
+                  {money(sg.amount)} around the {sg.day}
+                  {ordinal(sg.day)} · {bucketLabel(toBucket(sg.category))}
+                </span>
+                <button className="underline text-muted hover:text-foreground" onClick={() => set([...list, { ...sg, id: newId() }])}>
+                  Add
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A category from the rules ("groceries") or a bucket id, as the bucket it counts against. */
+const toBucket = (category: string) => (BUCKETS.some((b) => b.id === category) ? category : (toAssignment(category) ?? "others"));
+
+/** Connecting the phone feed: Google Wallet, Amex, NAB, CommBank and ING notifications, sent by the Finance Feed app. */
+function PhoneSettings({
+  phone,
+  onConnect,
+  onDisconnect,
+  onDismiss,
+  onCheck,
+  log,
+  txns,
+  onRemove,
+}: {
+  phone: PhoneState;
+  log: PhoneLogEntry[];
+  txns: Txn[];
+  onRemove: (t: Txn) => void;
+  onConnect: () => Promise<string>;
+  onDisconnect: () => Promise<void>;
+  onDismiss: (id: string) => Promise<void>;
+  onCheck: () => Promise<void>;
+}) {
+  const [phoneKey, setPhoneKey] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const endpoint = typeof window === "undefined" ? "/api/finance/notify" : `${window.location.origin}/api/finance/notify`;
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await fn();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const when = (iso?: string) =>
+    iso ? new Date(iso).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
+  const copy = (text: string) => void navigator.clipboard?.writeText(text).then(() => setMsg("Copied."));
+  return (
+    <div className="mt-8">
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted">Your phone</h3>
+      <p className="mt-2 text-sm text-muted">
+        {phone.connected
+          ? `Connected${phone.connectedAt ? ` (key from ${when(phone.connectedAt)})` : ""}. Payments your phone reports appear here within a minute while this page is open.${phone.checkedAt ? ` Last checked ${when(phone.checkedAt)}${phone.filed ? `, ${phone.filed} new` : ""}.` : ""}`
+          : "Not connected. The Finance Feed app on your phone can send each payment notification (Google Wallet, Amex, NAB, CommBank, ING) here as it happens, encrypted on arrival."}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-3 text-sm">
+        <button
+          className="rounded border border-rule px-4 py-2 hover:border-muted disabled:opacity-50"
+          disabled={busy}
+          onClick={() =>
+            run(async () => {
+              if (phone.connected && !window.confirm("Make a new phone key? The current one stops working until you put the new one in the Finance Feed app.")) return;
+              setPhoneKey(await onConnect());
+            })
+          }
+        >
+          {phone.connected ? "New phone key" : "Connect your phone"}
+        </button>
+        {phone.connected && (
+          <>
+            <button className="rounded border border-rule px-4 py-2 hover:border-muted disabled:opacity-50" disabled={busy} onClick={() => run(onCheck)}>
+              Check now
+            </button>
+            <button
+              className="rounded border border-rule px-4 py-2 hover:border-muted disabled:opacity-50"
+              disabled={busy}
+              onClick={() =>
+                run(async () => {
+                  if (!window.confirm("Disconnect your phone? Its key stops working and anything waiting is deleted.")) return;
+                  await onDisconnect();
+                  setPhoneKey(null);
+                })
+              }
+            >
+              Disconnect
+            </button>
+          </>
+        )}
+      </div>
+      {phoneKey && (
+        <div className="mt-4 max-w-2xl rounded border border-rule p-4 text-sm leading-relaxed">
+          <p className="text-foreground/80">
+            In the Finance Feed app on your phone, open the Feed tab, paste this key into Phone key and tap Save. The key is
+            shown only now.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <code className="break-all font-mono text-xs select-all">{phoneKey}</code>
+            <button className="underline text-muted" onClick={() => copy(phoneKey)}>
+              Copy
+            </button>
+          </div>
+          <p className="mt-3 text-muted">
+            The app sends to {endpoint} by default. Tap Send a test in the app, then press Check now here. Anyone with this
+            key can add to your drop box (never read from it): if it leaks, press New phone key.
+          </p>
+        </div>
+      )}
+      {phone.unreadable.length > 0 && (
+        <div className="mt-4 max-w-2xl text-sm">
+          <p className="text-foreground/80">Notifications with an amount that couldn&apos;t be filed ({phone.unreadable.length}):</p>
+          <ul className="mt-2 divide-y divide-rule">
+            {phone.unreadable.map((u) => (
+              <li key={u.id} className="flex flex-wrap items-start gap-x-3 py-2">
+                <span className="flex-1 min-w-[12rem] text-muted">
+                  <span className="text-foreground/90">{u.note.title}</span> {u.note.text} <span className="text-xs">({u.note.app})</span>
+                </span>
+                <button className="underline text-muted hover:text-foreground" onClick={() => run(() => onDismiss(u.id))}>
+                  Dismiss
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {log.length > 0 && <PhoneLog log={log} txns={txns} onRemove={onRemove} when={when} />}
+      {msg && <p className="mt-3 text-sm text-foreground/80">{msg}</p>}
+    </div>
+  );
+}
+
+/** Everything the phone sent lately and what the page made of it, so a misread notification can be spotted and removed. */
+function PhoneLog({
+  log,
+  txns,
+  onRemove,
+  when,
+}: {
+  log: PhoneLogEntry[];
+  txns: Txn[];
+  onRemove: (t: Txn) => void;
+  when: (iso?: string) => string;
+}) {
+  const [show, setShow] = useState<"all" | "filed" | "skipped">("all");
+  const byId = useMemo(() => new Map(txns.map((t) => [t.id, t])), [txns]);
+  const rows = log.filter((e) => show === "all" || (show === "filed" ? e.result === "filed" : e.result !== "filed")).slice(0, 100);
+  const filed = log.filter((e) => e.result === "filed").length;
+  return (
+    <div className="mt-6 max-w-3xl text-sm">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <p className="text-foreground/80">
+          What your phone sent ({log.length}: {filed} filed, {log.length - filed} skipped)
+        </p>
+        {(["all", "filed", "skipped"] as const).map((k) => (
+          <button key={k} className={`text-xs ${show === k ? "text-foreground underline" : "text-muted hover:text-foreground"}`} onClick={() => setShow(k)}>
+            {k}
+          </button>
+        ))}
+      </div>
+      <ul className="mt-2 divide-y divide-rule">
+        {rows.map((e) => {
+          const t = e.txnId ? byId.get(e.txnId) : undefined;
+          return (
+            <li key={e.id} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2">
+              <span className="w-28 shrink-0 font-mono text-xs text-muted">{when(e.receivedAt)}</span>
+              <span className="flex-1 min-w-[12rem]">
+                <span className="text-xs text-muted">{e.app || "(no app name)"}</span>
+                <span className="block text-foreground/90">{e.title}</span>
+                <span className="block whitespace-pre-wrap break-words text-muted">{e.text}</span>
+              </span>
+              <span className="w-44 shrink-0 text-right text-xs">
+                {e.result === "filed" ? (
+                  t ? (
+                    <>
+                      <span className="text-foreground/80">
+                        Filed: {t.description} {aud2.format(Math.abs(t.amount))}
+                      </span>
+                      <button className="ml-2 underline text-muted hover:text-foreground" onClick={() => onRemove(t)}>
+                        Remove
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-muted">Filed (since replaced or removed)</span>
+                  )
+                ) : (
+                  <span className="text-muted">
+                    {e.result === "skipped" ? "Skipped" : "Couldn't read"}: {e.why}
+                  </span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function TxnList({
   rows,
+  labels,
   onAssign,
+  onRemove,
 }: {
   rows: (Txn & { assignment: string })[];
+  labels?: Record<string, string>;
   onAssign: (description: string, value: string) => void;
+  onRemove?: (t: Txn) => void;
 }) {
   if (!rows.length) return <p className="mt-4 text-sm text-muted">Nothing here.</p>;
   return (
@@ -1416,14 +2399,42 @@ function TxnList({
       {rows.slice(0, 300).map((t) => (
         <li key={t.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2">
           <span className="w-14 shrink-0 font-mono text-xs text-muted">{short(t.date)}</span>
-          <span className="flex-1 min-w-[10rem] truncate text-foreground/90">{t.description}</span>
+          <span className="flex-1 min-w-[10rem] truncate text-foreground/90">
+            {labels?.[normaliseDescription(t.description)] ? (
+              <span title={t.description}>{labels[normaliseDescription(t.description)]}</span>
+            ) : (
+              t.description
+            )}
+            {t.provisional && (
+              <span className="ml-2 font-mono text-[10px] uppercase text-muted" title={`${t.via === MANUAL_VIA ? "Added by hand" : `From your phone (${t.via ?? "notification"})`}; replaced when the statement row arrives`}>
+                · {t.via === MANUAL_VIA ? "added" : "phone"}
+              </span>
+            )}
+            {t.expected && (
+              <span className="ml-2 font-mono text-[10px] uppercase text-muted" title="A regular charge, counted on its usual day until the real one shows up">
+                · expected
+              </span>
+            )}
+          </span>
+          {t.provisional && onRemove && (
+            <button
+              className="shrink-0 text-xs text-muted hover:text-foreground"
+              onClick={() => onRemove(t)}
+              aria-label={`Remove ${t.description}`}
+              title="Remove (not a real payment)"
+            >
+              ✕
+            </button>
+          )}
           <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-muted">
             {SOURCE_LABEL[t.source] ?? t.source}
           </span>
           <span className="w-24 shrink-0 text-right tabular-nums">
             {t.amount < 0 ? `+${aud2.format(-t.amount)}` : aud2.format(t.amount)}
           </span>
-          {t.kind === "spend" ? (
+          {t.expected ? (
+            <span className="w-44 shrink-0 text-xs text-muted">{bucketLabel(t.category ?? "")}</span>
+          ) : t.kind === "spend" ? (
             <select
               className="w-44 shrink-0 rounded border border-rule bg-background px-2 py-1 text-xs"
               value={t.assignment === "uncategorised" ? "" : t.assignment}
@@ -1469,7 +2480,7 @@ function History({
     (b) => (profile.targets[b.id] ?? 0) > 0 || rows.some((r) => Math.abs(r.s.byBucket[b.id] ?? 0) > 0.005),
   );
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-8">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8">
       <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted">Month by month</h2>
       <p className="mt-1 text-xs text-muted">Tap a month to open it.</p>
       {/* Only the table scrolls sideways; the category column stays in view. */}
@@ -1571,11 +2582,14 @@ function Settings({
   onChange,
   onBackup,
   earlierThan,
+  open,
   children,
 }: {
   profile: Profile;
   onChange: (p: Profile) => void;
   onBackup: () => void;
+  /** Start expanded (on the Settings tab). */
+  open?: boolean;
   /** How many stored transactions fall before a date (for the "track from" warning). */
   earlierThan?: (date: string) => number;
   children?: ReactNode;
@@ -1586,7 +2600,7 @@ function Settings({
   };
   const plan = planFor(profile);
   return (
-    <details className="border-t border-rule px-6 sm:px-12 py-8 max-w-5xl">
+    <details open={open} className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
       <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-[0.18em] text-muted">
         Plan & settings
       </summary>
@@ -1605,6 +2619,18 @@ function Settings({
           value={profile.savingsTarget}
           onChange={(v) => onChange({ ...profile, savingsTarget: num(v) })}
         />
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted">Transfers that count as savings (comma-separated, e.g. Raiz)</span>
+          <input
+            key={(profile.savingsMatch ?? []).join(", ")}
+            className="rounded border border-rule bg-background px-3 py-2"
+            defaultValue={(profile.savingsMatch ?? []).join(", ")}
+            onBlur={(e) => {
+              const list = e.target.value.split(",").map((m) => m.trim()).filter(Boolean);
+              if (list.join(",") !== (profile.savingsMatch ?? []).join(",")) onChange({ ...profile, savingsMatch: list });
+            }}
+          />
+        </label>
         <Field
           label="Buffer (blank = one month of allowances)"
           value={profile.bufferTarget}
@@ -1763,7 +2789,7 @@ function MappingForm({
     </label>
   );
   return (
-    <section className="border-t border-rule px-6 sm:px-12 py-6 max-w-5xl text-sm">
+    <section className="border-t border-rule px-4 sm:px-12 py-6 max-w-5xl text-sm">
       <p className="text-foreground/90">
         {file.name}: I don&apos;t recognise this layout. Which columns are which?
       </p>

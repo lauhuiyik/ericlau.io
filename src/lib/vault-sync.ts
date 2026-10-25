@@ -15,13 +15,35 @@
  * applyOp itself, so every path (imports, legacy copies, replays) obeys it.
  */
 
-import { type Debt, EMPTY_PROFILE, type Profile, type Txn, mergeTxns, normaliseProfile, tracked } from "./finance";
+import { type Debt, EMPTY_PROFILE, type Profile, type Txn, mergeTxns, normaliseDescription, normaliseProfile, tracked } from "./finance";
 
-export type VaultData = { profile: Profile; overrides: Record<string, string>; txns: Txn[] };
+/** The phone feed's drop-box keys (src/lib/vault-inbox.ts): the private half exists only in here. */
+export type PhoneKeys = { privateJwk: JsonWebKey; publicJwk: JsonWebKey; connectedAt: string };
+
+/** One notification the phone sent, with what the page made of it: kept so the owner can check the feed. */
+export type PhoneLogEntry = {
+  id: string;
+  receivedAt: string;
+  app?: string;
+  title?: string;
+  text?: string;
+  result: "filed" | "skipped" | "unreadable";
+  why?: string;
+  txnId?: string;
+};
+export const PHONE_LOG_MAX = 200;
+
+export type VaultData = { profile: Profile; overrides: Record<string, string>; txns: Txn[]; phone?: PhoneKeys; phoneLog?: PhoneLogEntry[] };
 
 export type VaultOp =
   | { t: "txns"; add: Txn[] }
   | { t: "assign"; entries: Record<string, string> }
+  /** Connect (keys) or disconnect (null) the phone feed. */
+  | { t: "phone"; keys: PhoneKeys | null }
+  /** Record what the phone sent (newest kept, up to PHONE_LOG_MAX). */
+  | { t: "phoneLog"; add: PhoneLogEntry[] }
+  /** Delete transactions (a phone notification that wasn't a real payment). */
+  | { t: "remove"; ids: string[] }
   /** The settings that changed (`patch`), and what they were before (`from`, filled in by minimiseOp). */
   | { t: "profile"; patch: Partial<Profile>; from?: Partial<Profile> };
 
@@ -31,7 +53,23 @@ export const EMPTY_DATA: VaultData = { profile: EMPTY_PROFILE, overrides: {}, tx
 export type VaultPlaintext = VaultData & { schema: 1; savedAt: string };
 
 export function toPlaintext(d: VaultData, savedAt: string): VaultPlaintext {
-  return { schema: 1, savedAt, profile: d.profile, overrides: d.overrides, txns: d.txns };
+  return { schema: 1, savedAt, profile: d.profile, overrides: d.overrides, txns: d.txns, ...(d.phone ? { phone: d.phone } : {}), ...(d.phoneLog?.length ? { phoneLog: d.phoneLog } : {}) };
+}
+
+function isLogEntry(e: unknown): e is PhoneLogEntry {
+  const x = e as PhoneLogEntry;
+  return !!x && typeof x.id === "string" && typeof x.receivedAt === "string" && ["filed", "skipped", "unreadable"].includes(x.result);
+}
+
+function addToLog(log: PhoneLogEntry[], add: PhoneLogEntry[]): PhoneLogEntry[] {
+  const byId = new Map(log.map((e) => [e.id, e]));
+  for (const e of add) byId.set(e.id, e);
+  return [...byId.values()].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, PHONE_LOG_MAX);
+}
+
+function isPhoneKeys(k: unknown): k is PhoneKeys {
+  const x = k as PhoneKeys;
+  return !!x && typeof x === "object" && !!x.privateJwk && !!x.publicJwk && typeof x.connectedAt === "string";
 }
 
 export function fromPlaintext(raw: unknown): VaultData {
@@ -43,6 +81,8 @@ export function fromPlaintext(raw: unknown): VaultData {
     profile,
     overrides,
     txns: Array.isArray(p.txns) ? p.txns.filter((t): t is Txn => isTxn(t) && tracked(t, profile)) : [],
+    ...(isPhoneKeys(p.phone) ? { phone: p.phone } : {}),
+    ...(Array.isArray(p.phoneLog) ? { phoneLog: addToLog([], p.phoneLog.filter(isLogEntry)) } : {}),
   };
 }
 
@@ -136,11 +176,89 @@ function mergeProfile(cur: Profile, patch: Partial<Profile>, from?: Partial<Prof
   return out;
 }
 
+const sameMoney = (a: Txn, b: Txn) => Math.abs(a.amount - b.amount) < 0.005;
+const daysApart = (a: string, b: string) => Math.abs(Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000;
+/** A phone row's card is often unknown ("phone"); otherwise it must be the same card. */
+const sameCard = (phone: Txn, other: Txn) => phone.source === "phone" || other.source === "phone" || phone.source === other.source;
+
+/** Does a confirmed (statement or feed) row account for this phone-captured row? */
+function confirms(c: Txn, p: Txn) {
+  return !c.provisional && !c.expected && sameMoney(c, p) && daysApart(c.date, p.date) <= 3 && sameCard(p, c);
+}
+
+/** Remove the phone rows that these confirmed rows account for (each confirms at most one). */
+function settleProvisional(txns: Txn[], confirmed: Txn[]): Txn[] {
+  if (!confirmed.length || !txns.some((t) => t.provisional)) return txns;
+  const drop = new Set<string>();
+  for (const c of confirmed) {
+    const p = txns.find((t) => t.provisional && !drop.has(t.id) && confirms(c, t));
+    if (p) drop.add(p.id);
+  }
+  return drop.size ? txns.filter((t) => !drop.has(t.id)) : txns;
+}
+
+/** A phone row is already covered by a confirmed row, or by another app's notification of the same tap. */
+function covered(p: Txn, txns: Txn[]) {
+  return txns.some(
+    (t) =>
+      t.id !== p.id &&
+      (confirms(t, p) ||
+        (t.provisional &&
+          t.via !== p.via &&
+          sameMoney(t, p) &&
+          sameCard(p, t) &&
+          !!t.at &&
+          !!p.at &&
+          Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 10 * 60_000) ||
+        // The same app re-reporting one purchase within half an hour with the amount nudged by a cent or so
+        // (a pre-authorisation, then the final amount).
+        (t.provisional &&
+          t.via === p.via &&
+          sameCard(p, t) &&
+          normaliseDescription(t.description) === normaliseDescription(p.description) &&
+          Math.abs(t.amount - p.amount) > 0 &&
+          Math.abs(t.amount - p.amount) <= Math.max(0.05, Math.abs(p.amount) * 0.01) &&
+          !!t.at &&
+          !!p.at &&
+          Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 30 * 60_000)),
+  );
+}
+
+/** Phone rows that repeat an earlier phone row (filed before the repeat check existed): safe to drop. */
+export function repeatedPhoneRows(txns: Txn[]): string[] {
+  const phone = txns.filter((t) => t.provisional && t.at).sort((a, b) => a.at!.localeCompare(b.at!));
+  const kept: Txn[] = [];
+  const drop: string[] = [];
+  for (const t of phone) {
+    if (covered(t, kept)) drop.push(t.id);
+    else kept.push(t);
+  }
+  return drop;
+}
+
 export function applyOp(d: VaultData, op: VaultOp): VaultData {
   switch (op.t) {
     case "txns": {
       const add = op.add.filter((t) => tracked(t, d.profile));
-      return add.length ? { ...d, txns: mergeTxns(d.txns, add).txns } : d;
+      if (!add.length) return d;
+      // Statement (or feed) rows replace the phone-captured rows they confirm.
+      const existing = settleProvisional(d.txns, add.filter((t) => !t.provisional));
+      // Phone rows already covered (by a statement row, or by another app's notification of the same tap) are skipped.
+      const accepted: Txn[] = [];
+      for (const t of add) if (!t.provisional || !covered(t, [...existing, ...accepted])) accepted.push(t);
+      if (!accepted.length && existing === d.txns) return d;
+      return { ...d, txns: mergeTxns(existing, accepted).txns };
+    }
+    case "phone":
+      return op.keys
+        ? { ...d, phone: op.keys }
+        : { profile: d.profile, overrides: d.overrides, txns: d.txns, ...(d.phoneLog ? { phoneLog: d.phoneLog } : {}) };
+    case "phoneLog":
+      return { ...d, phoneLog: addToLog(d.phoneLog ?? [], op.add) };
+    case "remove": {
+      const ids = new Set(op.ids);
+      const txns = d.txns.filter((t) => !ids.has(t.id));
+      return txns.length === d.txns.length ? d : { ...d, txns };
     }
     case "assign":
       return { ...d, overrides: { ...d.overrides, ...op.entries } };
@@ -163,7 +281,19 @@ export function minimiseOp(d: VaultData, op: VaultOp): VaultOp | null {
     case "txns": {
       const have = new Set(d.txns.map((t) => t.id));
       const add = op.add.filter((t) => !have.has(t.id) && tracked(t, d.profile));
-      return add.length ? { t: "txns", add } : null;
+      if (!add.length) return null;
+      const real: VaultOp = { t: "txns", add };
+      return applyOp(d, real) === d ? null : real;
+    }
+    case "phone":
+      return same(op.keys ?? null, d.phone ?? null) ? null : op;
+    case "phoneLog": {
+      const add = op.add.filter((e) => !(d.phoneLog ?? []).some((x) => same(x, e)));
+      return add.length ? { t: "phoneLog", add } : null;
+    }
+    case "remove": {
+      const ids = op.ids.filter((id) => d.txns.some((t) => t.id === id));
+      return ids.length ? { t: "remove", ids } : null;
     }
     case "assign": {
       const entries = Object.fromEntries(Object.entries(op.entries).filter(([k, v]) => d.overrides[k] !== v));

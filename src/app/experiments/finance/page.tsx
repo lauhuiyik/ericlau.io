@@ -25,14 +25,15 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export default async function Page() {
+export default async function Page({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   // `next dev` has no Access in front of it; production builds never take this branch.
   if (process.env.NODE_ENV !== "development") {
     const { env } = await getCloudflareContext({ async: true });
     const gate = await requireOwner(await headers(), env);
     if (!gate.ok) return <Locked reason={gate.reason} />;
   }
-  return <FinanceApp />;
+  // ?app=1: opened inside the owner's Finance Feed phone app, which has its own navigation.
+  return <FinanceApp inApp={(await searchParams).app === "1"} />;
 }
 
 function Locked({ reason }: { reason: string }) {

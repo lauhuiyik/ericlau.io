@@ -10,13 +10,11 @@
  */
 
 export const BUCKETS = [
-  { id: "eating_out", label: "Eating out" },
+  { id: "food", label: "Food" },
+  { id: "bills", label: "Subscriptions & bills" },
   { id: "entertainment", label: "Entertainment" },
+  { id: "others", label: "Others" },
   { id: "just_because", label: "Just because" },
-  { id: "subscriptions", label: "Subscriptions" },
-  { id: "shopping", label: "Shopping" },
-  { id: "travel", label: "Travel" },
-  { id: "essentials", label: "Bills & essentials" },
 ] as const;
 
 export type Bucket = (typeof BUCKETS)[number]["id"];
@@ -28,20 +26,24 @@ export const bucketLabel = (id: string) =>
   BUCKETS.find((b) => b.id === id)?.label ?? (id === "uncategorised" ? "Uncategorised" : id);
 
 /**
- * Finer categories (used by the built-in rules and by profiles made from the
- * original spending analysis) that roll up into "Bills & essentials".
+ * Finer categories (from the built-in rules, profiles made from the original
+ * spending analysis, and the earlier seven buckets) and the bucket each rolls into.
  */
 const CATEGORY_ALIASES: Record<string, Assignment> = {
-  groceries: "essentials",
-  bills: "essentials",
-  housing: "essentials",
-  transport: "essentials",
-  personal: "essentials",
-  personal_care: "essentials",
-  health: "essentials",
-  home: "essentials",
-  fees: "essentials",
-  other: "essentials",
+  travel: "others",
+  eating_out: "food",
+  groceries: "food",
+  subscriptions: "bills",
+  housing: "bills",
+  shopping: "others",
+  essentials: "others",
+  transport: "others",
+  personal: "others",
+  personal_care: "others",
+  health: "others",
+  home: "others",
+  fees: "others",
+  other: "others",
 };
 
 export function toAssignment(category: string | undefined | null): Assignment | undefined {
@@ -62,7 +64,48 @@ export type Txn = {
   amount: number;
   cardholder?: string;
   kind: TxnKind;
+  /** Captured from a phone notification: shown at once, replaced when the statement row for it arrives. */
+  provisional?: boolean;
+  /** When it happened (ISO time), for phone-captured transactions. */
+  at?: string;
+  /** The phone app that reported it ("Google Wallet", "Amex app", …). */
+  via?: string;
+  /** A regular charge counted on its usual day because nothing reported it (see expectedCharges). */
+  expected?: boolean;
+  /** For expected charges: the bucket or category it counts against. */
+  category?: string;
 };
+
+/**
+ * A charge that comes every month but sends no notification (e.g. a
+ * subscription on a card): counted on its usual day until a real row for it
+ * turns up. `match` is the normalised statement description that confirms it.
+ */
+/** An amount as of the end of a day. */
+export type Anchor = { amount: number; asOf: string };
+/**
+ * A card as the banking app shows it on `asOf`: `amount` = everything owed (incl. pending), `statement` =
+ * the latest statement's balance still unpaid, `due` = its due date. `closeDay` (day of month the statement
+ * closes) and the 14-day payment window predict the next statement.
+ */
+export type CardAnchor = Anchor & { statement?: number; due?: string; closeDay?: number };
+
+export const CARD_DEFAULTS: Record<string, { closeDay: number }> = { nab: { closeDay: 16 }, amex: { closeDay: 1 } };
+/** Days from a statement closing to its due date (both cards: about 30-day statements, 14 days to pay). */
+export const PAYMENT_WINDOW_DAYS = 14;
+
+export type CashAnchors = {
+  /** All the cash on hand (accounts and cash), as one total. */
+  bank?: Anchor;
+  /** Where that total came from, so it's quick to update next time. */
+  pockets?: { name: string; amount: number }[];
+  /** Each card ("amex", "nab"): total owed, what's still to pay on the latest statement, and when that's due. */
+  cards?: Record<string, CardAnchor>;
+  /** Money others owe you (e.g. supplementary cardholders paying you back). */
+  owedToYou?: number;
+};
+
+export type Recurring = { id: string; name: string; amount: number; day: number; category: string; match?: string };
 
 /**
  * A debt repaid from pay. Repayments are optional: `payment` is the usual
@@ -80,7 +123,7 @@ export const debtRemaining = (d: Debt) =>
   Math.max(0, d.balance - (d.log ?? []).reduce((a, x) => a + x.amount, 0));
 
 /** What was logged for this pay period (0 = skipped), or undefined if not decided yet. */
-export const debtLogged = (d: Debt, period: Period) => d.log?.find((x) => x.period === period.start)?.amount;
+export const debtLogged = (d: Debt, period: Period) => d.log?.find((x) => x.period === (period.key ?? period.start))?.amount;
 
 /** Repayments counted against a month: what was logged, else the planned amount. */
 export function debtsForPeriod(profile: Profile, period: Period) {
@@ -94,8 +137,9 @@ export function debtsForPeriod(profile: Profile, period: Period) {
 
 /** Record (or with amount === null, clear) what was paid on a debt this period. */
 export function logDebt(d: Debt, period: Period, amount: number | null): Debt {
-  const log = (d.log ?? []).filter((x) => x.period !== period.start);
-  if (amount !== null) log.push({ period: period.start, amount: Math.max(0, amount) });
+  const key = period.key ?? period.start;
+  const log = (d.log ?? []).filter((x) => x.period !== key);
+  if (amount !== null) log.push({ period: key, amount: Math.max(0, amount) });
   return { ...d, log };
 }
 
@@ -105,6 +149,8 @@ export type Profile = {
   payAmount?: number;
   /** Set aside on payday before any spending ("pay yourself first"). */
   savingsTarget?: number;
+  /** Transfers whose description contains one of these (e.g. "RAIZ") are money saved, counted against savingsTarget. */
+  savingsMatch?: string[];
   /** Savings already put away (the starting point for the projection). */
   startingSavings?: number;
   /** One month of spending held in reserve, so each month is paid from the
@@ -118,6 +164,10 @@ export type Profile = {
   startDate?: string;
   /** Money owed, repaid from pay each month (paid outside the budget buckets). */
   debts: Debt[];
+  /** Regular charges that send no notification. */
+  recurring: Recurring[];
+  /** Balances the owner entered, as of a date; the cash position adds what happened since (see cashPosition). */
+  cash?: CashAnchors;
   /** Cardholder names whose spending counts as the owner's own. */
   ownCardholders: string[];
   /** If non-empty, rows for any other cardholder are dropped at import. */
@@ -125,6 +175,8 @@ export type Profile = {
   targets: Partial<Record<Bucket, number>>;
   /** normaliseDescription(description) -> category/bucket. */
   rules: Record<string, string>;
+  /** normaliseDescription(description) -> the name to show instead (the bank's text is kept). */
+  labels?: Record<string, string>;
 };
 
 export const EMPTY_PROFILE: Profile = {
@@ -134,6 +186,7 @@ export const EMPTY_PROFILE: Profile = {
   targets: {},
   rules: {},
   debts: [],
+  recurring: [],
 };
 
 /** Uppercase, drop digit runs and punctuation, so store numbers and receipt
@@ -151,15 +204,15 @@ export function normaliseDescription(d: string): string {
 // Order matters: the first match wins.
 const BUILTIN_RULES: [RegExp, string][] = [
   [/ANNUAL FEE|INTNL TRAN FEE|INTERNATIONAL TRANSACTION FEE|LATE (PAYMENT )?FEE|INTEREST CHARGE|CASH ADVANCE FEE/, "fees"],
-  [/NETFLIX|SPOTIFY|DISNEY|\bSTAN\b|BINGE|YOUTUBE|APPLE\.COM\/BILL|AMAZON ?PRIME|AMZNPRIME|PRIME VIDEO|SOUNDCLOUD|TIDAL|STRAVA|UBER ?ONE|OPENAI|CHATGPT|FITNESS|\bGYM\b|SNAP FITNE/, "subscriptions"],
+  [/NETFLIX|SPOTIFY|\bSTAN\b|BINGE|YOUTUBE|APPLE\.COM\/BILL|AMAZON ?PRIME|AMZNPRIME|PRIME VIDEO|SOUNDCLOUD|TIDAL|STRAVA|UBER ?ONE|OPENAI|CHATGPT|FITNESS|\bGYM\b|SNAP FITNE/, "subscriptions"],
   [/UBER ?\*? ?EATS|DOORDASH|MENULOG|MCDONALD|\bKFC\b|HUNGRY JACK|GUZMAN|NANDO|DOMINO|PIZZA|SUBWAY|GRILL'D|STARBUCKS|GLORIA JEAN|BOOST JUICE|\bCAFE\b|COFFEE|ESPRESSO|BAKERY|BAKEHOUSE|RESTAURANT|SUSHI|RAMEN|DUMPLING|BURGER/, "eating_out"],
   [/WOOLWORTHS|\bCOLES\b|\bALDI\b|\bIGA\b|HARRIS FARM|FOODWORKS|COSTCO|DAN MURPHY|\bBWS\b|LIQUORLAND|BUTCHER|GROCER/, "groceries"],
   [/QANTAS|VIRGIN AUSTRALIA|JETSTAR|AIRASIA|CATHAY|SINGAPORE AIRLINES|EMIRATES|AIRBNB|BOOKING\.COM|EXPEDIA|AGODA|HOTEL|MOTEL|KLOOK|AMEX TRAVEL|HERTZ|\bAVIS\b|THRIFTY|EUROPCAR|\bTURO\b/, "travel"],
   [/CHARGEFOX|\bEVIE\b|SUPERCHARG|AMPOL|\bBP\b|\bSHELL\b|CALTEX|LINKT|CITYLINK|EASTLINK|\bMYKI\b|\bPTV\b|\bUBER\b|DIDI|13CABS|PARKING|ORIKAN|PAYSTAY|GOGET|CAR ?WASH/, "transport"],
-  [/TELSTRA|OPTUS|VODAFONE|\bTPG\b|AUSSIE BROADBAND|AGL|ORIGIN ENERGY|ENERGYAUSTRALIA|LUMO|1ST ENERGY|RED ENERGY|ALINTA|SIMPLY ENERGY|WATER|COUNCIL|VICROADS|INSURANCE|MEDIBANK|\bBUPA\b|\bNIB\b|\bHCF\b|\bAAMI\b|\bRACV\b|BUDGET DIRECT|\bYOUI\b/, "bills"],
+  [/TELSTRA|OPTUS|VODAFONE|\bTPG\b|AUSSIE BROADBAND|LAUNTEL|YOODO|GLOBIRD|AGL|ORIGIN ENERGY|ENERGYAUSTRALIA|LUMO|1ST ENERGY|RED ENERGY|ALINTA|SIMPLY ENERGY|WATER|COUNCIL|VICROADS|INSURANCE|MEDIBANK|\bBUPA\b|\bNIB\b|\bHCF\b|\bAAMI\b|\bRACV\b|BUDGET DIRECT|\bYOUI\b/, "bills"],
   [/\bRENT\b|MORTGAGE|REAL ESTATE|STRATA|BODY CORP/, "housing"],
-  [/FLORIST|FLOWER|MICHAEL HILL|PANDORA|PROUDS|LINDT|KOKO BLACK|\bGIFT/, "just_because"],
-  [/HOYTS|CINEMA|TICKETEK|TICKETMASTER|MOSHTIX|OZTIX|ESCAPE|BOWL|KINGPIN|\bSTRIKE\b|TIMEZONE|LUNA PARK|STEAMGAMES|PLAYSTATION|NINTENDO|XBOX/, "entertainment"],
+  [/FLORIST|FLOWER|FLORAL|MICHAEL HILL|PANDORA|PROUDS|LINDT|KOKO BLACK|\bGIFT/, "just_because"],
+  [/DISNEY|HOYTS|CINEMA|TICKETEK|TICKETMASTER|MOSHTIX|OZTIX|ESCAPE|BOWL|KINGPIN|\bSTRIKE\b|TIMEZONE|LUNA PARK|STEAMGAMES|PLAYSTATION|NINTENDO|XBOX/, "entertainment"],
   [/CHEMIST|PHARMACY|PRICELINE|MEDICAL|DENTAL|PHYSIO|BARBER|\bHAIR|SALON|MASSAGE|\bSPA\b|SEPHORA|MECCA|BUNNINGS|\bIKEA\b|HARDWARE/, "personal"],
   [/AMAZON|AMZN|KMART|\bTARGET\b|BIG W|JB HI|HARVEY NORMAN|OFFICEWORKS|\bMYER\b|DAVID JONES|UNIQLO|EBAY|TEMU|SHEIN|\bREBEL\b/, "shopping"],
 ];
@@ -175,6 +228,13 @@ export function categorise(
   const fromProfile = toAssignment(profile.rules[key]);
   if (fromProfile) return fromProfile;
   const upper = txn.description.toUpperCase();
+  // A listed regular charge carries its own category.
+  for (const r of profile.recurring ?? []) {
+    if (r.match && upper.includes(r.match.toUpperCase())) {
+      const fromRecurring = toAssignment(r.category);
+      if (fromRecurring) return fromRecurring;
+    }
+  }
   for (const [re, category] of BUILTIN_RULES) if (re.test(upper)) return toAssignment(category) ?? "uncategorised";
   return "uncategorised";
 }
@@ -432,7 +492,8 @@ export function mergeTxns(existing: Txn[], incoming: Txn[]): { txns: Txn[]; adde
 // Budget periods (pay cycle)
 // ---------------------------------------------------------------------------
 
-export type Period = { start: string; end: string }; // inclusive, YYYY-MM-DD
+/** Inclusive, YYYY-MM-DD. `key` is the nominal payday start (debt logs are kept against it). */
+export type Period = { start: string; end: string; key?: string };
 
 const iso = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 const utc = (s: string) => new Date(`${s}T00:00:00Z`);
@@ -470,33 +531,92 @@ export type PeriodSummary = {
   byBucket: Record<string, number>; // includes "uncategorised"
   spent: number;
   income: number;
+  /** Moved to savings this period (transfers matching profile.savingsMatch). */
+  saved: number;
+  /** Spending on supplementary cards: not in the budget (paid back), shown separately. */
   supplementary: number;
+  supplementaryBy: Record<string, number>;
   txns: (Txn & { assignment: Assignment | "uncategorised" })[];
 };
 
+/** With `today`, regular charges due by then that nothing reported are counted too (see expectedCharges). */
 export function summarise(
   txns: Txn[],
   period: Period,
   profile: Profile,
   overrides: Record<string, string>,
+  today?: string,
 ): PeriodSummary {
   const byBucket: Record<string, number> = {};
   let spent = 0;
   let income = 0;
+  let saved = 0;
+  const savingsMatch = (profile.savingsMatch ?? []).map((m) => m.toUpperCase());
   let supplementary = 0;
+  const supplementaryBy: Record<string, number> = {};
   const rows: PeriodSummary["txns"] = [];
-  for (const t of txns) {
+  const all = today ? [...txns, ...expectedCharges(txns, period, profile, today)] : txns;
+  for (const t of all) {
     if (t.date < period.start || t.date > period.end) continue;
-    const assignment = t.kind === "spend" ? categorise(t, profile, overrides) : t.kind;
+    const assignment =
+      t.kind !== "spend" ? t.kind : t.expected ? (toAssignment(t.category) ?? "uncategorised") : categorise(t, profile, overrides);
     rows.push({ ...t, assignment: assignment as Assignment | "uncategorised" });
     if (t.kind === "income") income += -t.amount;
-    else if (t.kind === "supplementary") supplementary += t.amount;
+    else if (t.kind === "transfer" && savingsMatch.some((m) => t.description.toUpperCase().includes(m))) saved += t.amount;
+    else if (t.kind === "supplementary") {
+      supplementary += t.amount;
+      const who = t.cardholder || "Supplementary card";
+      supplementaryBy[who] = (supplementaryBy[who] ?? 0) + t.amount;
+    }
     else if (t.kind === "spend" && assignment !== "transfer" && assignment !== "ignore") {
       byBucket[assignment] = (byBucket[assignment] ?? 0) + t.amount;
       spent += t.amount;
     }
   }
-  return { byBucket, spent, income, supplementary, txns: rows };
+  return { byBucket, spent, income, saved, supplementary, supplementaryBy, txns: rows };
+}
+
+// ---------------------------------------------------------------------------
+// Pay periods that start when pay actually lands
+// ---------------------------------------------------------------------------
+
+/** How far from the usual payday a salary can land and still start that period (early before a weekend, late after a holiday). */
+const PAY_WINDOW_DAYS = 6;
+
+/** The days salary landed: money-in rows at least half the usual pay (or $500 if pay isn't set). */
+export function payDates(txns: Txn[], profile: Profile): string[] {
+  const min = Math.max(500, (profile.payAmount ?? 0) * 0.5);
+  return [...new Set(txns.filter((t) => t.kind === "income" && -t.amount >= min).map((t) => t.date))].sort();
+}
+
+const between = (a: string, b: string) => Math.round((utc(a).getTime() - utc(b).getTime()) / 86_400_000);
+
+/** When the period that nominally starts on `nominal` really starts: the day pay landed near it, else the payday. */
+function actualStart(nominal: string, pays: string[]) {
+  return pays.find((d) => Math.abs(between(d, nominal)) <= PAY_WINDOW_DAYS) ?? nominal;
+}
+
+/**
+ * The pay period containing `date`: from the day pay landed (or the payday, if no pay is recorded near it)
+ * to the day before the next one. So buckets reset when the money actually arrives.
+ */
+export function payPeriodFor(date: string, profile: Profile, pays: string[]): Period {
+  const base = periodFor(date, profile.payday);
+  for (const k of [0, 1, -1]) {
+    const nom = k === 0 ? base : shiftPeriod(base, k, profile.payday);
+    const start = actualStart(nom.start, pays);
+    const next = shiftPeriod(nom, 1, profile.payday);
+    const end = iso(new Date(utc(actualStart(next.start, pays)).getTime() - 86_400_000));
+    if (date >= start && date <= end) return { start, end, key: nom.start };
+  }
+  return { ...base, key: base.start };
+}
+
+export function shiftPayPeriod(p: Period, by: number, profile: Profile, pays: string[]): Period {
+  const nominal = periodFor(p.key ?? p.start, profile.payday);
+  const target = shiftPeriod(nominal, by, profile.payday);
+  // Day 10 of a nominal period is always inside the real one (pay moves it by at most 6 days).
+  return payPeriodFor(iso(new Date(utc(target.start).getTime() + 10 * 86_400_000)), profile, pays);
 }
 
 /** Short merchant name for grouping: the normalised description minus
@@ -565,16 +685,38 @@ export function normaliseProfile(raw: unknown): Profile {
   }
   const rules: Record<string, string> = {};
   for (const [k, v] of Object.entries(p.rules ?? {})) if (typeof v === "string") rules[normaliseDescription(k)] = v;
+  const labels: Record<string, string> = {};
+  for (const [k, v] of Object.entries(p.labels ?? {})) if (typeof v === "string" && v.trim()) labels[normaliseDescription(k)] = v.trim();
   const payday = typeof p.payday === "number" && p.payday >= 1 && p.payday <= 31 ? Math.floor(p.payday) : 15;
   return {
     payday,
     payAmount: typeof p.payAmount === "number" ? p.payAmount : undefined,
     savingsTarget: nonNegative(p.savingsTarget),
+    ...(Array.isArray(p.savingsMatch)
+      ? { savingsMatch: p.savingsMatch.filter((m): m is string => typeof m === "string" && !!m.trim()).map((m) => m.trim()) }
+      : {}),
     startingSavings: nonNegative(p.startingSavings),
     bufferTarget: nonNegative(p.bufferTarget),
     emergencyTarget: nonNegative(p.emergencyTarget),
     interestRate: nonNegative(p.interestRate),
     startDate: typeof p.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.startDate) ? p.startDate : undefined,
+    cash: normaliseCash(p.cash),
+    recurring: Array.isArray(p.recurring)
+      ? p.recurring
+          .filter(
+            (r): r is Recurring =>
+              !!r && typeof r.id === "string" && typeof r.name === "string" && typeof r.amount === "number" &&
+              typeof r.day === "number" && typeof r.category === "string",
+          )
+          .map((r) => ({
+            id: r.id,
+            name: r.name,
+            amount: Math.max(0, r.amount),
+            day: Math.min(31, Math.max(1, Math.round(r.day))),
+            category: r.category,
+            ...(typeof r.match === "string" && r.match ? { match: r.match } : {}),
+          }))
+      : [],
     debts: uniqueNames(
       Array.isArray(p.debts)
         ? p.debts
@@ -593,6 +735,7 @@ export function normaliseProfile(raw: unknown): Profile {
     allowedCardholders: strings(p.allowedCardholders),
     targets,
     rules,
+    ...(Object.keys(labels).length ? { labels } : {}),
   };
 }
 
@@ -663,6 +806,104 @@ export function project(opts: {
  * What has actually been left over (pay − debt repayments − spent) on average over the last
  * `n` finished pay periods — "if nothing changes" for the projection.
  */
+// ---------------------------------------------------------------------------
+// Regular charges that send no notification
+// ---------------------------------------------------------------------------
+
+const addDays = (date: string, n: number) => iso(new Date(utc(date).getTime() + n * 86_400_000));
+
+/** The date in `period` on day `day` of a month (a short month uses its last day), or null. */
+export function dayInPeriod(period: Period, day: number): string | null {
+  const s = utc(period.start);
+  for (const m of [0, 1]) {
+    const y = s.getUTCFullYear();
+    const mo = s.getUTCMonth() + m;
+    const last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    const d = iso(new Date(Date.UTC(y, mo, Math.min(day, last))));
+    if (d >= period.start && d <= period.end) return d;
+  }
+  return null;
+}
+
+/** Whether a real row (or a phone-captured one) accounts for a regular charge due on `date`. */
+function chargeSeen(r: Recurring, date: string, txns: Txn[]) {
+  const lo = addDays(date, -7);
+  const hi = addDays(date, 7);
+  const tolerance = Math.max(1, r.amount * 0.1);
+  return txns.some(
+    (t) =>
+      !t.expected &&
+      t.date >= lo &&
+      t.date <= hi &&
+      Math.abs(t.amount - r.amount) <= tolerance &&
+      (!r.match || t.provisional || normaliseDescription(t.description).includes(r.match)),
+  );
+}
+
+/** Regular charges due in `period` by `today` that no real row accounts for yet, as stand-in rows. */
+export function expectedCharges(txns: Txn[], period: Period, profile: Profile, today: string): Txn[] {
+  const out: Txn[] = [];
+  for (const r of profile.recurring ?? []) {
+    const date = dayInPeriod(period, r.day);
+    if (!date || date > today || !tracked({ date }, profile) || chargeSeen(r, date, txns)) continue;
+    out.push({
+      id: `expected|${r.id}|${date}`,
+      source: "expected",
+      date,
+      description: r.name,
+      amount: r.amount,
+      kind: "spend",
+      expected: true,
+      category: r.category,
+    });
+  }
+  return out;
+}
+
+/** Regular charges still to come in `period` after `today`. */
+export function upcomingCharges(period: Period, profile: Profile, today: string) {
+  return (profile.recurring ?? [])
+    .map((r) => ({ r, date: dayInPeriod(period, r.day) }))
+    .filter((x): x is { r: Recurring; date: string } => !!x.date && x.date > today)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Likely regular charges in the history: the same description in 3+ months,
+ * about once a month, at a steady amount (within 10%), not already listed.
+ */
+export function suggestRecurring(txns: Txn[], profile: Profile, overrides: Record<string, string>) {
+  const groups = new Map<string, Txn[]>();
+  for (const t of txns) {
+    if (t.kind !== "spend" || t.provisional || t.expected || t.amount <= 0) continue;
+    const k = normaliseDescription(t.description);
+    const list = groups.get(k) ?? [];
+    list.push(t);
+    groups.set(k, list);
+  }
+  const listed = new Set((profile.recurring ?? []).map((r) => r.match).filter(Boolean));
+  const out: Omit<Recurring, "id">[] = [];
+  for (const [k, list] of groups) {
+    if (listed.has(k)) continue;
+    const months = new Set(list.map((t) => t.date.slice(0, 7)));
+    if (months.size < 3 || list.length > months.size + 1) continue;
+    const amounts = list.map((t) => t.amount).sort((a, b) => a - b);
+    const median = amounts[Math.floor(amounts.length / 2)];
+    if (amounts.some((a) => Math.abs(a - median) > Math.max(1, median * 0.1))) continue;
+    const assignment = categorise(list[0], profile, overrides);
+    if (assignment === "transfer" || assignment === "ignore") continue;
+    const days = list.map((t) => Number(t.date.slice(8, 10))).sort((a, b) => a - b);
+    out.push({
+      name: merchantKey(list[0].description),
+      amount: Math.round(median * 100) / 100,
+      day: days[Math.floor(days.length / 2)],
+      category: assignment === "uncategorised" ? "bills" : assignment,
+      match: k,
+    });
+  }
+  return out.sort((a, b) => b.amount - a.amount).slice(0, 12);
+}
+
 export function recentPace(
   txns: Txn[],
   profile: Profile,
@@ -675,9 +916,190 @@ export function recentPace(
   const results: number[] = [];
   for (let i = 1; i <= n; i++) {
     const p = shiftPeriod(current, -i, profile.payday);
-    const s = summarise(txns, p, profile, overrides);
+    const s = summarise(txns, p, profile, overrides, today);
     if (!s.txns.length) continue;
     results.push((s.income > 0 ? s.income : pay) - planFor(profile).debts - s.spent);
   }
   return results.length ? results.reduce((a, b) => a + b, 0) / results.length : null;
+}
+
+// ---------------------------------------------------------------------------
+// Cash position: what's in the bank vs what's owed on the cards
+// ---------------------------------------------------------------------------
+
+const isDay = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+const anchorOf = (v: unknown): Anchor | undefined => {
+  const a = v as Anchor;
+  return a && typeof a.amount === "number" && Number.isFinite(a.amount) && isDay(a.asOf) ? { amount: a.amount, asOf: a.asOf } : undefined;
+};
+
+function normaliseCash(raw: unknown): CashAnchors | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const c = raw as CashAnchors;
+  const cards: NonNullable<CashAnchors["cards"]> = {};
+  for (const [k, v] of Object.entries(c.cards ?? {})) {
+    const a = anchorOf(v);
+    if (!a) continue;
+    const x = v as CardAnchor;
+    cards[k] = {
+      ...a,
+      ...(typeof x.statement === "number" && x.statement >= 0 ? { statement: x.statement } : {}),
+      ...(isDay(x.due) ? { due: x.due } : {}),
+      ...(typeof x.closeDay === "number" && x.closeDay >= 1 && x.closeDay <= 31 ? { closeDay: Math.round(x.closeDay) } : {}),
+    };
+  }
+  return {
+    ...(anchorOf(c.bank) ? { bank: anchorOf(c.bank) } : {}),
+    ...(Array.isArray(c.pockets)
+      ? {
+          pockets: c.pockets
+            .filter((x) => x && typeof x.name === "string" && typeof x.amount === "number" && Number.isFinite(x.amount))
+            .map((x) => ({ name: x.name.slice(0, 60), amount: x.amount })),
+        }
+      : {}),
+    cards,
+    ...(typeof c.owedToYou === "number" && c.owedToYou > 0 ? { owedToYou: c.owedToYou } : {}),
+  };
+}
+
+export const CARD_LABELS: Record<string, string> = { amex: "Amex", nab: "NAB" };
+const CARD_WORDS: Record<string, RegExp> = { nab: /\bNAB\b/i, amex: /AMERICAN EXPRESS|\bAMEX\b/i };
+
+/** The statement closing on day `day` of the month, on or before `date` (short months use their last day). */
+export function closeOnOrBefore(date: string, day: number): string {
+  const d = utc(date);
+  for (const m of [0, -1]) {
+    const y = d.getUTCFullYear();
+    const mo = d.getUTCMonth() + m;
+    const last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    const c = iso(new Date(Date.UTC(y, mo, Math.min(day, last))));
+    if (c <= date) return c;
+  }
+  return date;
+}
+const nextClose = (close: string, day: number) => closeOnOrBefore(addDays(close, 40), day);
+
+export type CardPosition = {
+  source: string;
+  owed: number; // everything owed now
+  statement: number; // latest statement still to pay (0 = paid)
+  due: string;
+  daysLeft: number;
+  overdue: boolean;
+  next: { amount: number; closes: string; due: string }; // building up for the next statement
+  asOf: string;
+  added: number;
+  repaid: number;
+};
+
+export type CashPosition = {
+  bank?: { now: number; asOf: string; moved: number };
+  cards: CardPosition[];
+  owed: number;
+  /** bank − everything owed: positive = usable, negative = short. */
+  net?: number;
+  /** Statements still to pay, in due order, with the bank balance left after each (negative = short). */
+  dues: { source: string; amount: number; due: string; daysLeft: number; overdue: boolean; bankAfter?: number }[];
+  /** Bank minus statements due (what's usable without risking interest). */
+  usable?: number;
+  owedToYou: number;
+};
+
+const daysFrom = (a: string, b: string) => Math.round((utc(b).getTime() - utc(a).getTime()) / 86_400_000);
+
+/**
+ * Bank and card balances now, from the balances entered on `asOf` plus what's recorded after:
+ * card spending (incl. supplementary, fees, phone-captured) adds to what's owed; refunds take it off;
+ * repayments (seen on the card, or as a CommBank transfer to it, whichever is larger) pay the statement
+ * first. CommBank rows move the bank balance. Paying each statement in full by its due date keeps the
+ * card interest-free; anything after the statement closed is due on the next one.
+ */
+export function cashPosition(txns: Txn[], profile: Profile, today: string): CashPosition {
+  const cash = profile.cash ?? {};
+  const cards: CardPosition[] = [];
+  for (const [source, a] of Object.entries(cash.cards ?? {})) {
+    const closeDay = a.closeDay ?? CARD_DEFAULTS[source]?.closeDay ?? 1;
+    const firstClose = closeOnOrBefore(a.asOf, closeDay);
+    // Statements as of the entered date: the latest one (what's still unpaid on it), then one per closing
+    // date since, each holding the spending from the previous close (statement periods never change).
+    const statements: { closes: string; due: string; amount: number }[] = [
+      { closes: firstClose, due: a.due ?? addDays(firstClose, PAYMENT_WINDOW_DAYS), amount: a.statement ?? a.amount },
+    ];
+    let open = a.amount - (a.statement ?? a.amount); // spending since the last close, not yet on a statement
+    let added = 0;
+    let repaidOnCard = 0;
+    let repaidFromBank = 0;
+    const events: { date: string; spend: number }[] = [];
+    for (const t of txns) {
+      if (t.date <= a.asOf || t.date > today) continue;
+      if (t.source === source) {
+        if (t.kind === "transfer") repaidOnCard += Math.abs(t.amount);
+        else if (t.kind !== "income") {
+          events.push({ date: t.date, spend: t.amount });
+          if (t.amount > 0) added += t.amount;
+        }
+      } else if (t.source === "commbank" && t.kind === "transfer" && t.amount > 0 && CARD_WORDS[source]?.test(t.description)) {
+        repaidFromBank += t.amount;
+      }
+    }
+    events.sort((x, y) => x.date.localeCompare(y.date));
+    let close = nextClose(firstClose, closeDay);
+    let k = 0;
+    while (close <= today) {
+      while (k < events.length && events[k].date <= close) open += events[k++].spend;
+      statements.push({ closes: close, due: addDays(close, PAYMENT_WINDOW_DAYS), amount: Math.max(0, open) });
+      open = 0;
+      close = nextClose(close, closeDay);
+    }
+    while (k < events.length) open += events[k++].spend;
+    // Repayments pay the oldest statement first; anything beyond comes off the next one.
+    let repaid = Math.max(repaidOnCard, repaidFromBank);
+    let left = repaid;
+    for (const st of statements) {
+      const pay = Math.min(left, st.amount);
+      st.amount = Math.round((st.amount - pay) * 100) / 100;
+      left -= pay;
+    }
+    open = Math.round((open - left) * 100) / 100;
+    repaid = Math.round(repaid * 100) / 100;
+    const unpaid = statements.filter((st) => st.amount > 0.005);
+    const current = unpaid[0] ?? statements[statements.length - 1];
+    const owed = Math.round((statements.reduce((x, st) => x + st.amount, 0) + open) * 100) / 100;
+    cards.push({
+      source,
+      owed,
+      statement: Math.round(unpaid.reduce((x, st) => x + st.amount, 0) * 100) / 100,
+      due: current.due,
+      daysLeft: daysFrom(today, current.due),
+      overdue: unpaid.some((st) => st.due < today),
+      next: { amount: Math.max(0, open), closes: close, due: addDays(close, PAYMENT_WINDOW_DAYS) },
+      asOf: a.asOf,
+      added,
+      repaid,
+    });
+  }
+  let bank: CashPosition["bank"];
+  if (cash.bank) {
+    let moved = 0;
+    for (const t of txns) if (t.source === "commbank" && t.date > cash.bank.asOf && t.date <= today) moved -= t.amount;
+    bank = { now: Math.round((cash.bank.amount + moved) * 100) / 100, asOf: cash.bank.asOf, moved };
+  }
+  const owed = cards.reduce((s, c) => s + c.owed, 0);
+  let running = bank?.now;
+  const dues = cards
+    .filter((c) => c.statement > 0.005)
+    .sort((x, y) => x.due.localeCompare(y.due))
+    .map((c) => {
+      if (running !== undefined) running -= c.statement;
+      return { source: c.source, amount: c.statement, due: c.due, daysLeft: c.daysLeft, overdue: c.overdue, bankAfter: running };
+    });
+  return {
+    bank,
+    cards,
+    owed,
+    net: bank ? bank.now - owed : undefined,
+    dues,
+    usable: running,
+    owedToYou: cash.owedToYou ?? 0,
+  };
 }

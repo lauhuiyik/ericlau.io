@@ -216,7 +216,8 @@ function covered(p: Txn, txns: Txn[]) {
           !!p.at &&
           Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 10 * 60_000) ||
         // The same app re-reporting one purchase within half an hour with the amount nudged by a cent or so
-        // (a pre-authorisation, then the final amount).
+        // (a pre-authorisation, then the final amount). Not within the same minute: that's two purchases (Amazon
+        // charged $4.94 and $4.95 a second apart, and Amex lists both).
         (t.provisional &&
           t.via === p.via &&
           sameCard(p, t) &&
@@ -225,6 +226,7 @@ function covered(p: Txn, txns: Txn[]) {
           Math.abs(t.amount - p.amount) <= Math.max(0.05, Math.abs(p.amount) * 0.01) &&
           !!t.at &&
           !!p.at &&
+          Math.abs(Date.parse(t.at) - Date.parse(p.at)) >= 60_000 &&
           Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 30 * 60_000)),
   );
 }

@@ -554,6 +554,11 @@ export function summarise(
   let income = 0;
   let saved = 0;
   const savingsMatch = (profile.savingsMatch ?? []).map((m) => m.toUpperCase());
+  // A debit from a bank account to savings ("$50.00 spent at Raiz Invest", as CommBank notifies Raiz's weekly
+  // deposit) is filed as spending; if a savings word names it, as a whole word, it's money saved instead.
+  const savingsWords = savingsMatch.map((m) => new RegExp(`\\b${m.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`));
+  const savedFromBank = (t: Txn) =>
+    t.kind === "spend" && t.amount > 0 && (t.source === "commbank" || t.source === "ing") && savingsWords.some((re) => re.test(t.description.toUpperCase()));
   let supplementary = 0;
   const supplementaryBy: Record<string, number> = {};
   const rows: PeriodSummary["txns"] = [];
@@ -565,6 +570,7 @@ export function summarise(
     rows.push({ ...t, assignment: assignment as Assignment | "uncategorised" });
     if (t.kind === "income") income += -t.amount;
     else if (t.kind === "transfer" && (t.savings || savingsMatch.some((m) => t.description.toUpperCase().includes(m)))) saved += t.amount;
+    else if (savedFromBank(t)) saved += t.amount;
     else if (t.kind === "supplementary") {
       supplementary += t.amount;
       const who = t.cardholder || "Supplementary card";

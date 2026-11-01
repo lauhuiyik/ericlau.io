@@ -42,8 +42,6 @@ const MONEY_OUT = /\b(spent|purchase[ds]?|paid|payment|debit(ed)?|charged|transa
  * screenshot (banks don't notify transfers you make). Money out of the account, counted as saved.
  */
 const SAVINGS_MOVED = /\bsavings moved\b/i;
-/** CommBank money in at least this big is treated as pay; anything smaller is money moved in. */
-const PAY_SIZED = 3000;
 /** On a card app, money in that is the owner paying the card off, not a refund. */
 const CARD_REPAYMENT = /\b(payment (received|of)|thanks? for (your|the) payment|received your payment|repayment)\b/i;
 
@@ -123,9 +121,10 @@ export function readNote(n: PhoneNote): ReadResult {
   let kind: Txn["kind"] = "spend";
   let amount = isIn ? -value : value;
   if (isIn && isCard && CARD_REPAYMENT.test(all)) kind = "transfer"; // paying the card off
-  // CommBank says "You've been paid" for pay and for any other money in (a savings withdrawal, a friend paying
-  // back). Only a pay-sized amount counts as income; smaller ones are moves that don't add to the pay.
-  else if (isIn && source === "commbank") kind = value >= PAY_SIZED ? "income" : "transfer";
+  // CommBank says "You've been paid" for pay and for any other money in (a friend's transfer, a savings
+  // withdrawal, a reimbursement), and a pay-sized amount isn't always pay (a friend's $5,000 to pass on). So
+  // money in from the phone is a move; pay is taken from the statement, or from settings until then.
+  else if (isIn && source === "commbank") kind = "transfer";
   else if (isIn && source === "ing") kind = "transfer"; // savings moved in, not a refund
   else if (!isIn && source === "ing" && /\btransfer(red)?\b/i.test(all)) kind = "transfer"; // to your own accounts
   else if (!isIn && source === "commbank" && /\b(american express|amex|nab card|credit card)\b/i.test(all)) kind = "transfer";

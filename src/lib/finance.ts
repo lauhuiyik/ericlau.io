@@ -19,7 +19,8 @@ export const BUCKETS = [
 
 export type Bucket = (typeof BUCKETS)[number]["id"];
 /** What a rule or override can assign: a budget bucket, or exclude the row. */
-export type Assignment = Bucket | "transfer" | "ignore";
+/** "separate": paid for from a separate fund the owner tops up themselves, so it stays out of the budget. */
+export type Assignment = Bucket | "transfer" | "ignore" | "separate";
 
 export const BUCKET_IDS = new Set<string>(BUCKETS.map((b) => b.id));
 export const bucketLabel = (id: string) =>
@@ -49,7 +50,7 @@ const CATEGORY_ALIASES: Record<string, Assignment> = {
 export function toAssignment(category: string | undefined | null): Assignment | undefined {
   if (!category) return undefined;
   if (BUCKET_IDS.has(category)) return category as Bucket;
-  if (category === "transfer" || category === "ignore") return category;
+  if (category === "transfer" || category === "ignore" || category === "separate") return category;
   return CATEGORY_ALIASES[category];
 }
 
@@ -535,6 +536,8 @@ export type PeriodSummary = {
   income: number;
   /** Moved to savings this period (transfers matching profile.savingsMatch). */
   saved: number;
+  /** Spending marked "Covered by separate fund": outside the budget, to be topped up from that fund. */
+  separate: number;
   /** Spending on supplementary cards: not in the budget (paid back), shown separately. */
   supplementary: number;
   supplementaryBy: Record<string, number>;
@@ -553,6 +556,7 @@ export function summarise(
   let spent = 0;
   let income = 0;
   let saved = 0;
+  let separate = 0;
   const savingsMatch = (profile.savingsMatch ?? []).map((m) => m.toUpperCase());
   // A debit from a bank account to savings ("$50.00 spent at Raiz Invest", as CommBank notifies Raiz's weekly
   // deposit) is filed as spending; if a savings word names it, as a whole word, it's money saved instead.
@@ -576,12 +580,13 @@ export function summarise(
       const who = t.cardholder || "Supplementary card";
       supplementaryBy[who] = (supplementaryBy[who] ?? 0) + t.amount;
     }
+    else if (t.kind === "spend" && assignment === "separate") separate += t.amount;
     else if (t.kind === "spend" && assignment !== "transfer" && assignment !== "ignore") {
       byBucket[assignment] = (byBucket[assignment] ?? 0) + t.amount;
       spent += t.amount;
     }
   }
-  return { byBucket, spent, income, saved, supplementary, supplementaryBy, txns: rows };
+  return { byBucket, spent, income, saved, separate, supplementary, supplementaryBy, txns: rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -899,7 +904,7 @@ export function suggestRecurring(txns: Txn[], profile: Profile, overrides: Recor
     const median = amounts[Math.floor(amounts.length / 2)];
     if (amounts.some((a) => Math.abs(a - median) > Math.max(1, median * 0.1))) continue;
     const assignment = categorise(list[0], profile, overrides);
-    if (assignment === "transfer" || assignment === "ignore") continue;
+    if (assignment === "transfer" || assignment === "ignore" || assignment === "separate") continue;
     const days = list.map((t) => Number(t.date.slice(8, 10))).sort((a, b) => a - b);
     out.push({
       name: merchantKey(list[0].description),

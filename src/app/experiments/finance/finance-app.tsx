@@ -69,6 +69,7 @@ const FILL = "#d6d3d1"; // spend so far
 const ASSIGN_OPTIONS: { id: Assignment; label: string }[] = [
   ...BUCKETS.map((b) => ({ id: b.id as Assignment, label: b.label })),
   { id: "transfer", label: "Transfer (not spending)" },
+  { id: "separate", label: "Covered by separate fund" },
   { id: "ignore", label: "Ignore" },
 ];
 const TABS = [
@@ -81,7 +82,14 @@ type Tab = (typeof TABS)[number]["id"];
 
 /** A correction file ({ "fix": … }): rows to add or remove, merchant categories, and balances. */
 type FixMatch = { source?: string; date?: string; amount?: number; description?: string };
-type FixFile = { add?: Txn[]; remove?: FixMatch[]; assign?: Record<string, string>; cash?: unknown };
+type FixFile = {
+  add?: Txn[];
+  remove?: FixMatch[];
+  assign?: Record<string, string>;
+  cash?: unknown;
+  /** Settings to change; only the savings set aside each pay for now. */
+  profile?: { savingsTarget?: number };
+};
 
 const SOURCE_LABEL: Record<string, string> = {
   amex: "Amex",
@@ -236,8 +244,10 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
             );
             if (Object.keys(assign).length) ops.push({ t: "assign", entries: assign });
             if (fix.cash) profileNow = { ...profileNow, cash: normaliseProfile({ cash: fix.cash }).cash };
+            const savingsTarget = fix.profile?.savingsTarget;
+            if (typeof savingsTarget === "number" && savingsTarget >= 0) profileNow = { ...profileNow, savingsTarget };
             messages.push(
-              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}.`,
+              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}${typeof savingsTarget === "number" ? `, savings set to ${money(savingsTarget)}` : ""}.`,
             );
           } else if (Array.isArray(data.txns)) {
             // A backup made by "Download backup". One from before "track from" was set keeps the date set here.
@@ -515,6 +525,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
             pay={pay}
             payNote={summary.income > 0 ? "received this period" : "from settings"}
             buckets={summary.spent}
+            separate={summary.separate}
             transactions={summary.txns.filter((t) => t.kind === "spend").length}
             saved={summary.saved}
             savingsTarget={plan.savings}
@@ -1863,6 +1874,7 @@ function PayEquation({
   debts,
   carried,
   runway,
+  separate = 0,
 }: {
   pay: number;
   payNote: string;
@@ -1874,6 +1886,8 @@ function PayEquation({
   carried: number;
   /** This period only: days left to payday (incl. today), regular charges still to come, savings still to move. */
   runway?: { days: number; bills: number; savingsToGo: number };
+  /** Spending covered by the separate fund (kept out of everything above). */
+  separate?: number;
 }) {
   const parts = [
     { label: `Buckets (${transactions} purchases)`, amount: buckets },
@@ -1933,6 +1947,12 @@ function PayEquation({
           <span style={{ color: left >= 0 ? GOOD : OVER }}>{signed(left)}</span>
         </li>
       </ul>
+      {separate > 0 && (
+        <p className="mt-3 max-w-md text-sm text-muted">
+          Covered by your separate fund: <span className="text-foreground/90 tabular-nums">{money(separate)}</span>. It&apos;s
+          left out of the numbers above; move that much in from the fund to cover it.
+        </p>
+      )}
     </section>
   );
 }

@@ -14,6 +14,7 @@ import {
   debtPayoff,
   debtRemaining,
   debtsForPeriod,
+  topUpFor,
   logDebt,
   freshness,
   fromMappedCsv,
@@ -87,8 +88,8 @@ type FixFile = {
   remove?: FixMatch[];
   assign?: Record<string, string>;
   cash?: unknown;
-  /** Settings to change; only the savings set aside each pay for now. */
-  profile?: { savingsTarget?: number };
+  /** Settings to change: the savings set aside each pay, and top-ups from savings by period key. */
+  profile?: { savingsTarget?: number; topUps?: Record<string, number> };
 };
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -180,6 +181,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   const fromPay = useMemo(() => {
     const today = todayIso();
     const now = payPeriodFor(today, profile, pays);
+    // A top-up from savings isn't added here: it comes out of the buffer, so an overspent period shrinks it.
     const left = (p: Period) => {
       const s = summarise(txns, p, profile, overrides, today);
       return (s.income > 0 ? s.income : (profile.payAmount ?? 0)) - debtsForPeriod(profile, p) - s.spent;
@@ -246,8 +248,10 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
             if (fix.cash) profileNow = { ...profileNow, cash: normaliseProfile({ cash: fix.cash }).cash };
             const savingsTarget = fix.profile?.savingsTarget;
             if (typeof savingsTarget === "number" && savingsTarget >= 0) profileNow = { ...profileNow, savingsTarget };
+            const topUps = normaliseProfile({ topUps: fix.profile?.topUps }).topUps;
+            if (topUps) profileNow = { ...profileNow, topUps: { ...profileNow.topUps, ...topUps } };
             messages.push(
-              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}${typeof savingsTarget === "number" ? `, savings set to ${money(savingsTarget)}` : ""}.`,
+              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}${typeof savingsTarget === "number" ? `, savings set to ${money(savingsTarget)}` : ""}${topUps ? ", top-up from savings set" : ""}.`,
             );
           } else if (Array.isArray(data.txns)) {
             // A backup made by "Download backup". One from before "track from" was set keeps the date set here.
@@ -362,7 +366,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   // Last period: did it end short (spending past pay − savings − debts), and were any repayments skipped?
   const prevPeriod = shift(period, -1);
   const prev = summarise(txns, prevPeriod, profile, overrides, todayIso());
-  const prevLeft = (prev.income > 0 ? prev.income : plan.pay) - plan.savings - debtsForPeriod(profile, prevPeriod) - prev.spent;
+  const prevLeft = (prev.income > 0 ? prev.income : plan.pay) + topUpFor(profile, prevPeriod) - plan.savings - debtsForPeriod(profile, prevPeriod) - prev.spent;
   const hasPrev = prev.txns.length > 0 && !(profile.startDate && prevPeriod.end < profile.startDate);
   const carried = hasPrev && prevLeft < 0 ? -prevLeft : 0;
   const skipped = profile.debts.filter((d) => debtLogged(d, prevPeriod) === 0 && debtRemaining(d) > 0);
@@ -524,6 +528,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
           <PayEquation
             pay={pay}
             payNote={summary.income > 0 ? "received this period" : "from settings"}
+            topUp={topUpFor(profile, period)}
             buckets={summary.spent}
             separate={summary.separate}
             transactions={summary.txns.filter((t) => t.kind === "spend").length}
@@ -712,6 +717,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
           profile={profile}
           onChange={updateProfile}
           onBackup={downloadBackup}
+          periodKey={here(todayIso()).key}
           open={txns.length > 0}
           earlierThan={(date) => txns.filter((t) => t.date < date).length}
         >
@@ -1867,6 +1873,7 @@ function CashPanel({
 function PayEquation({
   pay,
   payNote,
+  topUp = 0,
   buckets,
   transactions,
   saved,
@@ -1878,6 +1885,8 @@ function PayEquation({
 }: {
   pay: number;
   payNote: string;
+  /** Brought in from savings to cover this period. */
+  topUp?: number;
   buckets: number;
   transactions: number;
   saved: number;
@@ -1896,7 +1905,7 @@ function PayEquation({
     ...(carried > 0 ? [{ label: "Carried over from last period", amount: carried }] : []),
   ];
   const out = parts.reduce((a, p) => a + p.amount, 0);
-  const left = pay - out;
+  const left = pay + topUp - out;
   const signed = (n: number) => (n < 0 ? `−${money(-n)}` : money(n));
   const free = runway ? left - runway.bills - runway.savingsToGo : left;
   const perDay = runway && runway.days > 0 ? free / runway.days : null;
@@ -1936,6 +1945,12 @@ function PayEquation({
           <span className="text-muted">Pay {payNote}</span>
           <span style={{ color: GOOD }}>{money(pay)}</span>
         </li>
+        {topUp > 0 && (
+          <li className="flex justify-between gap-4">
+            <span className="text-muted">+ Top-up from savings</span>
+            <span style={{ color: GOOD }}>{money(topUp)}</span>
+          </li>
+        )}
         {parts.map((p) => (
           <li key={p.label} className="flex justify-between gap-4 text-muted">
             <span>− {p.label}</span>
@@ -2601,6 +2616,7 @@ function Settings({
   profile,
   onChange,
   onBackup,
+  periodKey,
   earlierThan,
   open,
   children,
@@ -2610,6 +2626,8 @@ function Settings({
   onBackup: () => void;
   /** Start expanded (on the Settings tab). */
   open?: boolean;
+  /** The current pay period's key, for its top-up from savings. */
+  periodKey?: string;
   /** How many stored transactions fall before a date (for the "track from" warning). */
   earlierThan?: (date: string) => number;
   children?: ReactNode;
@@ -2639,6 +2657,19 @@ function Settings({
           value={profile.savingsTarget}
           onChange={(v) => onChange({ ...profile, savingsTarget: num(v) })}
         />
+        {periodKey && (
+          <Field
+            label="Top-up from savings this pay period"
+            value={profile.topUps?.[periodKey]}
+            onChange={(v) => {
+              const topUps = { ...profile.topUps };
+              const n = num(v);
+              if (n) topUps[periodKey] = n;
+              else delete topUps[periodKey];
+              onChange({ ...profile, topUps });
+            }}
+          />
+        )}
         <label className="flex flex-col gap-1 text-sm">
           <span className="text-muted">Transfers that count as savings (comma-separated, e.g. Raiz)</span>
           <input

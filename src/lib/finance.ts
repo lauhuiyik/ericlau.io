@@ -129,6 +129,9 @@ export const debtRemaining = (d: Debt) =>
 export const debtLogged = (d: Debt, period: Period) => d.log?.find((x) => x.period === (period.key ?? period.start))?.amount;
 
 /** Repayments counted against a month: what was logged, else the planned amount. */
+/** What was brought in from savings to cover `period`. */
+export const topUpFor = (profile: Profile, period: Period) => profile.topUps?.[period.key ?? period.start] ?? 0;
+
 export function debtsForPeriod(profile: Profile, period: Period) {
   return profile.debts.reduce((a, d) => {
     const logged = debtLogged(d, period);
@@ -154,6 +157,8 @@ export type Profile = {
   savingsTarget?: number;
   /** Transfers whose description contains one of these (e.g. "RAIZ") are money saved, counted against savingsTarget. */
   savingsMatch?: string[];
+  /** Money brought in from savings to cover a pay period, by period key (its nominal start): it adds to that period's pay. */
+  topUps?: Record<string, number>;
   /** Savings already put away (the starting point for the projection). */
   startingSavings?: number;
   /** One month of spending held in reserve, so each month is paid from the
@@ -700,6 +705,8 @@ export function normaliseProfile(raw: unknown): Profile {
   for (const [k, v] of Object.entries(p.rules ?? {})) if (typeof v === "string") rules[normaliseDescription(k)] = v;
   const labels: Record<string, string> = {};
   for (const [k, v] of Object.entries(p.labels ?? {})) if (typeof v === "string" && v.trim()) labels[normaliseDescription(k)] = v.trim();
+  const topUps: Record<string, number> = {};
+  for (const [k, v] of Object.entries(p.topUps ?? {})) if (/^\d{4}-\d{2}-\d{2}$/.test(k) && typeof v === "number" && v > 0) topUps[k] = v;
   const payday = typeof p.payday === "number" && p.payday >= 1 && p.payday <= 31 ? Math.floor(p.payday) : 15;
   return {
     payday,
@@ -708,6 +715,7 @@ export function normaliseProfile(raw: unknown): Profile {
     ...(Array.isArray(p.savingsMatch)
       ? { savingsMatch: p.savingsMatch.filter((m): m is string => typeof m === "string" && !!m.trim()).map((m) => m.trim()) }
       : {}),
+    ...(Object.keys(topUps).length ? { topUps } : {}),
     startingSavings: nonNegative(p.startingSavings),
     bufferTarget: nonNegative(p.bufferTarget),
     emergencyTarget: nonNegative(p.emergencyTarget),

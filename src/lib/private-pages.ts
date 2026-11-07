@@ -28,7 +28,7 @@ export type PrivatePage = {
   /** Object key in ericlau-private. */
   object: string;
   /** Name of the Worker secret holding this page's password. */
-  secret: "LAU_FAMILY_PASSWORD";
+  secret: "LAU_FAMILY_PASSWORD" | "JAPAN27_PASSWORD";
 };
 
 export const PRIVATE_PAGES: Record<string, PrivatePage> = {
@@ -37,6 +37,13 @@ export const PRIVATE_PAGES: Record<string, PrivatePage> = {
     title: "The Lau family record",
     object: "lau-family/index.html",
     secret: "LAU_FAMILY_PASSWORD",
+  },
+  // A multi-file page: its own route serves every file under japan27/.
+  japan27: {
+    path: "/experiments/japan27",
+    title: "Japan Dec 2026",
+    object: "japan27/index.html",
+    secret: "JAPAN27_PASSWORD",
   },
 };
 

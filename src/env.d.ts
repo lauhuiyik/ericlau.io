@@ -13,6 +13,8 @@ declare global {
     TOOLS_PASSWORD?: string;
     /** The password for /experiments/lau-family (see src/lib/private-pages.ts). Unset = locked. */
     LAU_FAMILY_PASSWORD?: string;
+    /** The password for /experiments/japan27 (see src/lib/private-pages.ts). Unset = locked. */
+    JAPAN27_PASSWORD?: string;
   }
 }
 

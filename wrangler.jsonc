@@ -64,9 +64,9 @@
   "vars": {
     "CF_ACCESS_TEAM_DOMAIN": "ericdotlau.cloudflareaccess.com",
     "CF_ACCESS_AUD": "53e8f5be2189a70e6c3b390fd5bf69ef40c21eaec613c55413899cb3b8b8b0f5",
-    // /experiments/japan-dec2026: set to its own Access app's AUD tag if it gets
+    // /japan27: set to its own Access app's AUD tag if it gets
     // one; empty means it is covered by the shared app above (CF_ACCESS_AUD).
-    "JAPAN_DEC2026_ACCESS_AUD": ""
+    "JAPAN27_ACCESS_AUD": ""
   },
   "observability": {
     "enabled": true

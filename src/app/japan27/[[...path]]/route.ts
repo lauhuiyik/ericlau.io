@@ -2,26 +2,26 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { checkAccess } from "@/lib/cf-access";
 
 /**
- * Japan Dec 2026 trip page, behind Cloudflare Access.
+ * /japan27 — Japan Dec 2026 trip page, behind Cloudflare Access.
  *
  * Unlike /experiments/japan2026 (static files in public/, so in this public
  * repo), this trip's files live only in the private R2 bucket
- * (ericlau-private, under japan-dec2026/) and in the private repo
- * lauhuiyik/japan2026-private (branch japan-dec2026). This route serves them
+ * (ericlau-private, under japan27/) and in the private repo
+ * lauhuiyik/japan2026-private (branch japan27). This route serves them
  * only after:
  *   1. Cloudflare Access lets the request through. Its Access application
- *      must cover ericlau.io/experiments/japan-dec2026 (set in the dashboard).
+ *      must cover ericlau.io/japan27 (set in the dashboard).
  *   2. This route verifies the Access token itself (src/lib/cf-access.ts), so a
  *      dashboard slip that drops the path leaves the page locked, not public.
- * The token is checked against JAPAN_DEC2026_ACCESS_AUD if set (a separate
+ * The token is checked against JAPAN27_ACCESS_AUD if set (a separate
  * Access app), else the shared app's CF_ACCESS_AUD.
  *
  * Update the page: re-upload to R2, no site deploy needed, e.g.
- *   npx wrangler r2 object put ericlau-private/japan-dec2026/data.js --file data.js --remote
+ *   npx wrangler r2 object put ericlau-private/japan27/data.js --file data.js --remote
  */
 export const dynamic = "force-dynamic";
 
-const PREFIX = "japan-dec2026/";
+const PREFIX = "japan27/";
 
 const TYPES: Record<string, string> = {
   html: "text/html; charset=utf-8",
@@ -47,7 +47,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ path
   const { env } = await getCloudflareContext({ async: true });
   const gate = await checkAccess(request.headers, {
     CF_ACCESS_TEAM_DOMAIN: env.CF_ACCESS_TEAM_DOMAIN,
-    CF_ACCESS_AUD: env.JAPAN_DEC2026_ACCESS_AUD || env.CF_ACCESS_AUD,
+    CF_ACCESS_AUD: env.JAPAN27_ACCESS_AUD || env.CF_ACCESS_AUD,
   });
   if (!gate.ok) {
     return new Response(`Locked: ${gate.reason}.`, {

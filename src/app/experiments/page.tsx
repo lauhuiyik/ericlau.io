@@ -15,7 +15,7 @@ const entries: { slug: string; title: string; note: string; href?: string }[] = 
     slug: "japan27",
     title: "Japan Dec 2026",
     note: "A private trip page — Tokyo over Christmas & New Year, home via Shanghai. Login required.",
-    href: "/japan27",
+    href: "/experiments/japan27",
   },
   {
     slug: "japan2026",

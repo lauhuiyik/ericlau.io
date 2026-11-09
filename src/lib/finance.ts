@@ -159,6 +159,8 @@ export type Profile = {
   savingsMatch?: string[];
   /** Money brought in from savings to cover a pay period, by period key (its nominal start): it adds to that period's pay. */
   topUps?: Record<string, number>;
+  /** What can be spent each day outside bills; blank = the allowances (bar bills) spread over the period. */
+  dailyBudget?: number;
   /** Savings already put away (the starting point for the projection). */
   startingSavings?: number;
   /** One month of spending held in reserve, so each month is paid from the
@@ -716,6 +718,7 @@ export function normaliseProfile(raw: unknown): Profile {
       ? { savingsMatch: p.savingsMatch.filter((m): m is string => typeof m === "string" && !!m.trim()).map((m) => m.trim()) }
       : {}),
     ...(Object.keys(topUps).length ? { topUps } : {}),
+    dailyBudget: nonNegative(p.dailyBudget),
     startingSavings: nonNegative(p.startingSavings),
     bufferTarget: nonNegative(p.bufferTarget),
     emergencyTarget: nonNegative(p.emergencyTarget),
@@ -881,11 +884,11 @@ export function expectedCharges(txns: Txn[], period: Period, profile: Profile, t
   return out;
 }
 
-/** Regular charges still to come in `period` after `today`. */
-export function upcomingCharges(period: Period, profile: Profile, today: string) {
+/** Regular charges still to come in `period` after `today`, less any already charged early (in `txns`). */
+export function upcomingCharges(period: Period, profile: Profile, today: string, txns: Txn[] = []) {
   return (profile.recurring ?? [])
     .map((r) => ({ r, date: dayInPeriod(period, r.day) }))
-    .filter((x): x is { r: Recurring; date: string } => !!x.date && x.date > today)
+    .filter((x): x is { r: Recurring; date: string } => !!x.date && x.date > today && !chargeSeen(x.r, x.date, txns))
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 

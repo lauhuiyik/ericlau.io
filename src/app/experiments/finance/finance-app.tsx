@@ -7,6 +7,7 @@ import {
   type ColumnMapping,
   type Debt,
   type Period,
+  type PeriodSummary,
   type Profile,
   type Txn,
   bucketLabel,
@@ -89,7 +90,7 @@ type FixFile = {
   assign?: Record<string, string>;
   cash?: unknown;
   /** Settings to change: the savings set aside each pay, and top-ups from savings by period key. */
-  profile?: { savingsTarget?: number; topUps?: Record<string, number> };
+  profile?: { savingsTarget?: number; topUps?: Record<string, number>; dailyBudget?: number };
 };
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -250,8 +251,10 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
             if (typeof savingsTarget === "number" && savingsTarget >= 0) profileNow = { ...profileNow, savingsTarget };
             const topUps = normaliseProfile({ topUps: fix.profile?.topUps }).topUps;
             if (topUps) profileNow = { ...profileNow, topUps: { ...profileNow.topUps, ...topUps } };
+            const dailyBudget = fix.profile?.dailyBudget;
+            if (typeof dailyBudget === "number" && dailyBudget >= 0) profileNow = { ...profileNow, dailyBudget };
             messages.push(
-              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}${typeof savingsTarget === "number" ? `, savings set to ${money(savingsTarget)}` : ""}${topUps ? ", top-up from savings set" : ""}.`,
+              `${file.name}: ${removeIds.length} removed, ${merged.added} added, ${Object.keys(assign).length} recategorised${fix.cash ? ", balances updated" : ""}${typeof savingsTarget === "number" ? `, savings set to ${money(savingsTarget)}` : ""}${topUps ? ", top-up from savings set" : ""}${typeof dailyBudget === "number" ? `, daily budget ${money(dailyBudget)}` : ""}.`,
             );
           } else if (Array.isArray(data.txns)) {
             // A backup made by "Download backup". One from before "track from" was set keeps the date set here.
@@ -371,6 +374,25 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   const carried = hasPrev && prevLeft < 0 ? -prevLeft : 0;
   const skipped = profile.debts.filter((d) => debtLogged(d, prevPeriod) === 0 && debtRemaining(d) > 0);
   const isCurrent = progress > 0 && progress < 1;
+  const periodDebts = profile.debts
+    .map((d) => {
+      const logged = debtLogged(d, period);
+      const left = debtRemaining(d);
+      return { name: d.name, amount: logged ?? (left > 0 ? Math.min(d.payment, left) : 0), planned: logged === undefined };
+    })
+    .filter((d) => d.amount > 0);
+  const runway = isCurrent
+    ? {
+        days: Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1,
+        bills: upcomingCharges(period, profile, todayIso(), txns).reduce((a, x) => a + x.r.amount, 0),
+        savingsToGo: Math.max(0, plan.savings - summary.saved),
+      }
+    : undefined;
+  // What's left to spend each day until payday: the same sum as the headline (see PayEquation).
+  const perDayLeft = runway
+    ? (pay + topUpFor(profile, period) - summary.spent - summary.saved - periodDebts.reduce((a, d) => a + d.amount, 0) - carried -
+        runway.bills - runway.savingsToGo) / runway.days
+    : null;
   const visibleTxns = summary.txns.filter((t) =>
     focus ? t.assignment === focus : t.kind === "spend" || t.kind === "income",
   );
@@ -534,23 +556,18 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
             transactions={summary.txns.filter((t) => t.kind === "spend").length}
             saved={summary.saved}
             savingsTarget={plan.savings}
-            debts={profile.debts
-              .map((d) => {
-                const logged = debtLogged(d, period);
-                const left = debtRemaining(d);
-                return { name: d.name, amount: logged ?? (left > 0 ? Math.min(d.payment, left) : 0), planned: logged === undefined };
-              })
-              .filter((d) => d.amount > 0)}
+            debts={periodDebts}
             carried={carried}
-            runway={
-              isCurrent
-                ? {
-                    days: Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1,
-                    bills: upcomingCharges(period, profile, todayIso()).reduce((a, x) => a + x.r.amount, 0),
-                    savingsToGo: Math.max(0, plan.savings - summary.saved),
-                  }
-                : undefined
-            }
+            runway={runway}
+          />
+
+          <DailyTracker
+            period={period}
+            today={todayIso()}
+            rows={summary.txns}
+            budget={dailyBudgetFor(profile, period)}
+            perDayLeft={perDayLeft}
+            labels={profile.labels}
           />
 
           {(carried > 0 || skipped.length > 0) && (
@@ -617,7 +634,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
                   daysLeft={isCurrent ? Math.round((Date.parse(period.end) - Date.parse(todayIso())) / 86_400_000) + 1 : undefined}
                   predicted={
                     isCurrent
-                      ? upcomingCharges(period, profile, todayIso())
+                      ? upcomingCharges(period, profile, todayIso(), txns)
                           .filter(({ r }) => (toAssignment(r.category) ?? "bills") === b.id)
                           .map(({ r, date }) => ({ name: r.name, amount: r.amount, date }))
                       : []
@@ -1870,6 +1887,137 @@ function CashPanel({
 }
 
 /** Pay − spent so far (buckets + money moved to savings + debt repayments) = remaining, as one equation. */
+/** The daily allowance: the one set in Settings, else the allowances (bar bills) spread over the period's days. */
+function dailyBudgetFor(profile: Profile, period: Period) {
+  if (profile.dailyBudget !== undefined) return profile.dailyBudget;
+  const days = Math.round((Date.parse(period.end) - Date.parse(period.start)) / 86_400_000) + 1;
+  const allowances = BUCKETS.filter((b) => b.id !== "bills").reduce((a, b) => a + (profile.targets[b.id] ?? 0), 0);
+  return days > 0 ? allowances / days : 0;
+}
+
+/**
+ * Each day of the period against the daily budget: what was spent (bills and subscriptions left out, as they're
+ * planned), in red on days over budget. Tap a day for its charges.
+ */
+function DailyTracker({
+  period,
+  today,
+  rows,
+  budget,
+  perDayLeft,
+  labels,
+}: {
+  period: Period;
+  today: string;
+  rows: PeriodSummary["txns"];
+  budget: number;
+  /** This period only: what's left to spend each day until payday. */
+  perDayLeft: number | null;
+  labels?: Record<string, string>;
+}) {
+  const [picked, setPicked] = useState<string | null>(null);
+  const days: string[] = [];
+  for (let d = period.start; d <= period.end; d = new Date(Date.parse(d) + 86_400_000).toISOString().slice(0, 10)) days.push(d);
+  const daily = rows.filter((t) => t.kind === "spend" && !t.expected && BUCKETS.some((b) => b.id === t.assignment && b.id !== "bills"));
+  const spentOn = (d: string) => daily.filter((t) => t.date === d).reduce((a, t) => a + t.amount, 0);
+  const past = days.filter((d) => d <= today);
+  const spentSoFar = past.reduce((a, d) => a + spentOn(d), 0);
+  const budgetSoFar = budget * past.length;
+  const spentToday = spentOn(today);
+  const lead = (new Date(`${period.start}T00:00:00Z`).getUTCDay() + 6) % 7;
+  const label = "font-mono text-[10px] uppercase tracking-[0.18em] text-muted";
+  const shown = picked ?? (days.includes(today) ? today : null);
+  const charges = shown ? daily.filter((t) => t.date === shown).sort((x, y) => (y.at ?? "").localeCompare(x.at ?? "")) : [];
+  return (
+    <section className="border-t border-rule px-4 sm:px-12 py-6 sm:py-8 max-w-5xl">
+      <h2 className={label}>Day by day · budget {money(budget)} a day</h2>
+      <div className="mt-3 flex flex-wrap gap-x-10 gap-y-3 text-sm tabular-nums">
+        {days.includes(today) && (
+          <div>
+            <div className="text-muted">Today</div>
+            <div className="text-2xl font-semibold" style={{ color: spentToday > budget ? OVER : undefined }}>
+              {money(spentToday)} <span className="text-base font-normal text-muted">of {money(budget)}</span>
+            </div>
+          </div>
+        )}
+        {perDayLeft !== null && (
+          <div>
+            <div className="text-muted">Left each day to payday</div>
+            <div className="text-2xl font-semibold" style={{ color: perDayLeft >= budget ? GOOD : OVER }}>
+              {perDayLeft < 0 ? `−${money(-perDayLeft)}` : money(perDayLeft)}
+            </div>
+          </div>
+        )}
+        <div>
+          <div className="text-muted">
+            {past.length} day{past.length === 1 ? "" : "s"} so far
+          </div>
+          <div className="text-2xl font-semibold" style={{ color: spentSoFar > budgetSoFar ? OVER : undefined }}>
+            {money(spentSoFar)} <span className="text-base font-normal text-muted">of {money(budgetSoFar)}</span>
+          </div>
+          <div className="text-xs" style={{ color: spentSoFar > budgetSoFar ? OVER : GOOD }}>
+            {spentSoFar > budgetSoFar ? `⚠ ${money(spentSoFar - budgetSoFar)} over` : `${money(budgetSoFar - spentSoFar)} under`}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5 grid max-w-md grid-cols-7 gap-1 text-center text-[11px] tabular-nums">
+        {["M", "T", "W", "T", "F", "S", "S"].map((d, i) => (
+          <div key={i} className="text-muted">
+            {d}
+          </div>
+        ))}
+        {Array.from({ length: lead }, (_, i) => (
+          <div key={`lead${i}`} />
+        ))}
+        {days.map((d) => {
+          const future = d > today;
+          const spent = spentOn(d);
+          const over = !future && spent > budget;
+          return (
+            <button
+              key={d}
+              onClick={() => setPicked(picked === d ? null : d)}
+              className={`rounded border px-0.5 py-1 ${d === shown ? "bg-foreground/10" : ""} ${d === today ? "border-foreground" : "border-rule"}`}
+              aria-label={`${short(d)}: ${future ? "to come" : `${money(spent)} spent of ${money(budget)}`}`}
+            >
+              <div className="text-muted">{Number(d.slice(8))}</div>
+              <div className={future ? "text-muted" : over ? "" : "text-foreground/90"} style={over ? { color: OVER } : undefined}>
+                {future ? "·" : money(spent)}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {shown && (
+        <div className="mt-4 max-w-md text-sm">
+          <div className="flex justify-between gap-4">
+            <span className="text-foreground/90">{short(shown)}</span>
+            <span className="tabular-nums" style={{ color: spentOn(shown) > budget ? OVER : undefined }}>
+              {money(spentOn(shown))} of {money(budget)}
+              {spentOn(shown) > budget && ` · ⚠ ${money(spentOn(shown) - budget)} over`}
+            </span>
+          </div>
+          {charges.length > 0 ? (
+            <ul className="mt-1 text-muted">
+              {charges.map((t) => (
+                <li key={t.id} className="flex justify-between gap-4">
+                  <span className="truncate">{labels?.[normaliseDescription(t.description)] ?? t.description}</span>
+                  <span className="tabular-nums">{aud2.format(t.amount)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-1 text-muted">{shown > today ? "Still to come." : "Nothing spent."}</p>
+          )}
+        </div>
+      )}
+      <p className="mt-3 text-xs text-muted">Bills and subscriptions are left out; they&apos;re planned for separately.</p>
+    </section>
+  );
+}
+
 function PayEquation({
   pay,
   payNote,
@@ -2656,6 +2804,11 @@ function Settings({
           label="Savings, set aside first"
           value={profile.savingsTarget}
           onChange={(v) => onChange({ ...profile, savingsTarget: num(v) })}
+        />
+        <Field
+          label="Daily spending budget (blank = allowances bar bills ÷ days)"
+          value={profile.dailyBudget}
+          onChange={(v) => onChange({ ...profile, dailyBudget: num(v) })}
         />
         {periodKey && (
           <Field

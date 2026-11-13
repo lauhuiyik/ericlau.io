@@ -366,10 +366,11 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
   );
   const uncategorised = summary.txns.filter((t) => t.assignment === "uncategorised");
   const pay = summary.income > 0 ? summary.income : plan.pay;
-  // Last period: did it end short (spending past pay − savings − debts), and were any repayments skipped?
+  // Last period: did it end short (spending past pay − savings − debts), and were any repayments skipped? Savings
+  // are what actually went to savings, as its pay equation shows: money saved has left the account either way.
   const prevPeriod = shift(period, -1);
   const prev = summarise(txns, prevPeriod, profile, overrides, todayIso());
-  const prevLeft = (prev.income > 0 ? prev.income : plan.pay) + topUpFor(profile, prevPeriod) - plan.savings - debtsForPeriod(profile, prevPeriod) - prev.spent;
+  const prevLeft = (prev.income > 0 ? prev.income : plan.pay) + topUpFor(profile, prevPeriod) - prev.saved - debtsForPeriod(profile, prevPeriod) - prev.spent;
   const hasPrev = prev.txns.length > 0 && !(profile.startDate && prevPeriod.end < profile.startDate);
   const carried = hasPrev && prevLeft < 0 ? -prevLeft : 0;
   const skipped = profile.debts.filter((d) => debtLogged(d, prevPeriod) === 0 && debtRemaining(d) > 0);
@@ -668,6 +669,7 @@ export function FinanceApp({ inApp = false }: { inApp?: boolean }) {
           <CashPanel
             txns={txns}
             profile={profile}
+            overrides={overrides}
             onChange={updateProfile}
             nextPay={shift(here(todayIso()), 1).start}
             planned={debtsForPeriod(profile, shift(here(todayIso()), 1)) + plan.savings}
@@ -1635,6 +1637,7 @@ const inDays = (n: number) => (n === 0 ? "today" : n === 1 ? "tomorrow" : n < 0 
 function CashPanel({
   txns,
   profile,
+  overrides,
   onChange,
   nextPay,
   planned,
@@ -1642,13 +1645,14 @@ function CashPanel({
 }: {
   txns: Txn[];
   profile: Profile;
+  overrides: Record<string, string>;
   onChange: (p: Profile) => void;
   nextPay: string;
   planned: number;
   pay: number;
 }) {
   const today = todayIso();
-  const c = cashPosition(txns, profile, today);
+  const c = cashPosition(txns, profile, today, overrides);
   const cash = profile.cash ?? {};
   const [editing, setEditing] = useState(!cash.bank);
   const [details, setDetails] = useState(false);

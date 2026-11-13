@@ -227,6 +227,32 @@ const BUILTIN_RULES: [RegExp, string][] = [
   [/AMAZON|AMZN|KMART|\bTARGET\b|BIG W|JB HI|HARVEY NORMAN|OFFICEWORKS|\bMYER\b|DAVID JONES|UNIQLO|EBAY|TEMU|SHEIN|\bREBEL\b/, "shopping"],
 ];
 
+/** Names shorter than this don't match by prefix ("MCDONALDS" alone says nothing about which one). */
+const PREFIX_MIN = 10;
+const prefixCache = new WeakMap<Record<string, string>, Map<string, string | undefined>>();
+
+/**
+ * A rule for the same name cut short, or a longer form of it. Banks and phone alerts cut names at a fixed width,
+ * mid-word ("KINGSTON CLAY STUDI" for "KINGSTON CLAY STUDIO"), so only a cut inside a word counts: "AMAZON
+ * MARKETPLACE" isn't "AMAZON MARKETPLACE CARRIED FROM NOV", nor "VIRGIN AUSTRALIA" every Virgin flight. The
+ * longest such rule wins.
+ */
+function prefixMatch(key: string, rules: Record<string, string>): string | undefined {
+  if (key.length < PREFIX_MIN) return undefined;
+  let cache = prefixCache.get(rules);
+  if (!cache) prefixCache.set(rules, (cache = new Map()));
+  if (cache.has(key)) return cache.get(key);
+  let best: string | undefined;
+  for (const k of Object.keys(rules)) {
+    const cut = k.length > key.length ? k.startsWith(key) && k[key.length] !== " " : key.startsWith(k) && key[k.length] !== " ";
+    if (k.length < PREFIX_MIN || k === key || !cut) continue;
+    if (!best || k.length > best.length) best = k;
+  }
+  const out = best ? rules[best] : undefined;
+  cache.set(key, out);
+  return out;
+}
+
 export function categorise(
   txn: Pick<Txn, "description">,
   profile: Profile,
@@ -237,6 +263,8 @@ export function categorise(
   if (fromOverride) return fromOverride;
   const fromProfile = toAssignment(profile.rules[key]);
   if (fromProfile) return fromProfile;
+  const fromPrefix = toAssignment(prefixMatch(key, overrides) ?? prefixMatch(key, profile.rules));
+  if (fromPrefix) return fromPrefix;
   const upper = txn.description.toUpperCase();
   // A listed regular charge carries its own category.
   for (const r of profile.recurring ?? []) {
@@ -1038,7 +1066,7 @@ const daysFrom = (a: string, b: string) => Math.round((utc(b).getTime() - utc(a)
  * first. CommBank rows move the bank balance. Paying each statement in full by its due date keeps the
  * card interest-free; anything after the statement closed is due on the next one.
  */
-export function cashPosition(txns: Txn[], profile: Profile, today: string): CashPosition {
+export function cashPosition(txns: Txn[], profile: Profile, today: string, overrides: Record<string, string> = {}): CashPosition {
   const cash = profile.cash ?? {};
   const cards: CardPosition[] = [];
   for (const [source, a] of Object.entries(cash.cards ?? {})) {
@@ -1057,6 +1085,8 @@ export function cashPosition(txns: Txn[], profile: Profile, today: string): Cash
     for (const t of txns) {
       if (t.date <= a.asOf || t.date > today) continue;
       if (t.source === source) {
+        // Charges the separate fund pays off (the Japan trip) aren't what this money has to cover.
+        if (t.kind !== "transfer" && categorise(t, profile, overrides) === "separate") continue;
         if (t.kind === "transfer") repaidOnCard += Math.abs(t.amount);
         else if (t.kind !== "income") {
           events.push({ date: t.date, spend: t.amount });
@@ -1126,4 +1156,64 @@ export function cashPosition(txns: Txn[], profile: Profile, today: string): Cash
     usable: running,
     owedToYou: cash.owedToYou ?? 0,
   };
+}
+
+/** What a bank app showed on `date` (read from a screenshot by the Finance Feed app's Verify). */
+export type BalanceReading = {
+  source: string;
+  date: string;
+  /** Cards: everything owed, pending included. */
+  owed?: number;
+  /** Cards: the latest statement's balance still unpaid, if the app shows it. */
+  statement?: number;
+  /** Bank accounts: the balance. */
+  balance?: number;
+};
+
+/**
+ * The balances to keep from what the phone read. A card's anchor leaves out what the separate fund will pay
+ * off (its charges since the oldest statement still unpaid: older ones were paid with the statement), as the
+ * cash view does, and rows dated after the reading (a charge moved to next pay) that it will count when their
+ * day comes. CommBank replaces its pocket; savings accounts (ING) aren't cash on hand.
+ */
+export function cashFromReadings(
+  readings: BalanceReading[],
+  txns: Txn[],
+  profile: Profile,
+  overrides: Record<string, string>,
+): CashAnchors {
+  const cash: CashAnchors = { ...(profile.cash ?? {}), cards: { ...(profile.cash?.cards ?? {}) } };
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  for (const r of readings) {
+    if (r.owed !== undefined && (r.source === "nab" || r.source === "amex")) {
+      const was = cash.cards![r.source];
+      const closeDay = was?.closeDay ?? CARD_DEFAULTS[r.source]?.closeDay ?? 1;
+      const lastClose = closeOnOrBefore(r.date, closeDay);
+      const prevClose = closeOnOrBefore(addDays(lastClose, -1), closeDay);
+      const statement =
+        r.statement ?? cashPosition(txns, profile, r.date, overrides).cards.find((c) => c.source === r.source)?.statement ?? 0;
+      const from = statement > 0.005 ? prevClose : lastClose;
+      const separate = (lo: string, hi: string) =>
+        txns
+          .filter((t) => t.source === r.source && t.kind !== "transfer" && t.date > lo && t.date <= hi && categorise(t, profile, overrides) === "separate")
+          .reduce((a, t) => a + t.amount, 0);
+      const later = txns.filter((t) => t.source === r.source && t.kind !== "transfer" && t.date > r.date).reduce((a, t) => a + t.amount, 0);
+      cash.cards![r.source] = {
+        ...was,
+        closeDay,
+        amount: r2(Math.max(0, r.owed - separate(from, r.date) - later)),
+        statement: r2(Math.max(0, statement - (statement > 0.005 ? separate(prevClose, lastClose) : 0))),
+        asOf: r.date,
+      };
+      delete cash.cards![r.source].due;
+    } else if (r.balance !== undefined && r.source === "commbank") {
+      const pockets = [...(cash.pockets ?? [])];
+      const i = pockets.findIndex((p) => /commbank/i.test(p.name));
+      if (i >= 0) pockets[i] = { ...pockets[i], amount: r2(r.balance) };
+      else pockets.push({ name: "CommBank", amount: r2(r.balance) });
+      cash.pockets = pockets;
+      cash.bank = { amount: r2(pockets.reduce((a, p) => a + p.amount, 0)), asOf: r.date };
+    }
+  }
+  return cash;
 }

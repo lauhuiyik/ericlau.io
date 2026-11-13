@@ -16,6 +16,7 @@
  */
 
 import { type Debt, EMPTY_PROFILE, type Profile, type Txn, mergeTxns, normaliseDescription, normaliseProfile, tracked } from "./finance";
+import { MANUAL_VIA } from "./phone-feed";
 
 /** The phone feed's drop-box keys (src/lib/vault-inbox.ts): the private half exists only in here. */
 export type PhoneKeys = { privateJwk: JsonWebKey; publicJwk: JsonWebKey; connectedAt: string };
@@ -202,19 +203,28 @@ function settleProvisional(txns: Txn[], confirmed: Txn[]): { txns: Txn[]; confir
   return { txns: drop.size ? txns.filter((t) => !drop.has(t.id)) : txns, confirmed: marked };
 }
 
+/** The first letters of a name, for telling whether two apps' names for one shop agree ("McDonald's" ~ "MCDONALDS 951207"). */
+const stem = (s: string) => normaliseDescription(s).replace(/[^A-Z]/g, "").slice(0, 4);
+
+/**
+ * How far apart two apps' notifications of one tap can be. Google Wallet usually posts within seconds of the
+ * bank, but sometimes half an hour or more later (NAN YANG KOPITIAN: NAB 12:41, Google Wallet 13:14). Any name
+ * within ten minutes; the same name up to two hours apart.
+ */
+const sameTap = (t: Txn, p: Txn) => {
+  // Rows added by hand carry a made-up time (noon), so a real purchase near it isn't the same tap.
+  if (!t.at || !p.at || t.via === MANUAL_VIA || p.via === MANUAL_VIA) return false;
+  const gap = Math.abs(Date.parse(t.at) - Date.parse(p.at));
+  return gap <= 10 * 60_000 || (gap <= 2 * 3_600_000 && stem(t.description).length >= 3 && stem(t.description) === stem(p.description));
+};
+
 /** A phone row is already covered by a confirmed row, or by another app's notification of the same tap. */
 function covered(p: Txn, txns: Txn[]) {
   return txns.some(
     (t) =>
       t.id !== p.id &&
       (confirms(t, p) ||
-        (t.provisional &&
-          t.via !== p.via &&
-          sameMoney(t, p) &&
-          sameCard(p, t) &&
-          !!t.at &&
-          !!p.at &&
-          Math.abs(Date.parse(t.at) - Date.parse(p.at)) <= 10 * 60_000) ||
+        (t.provisional && t.via !== p.via && sameMoney(t, p) && sameCard(p, t) && sameTap(t, p)) ||
         // The same app re-reporting one purchase within half an hour with the amount nudged by a cent or so
         // (a pre-authorisation, then the final amount). Not within the same minute: that's two purchases (Amazon
         // charged $4.94 and $4.95 a second apart, and Amex lists both).

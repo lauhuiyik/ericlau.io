@@ -5,8 +5,8 @@ import { MAX_CT_CHARS, type VaultEnvelope, type VaultKdf, parseEnvelope } from "
 import { WrongPassphraseError, deriveKey, newKdf, open, seal } from "@/lib/vault-crypto";
 import { forgetKey, forgetKeyFor, recallKey, rememberKey } from "@/lib/vault-device";
 import { newInboxKeys, newPhoneToken, openInbox, parseInboxEnvelope, sha256Hex } from "@/lib/vault-inbox";
-import { MANUAL_VIA, PAYMENT_VIAS, type PhoneNote, readNote } from "@/lib/phone-feed";
-import type { Txn } from "@/lib/finance";
+import { MANUAL_VIA, PAYMENT_VIAS, type PhoneNote, readNote, readVerifyNote } from "@/lib/phone-feed";
+import { type BalanceReading, type Txn, cashFromReadings } from "@/lib/finance";
 import {
   EMPTY_DATA,
   type PhoneLogEntry,
@@ -412,7 +412,7 @@ function createVault(ui: Setters) {
         for (const e of data.phoneLog ?? []) {
           const old = e.result === "filed" && e.txnId ? byId.get(e.txnId) : undefined;
           if (!old?.provisional) continue;
-          const res = readNote({ app: e.app, title: e.title, text: e.text, receivedAt: e.receivedAt, postedAt: old.at });
+          const res = readNote({ app: e.app, title: e.title, text: e.text, receivedAt: e.receivedAt, postedAt: old.at }, { payAmount: data.profile.payAmount });
           if (res.kind === "txn") {
             const now = res.txn;
             if (now.amount === old.amount && now.kind === old.kind && now.source === old.source && now.description === old.description) continue;
@@ -442,6 +442,7 @@ function createVault(ui: Setters) {
         const done: string[] = [];
         const unreadable: PhoneState["unreadable"] = [];
         const log: PhoneLogEntry[] = [];
+        const readings: BalanceReading[] = [];
         for (const e of entries) {
           const env = parseInboxEnvelope(e.envelope);
           let note: PhoneNote | null = null;
@@ -456,7 +457,33 @@ function createVault(ui: Setters) {
             done.push(e.id);
             continue;
           }
-          const res = readNote(note);
+          // Verify's corrections: balances it read, and phone rows the bank doesn't list.
+          const verify = readVerifyNote(note);
+          if (verify) {
+            let why: string;
+            if (verify.kind === "balances") {
+              readings.push(...verify.readings);
+              why = `balances from Verify (${verify.readings.map((r) => r.source).join(", ") || "none read"})`;
+            } else {
+              const ids = data.txns
+                .filter(
+                  (t) =>
+                    t.provisional &&
+                    t.via !== MANUAL_VIA &&
+                    (t.source === verify.source || t.source === "phone") &&
+                    Math.abs(t.amount - verify.amount) < 0.005 &&
+                    !!t.at &&
+                    Math.abs(Date.parse(t.at) - verify.at) <= 2_000,
+                )
+                .map((t) => t.id);
+              if (ids.length) applyEdits({ t: "remove", ids });
+              why = ids.length ? `removed by Verify: ${verify.merchant ?? ""} ${verify.amount.toFixed(2)}` : "Verify asked to remove a row that's already gone";
+            }
+            log.push({ id: e.id, receivedAt: note.receivedAt, app: note.app, title: note.title, text: note.text, result: "skipped", why });
+            done.push(e.id);
+            continue;
+          }
+          const res = readNote(note, { payAmount: data.profile.payAmount });
           log.push({
             id: e.id,
             receivedAt: note.receivedAt,
@@ -474,6 +501,8 @@ function createVault(ui: Setters) {
           else unreadable.push({ id: e.id, note, why: res.why });
         }
         if (add.length) applyEdits({ t: "txns", add });
+        // Balances last, so payments in the same batch are already filed when the separate fund's share is taken out.
+        if (readings.length) applyEdits({ t: "profile", patch: { cash: cashFromReadings(readings, data.txns, data.profile, data.overrides) } });
         if (log.length) applyEdits({ t: "phoneLog", add: log });
         await flush();
         const saved = !pending.length && !lastSaveFailed;

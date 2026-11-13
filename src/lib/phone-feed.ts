@@ -8,7 +8,7 @@
  * for the owner to look at rather than dropped.
  */
 
-import { type Txn, normaliseDescription } from "./finance";
+import { type BalanceReading, type Txn, normaliseDescription } from "./finance";
 
 export type PhoneNote = { app?: string; title?: string; text?: string; postedAt?: string; receivedAt: string };
 
@@ -87,7 +87,8 @@ function merchantOf(title: string, text: string): string {
   return cleanMerchant(text.replace(MONEY_OUT, " ").replace(MONEY_IN, " "));
 }
 
-export function readNote(n: PhoneNote): ReadResult {
+/** `payAmount`: the usual pay. Money into CommBank within 1% of it is pay (see below). */
+export function readNote(n: PhoneNote, opts: { payAmount?: number } = {}): ReadResult {
   const title = (n.title ?? "").trim();
   const text = (n.text ?? "").trim();
   const all = `${title}\n${text}`;
@@ -124,6 +125,8 @@ export function readNote(n: PhoneNote): ReadResult {
   // CommBank says "You've been paid" for pay and for any other money in (a friend's transfer, a savings
   // withdrawal, a reimbursement), and a pay-sized amount isn't always pay (a friend's $5,000 to pass on). So
   // money in from the phone is a move; pay is taken from the statement, or from settings until then.
+  // The one exception: within 1% of the usual pay is pay (a friend's money is rarely that close to the cent).
+  else if (isIn && source === "commbank" && opts.payAmount && Math.abs(value - opts.payAmount) <= opts.payAmount * 0.01) kind = "income";
   else if (isIn && source === "commbank") kind = "transfer";
   else if (isIn && source === "ing") kind = "transfer"; // savings moved in, not a refund
   else if (!isIn && source === "ing" && /\btransfer(red)?\b/i.test(all)) kind = "transfer"; // to your own accounts
@@ -139,7 +142,7 @@ export function readNote(n: PhoneNote): ReadResult {
 
   // Money in with nobody named ("You've been paid $631.04 into your account") is still worth filing.
   const namesNobody = /\byou('ve| have) been paid\b/i.test(all) && !/\bfrom\b/i.test(all);
-  const merchant = (namesNobody ? "" : merchantOf(title, text)) || (isIn ? `Money in (${via})` : "");
+  const merchant = (namesNobody ? "" : merchantOf(title, text)) || (kind === "income" ? "Pay" : isIn ? `Money in (${via})` : "");
   if (!merchant) return { kind: "unreadable", why: "no merchant" };
 
   const when = whenOf(n);
@@ -161,6 +164,42 @@ export function readNote(n: PhoneNote): ReadResult {
       ...(savings ? { savings: true } : {}),
     },
   };
+}
+
+/**
+ * Corrections from the Finance Feed app's Verify (it compared bank screenshots with what it sent), as notes:
+ * - "Balances (Verify)": one line per account, `nab|2026-11-13|owed=4273.94|statement=0`, `commbank|2026-11-13|balance=11630.08`.
+ * - "Remove (Verify)": a phone row the bank doesn't list (a declined charge, a reversed hold, a repeat), named by
+ *   when the phone saw it and the amount: `source=nab`, `at=<epoch ms>`, `amount=32.00`, `date=…`, `merchant=…`.
+ * Anything else (including a payment Verify adds, which reads like a bank alert) is null.
+ */
+export type VerifyNote =
+  | { kind: "balances"; readings: BalanceReading[] }
+  | { kind: "remove"; source: string; at: number; amount: number; date?: string; merchant?: string };
+
+export function readVerifyNote(n: PhoneNote): VerifyNote | null {
+  const title = (n.title ?? "").trim().toLowerCase();
+  const lines = (n.text ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const num = (v: string | undefined) => (v !== undefined && /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : undefined);
+  if (title.startsWith("balances (verify)")) {
+    const readings: BalanceReading[] = [];
+    for (const l of lines) {
+      const [source, date, ...kv] = l.split("|").map((x) => x.trim());
+      if (!/^(nab|amex|commbank|ing)$/.test(source ?? "") || !/^\d{4}-\d{2}-\d{2}$/.test(date ?? "")) continue;
+      const f = Object.fromEntries(kv.map((x) => x.split("=").map((y) => y.trim())));
+      const r: BalanceReading = { source, date, owed: num(f.owed), statement: num(f.statement), balance: num(f.balance) };
+      if (r.owed !== undefined || r.balance !== undefined) readings.push(r);
+    }
+    return { kind: "balances", readings };
+  }
+  if (title.startsWith("remove (verify)")) {
+    const f = Object.fromEntries(lines.map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1).trim()]));
+    const at = num(f.at);
+    const amount = num(f.amount);
+    if (!f.source || at === undefined || amount === undefined) return null;
+    return { kind: "remove", source: f.source, at, amount, date: f.date, merchant: f.merchant };
+  }
+  return null;
 }
 
 /**
